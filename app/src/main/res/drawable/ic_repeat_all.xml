@@ -1,0 +1,17 @@
+<!--
+    "Repeat all" icon (looping arrows, no badge). Used by NowPlayingScreen.kt / MiniPlayer.kt
+    for the repeat-mode toggle button when repeat mode = REPEAT_ALL. Sibling icons:
+    ic_repeat_off.xml (no loop) and ic_repeat_one.xml (loop, with a "1" badge).
+    android:tint is overridden at runtime by Compose's Icon(tint = ...); the fillColor
+    below only matters as a fallback when tint is not applied.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M7,7h10v3l4,-4l-4,-4v3L5,5v6h2L7,7zM17,17H7v-3l-4,4l4,4v-3h12v-6h-2v4z" />
+</vector>

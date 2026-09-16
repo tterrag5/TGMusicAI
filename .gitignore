@@ -1,0 +1,24 @@
+# Gradle / Build
+.gradle/
+build/
+app/build/
+/captures
+.externalNativeBuild
+.cxx
+
+# IDE & Editor
+*.iml
+.idea/
+.kotlin/
+.DS_Store
+
+# Local properties & secrets
+local.properties
+
+# AI Agents & IDE Workspace Cache
+.agent/
+.agents/
+.artifacts/
+.claude/
+.serena/
+skills-lock.json

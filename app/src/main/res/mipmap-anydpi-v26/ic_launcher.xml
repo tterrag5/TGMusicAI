@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Square-shaped adaptive launcher icon (API 26+). Stacks background (red square) +
+    foreground (white triangle); "monochrome" is the single-color version Android uses
+    for themed icons (Material You). See ic_launcher_round.xml for the round-mask variant
+    (identical layers — the OS applies the mask shape).
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

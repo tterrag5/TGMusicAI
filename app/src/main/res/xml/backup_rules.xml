@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   Sample backup rules file; uncomment and customize as necessary.
+   See https://developer.android.com/guide/topics/data/autobackup
+   for details.
+   Note: This file is ignored for devices older than API 31
+   See https://developer.android.com/about/versions/12/backup-restore
+
+   Currently empty/unused: no include/exclude rules are active, so Android's default
+   Auto Backup behavior applies (nearly everything in app-private storage, including
+   the Room database file, gets backed up to the user's Google Drive account).
+   Referenced from AndroidManifest.xml via android:fullBackupContent.
+-->
+<full-backup-content>
+    <!--
+   <include domain="sharedpref" path="."/>
+   <exclude domain="sharedpref" path="device.xml"/>
+-->
+</full-backup-content>

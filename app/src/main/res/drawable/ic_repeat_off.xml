@@ -1,0 +1,19 @@
+<!--
+    "Repeat off" icon: dimmed loop-arrows (fillColor alpha 0x66 = faded) plus a diagonal
+    strike-through slash (second path below), giving the classic "disabled" look.
+    Used by NowPlayingScreen.kt / MiniPlayer.kt for repeat mode = OFF; siblings are
+    ic_repeat_all.xml and ic_repeat_one.xml (both full-opacity, no slash).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#66000000"
+        android:pathData="M7,7h10v3l4,-4l-4,-4v3L5,5v6h2L7,7zM17,17H7v-3l-4,4l4,4v-3h12v-6h-2v4z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M3.27,2L2,3.27l4.28,4.28C6.11,7.81 6,8.15 6,8.5v3.5h2V9.83l9.02,9.02C16.85,18.94 16.5,19 16.5,19H4v-6H2v6c0,1.1 0.9,2 2,2h12.5c0.65,0 1.24,-0.19 1.75,-0.5L20.73,22 22,20.73 3.27,2z" />
+</vector>

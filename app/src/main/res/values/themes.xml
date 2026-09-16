@@ -1,0 +1,12 @@
+<!--
+    Legacy XML theme, required by the Android manifest as the app's base android:theme
+    but otherwise inert: it only controls the brief splash frame before Compose takes
+    over. It does NOT control in-app colors/typography — that's ui/theme/Theme.kt.
+-->
+<resources>
+
+    <!-- Referenced from AndroidManifest.xml as android:theme. Plain Material Components
+         light theme; Compose's own MaterialTheme (ui/theme/Theme.kt) overrides it at
+         runtime for every actual screen. -->
+    <style name="Theme.TGMusicAI" parent="Theme.MaterialComponents.Light" />
+</resources>

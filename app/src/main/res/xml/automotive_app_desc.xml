@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Declares this app as an Android Auto media app. Referenced from AndroidManifest.xml
+    via a <meta-data android:name="com.google.android.gms.car.application"> tag pointing
+    at this file. Required for the car head unit to show TGMusic as a playable media
+    source; the actual car-facing playback controls come from PlaybackService.kt
+    (MediaLibraryService / MediaSession), not from anything in this XML.
+-->
+<automotiveApp>
+    <!-- "media" = this app exposes a MediaBrowserService-style media source. -->
+    <uses name="media"/>
+</automotiveApp>

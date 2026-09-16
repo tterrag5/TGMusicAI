@@ -1,0 +1,9 @@
+<!--
+    App-level strings visible outside Compose (launcher label, manifest labels).
+    All in-screen text (buttons, labels, dialogs) is hardcoded directly in the
+    Compose files under ui/screens/ and ui/components/, NOT pulled from here.
+-->
+<resources>
+    <!-- Shown under the home-screen launcher icon and as the default app title. -->
+    <string name="app_name">TGMusic</string>
+</resources>
