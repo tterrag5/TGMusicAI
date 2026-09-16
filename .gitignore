@@ -22,3 +22,6 @@ local.properties
 .claude/
 .serena/
 skills-lock.json
+
+# Internal Documentation / Working Notes
+MD Files/
