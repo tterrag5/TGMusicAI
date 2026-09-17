@@ -128,6 +128,26 @@ fun getSoftColorScheme(themeName: String): ColorScheme {
     }
 }
 
+private const val CHART_HUE_STEP = 0.618033988749895f * 360f
+
+/**
+ * Generates [count] perceptually distinct, vibrant colors for pie/donut charts and multi-item
+ * bars. Steps hue by the golden-ratio conjugate instead of cycling fixed ColorScheme roles, so
+ * two slices never collide even when a theme maps two roles (e.g. primary/secondary) to the
+ * same hue, as every [AppTheme] here does.
+ */
+fun generateDistinctChartPalette(count: Int, isDarkTheme: Boolean = true): List<Color> {
+    if (count <= 0) return emptyList()
+    val saturation = if (isDarkTheme) 0.80f else 0.70f
+    val lightness = if (isDarkTheme) 0.62f else 0.45f
+    var hue = 20f
+    return List(count) {
+        val color = Color.hsl(hue = hue, saturation = saturation, lightness = lightness)
+        hue = (hue + CHART_HUE_STEP) % 360f
+        color
+    }
+}
+
 @Composable
 fun TGMusicAITheme(
     themeName: String = "YT_DARK",

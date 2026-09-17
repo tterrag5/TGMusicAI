@@ -123,6 +123,18 @@ class StatsViewModel(
         }
     }
 
+    /**
+     * Deletes a downloaded song's local file to free space, keeping it in the library and every
+     * playlist so it can still stream from YouTube. Refuses (in [MusicRepository]) if the song
+     * has no cloud fallback. Refreshes the storage overview afterward so freed space shows up.
+     */
+    fun removeDownload(songId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.removeDownloadKeepInPlaylist(songId)
+            refreshStorageOverview()
+        }
+    }
+
     private fun songFileSizeBytes(song: Song): Long {
         if (!song.isDownloaded) return 0L
         val path = when {

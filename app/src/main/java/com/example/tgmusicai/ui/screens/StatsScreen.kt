@@ -2,6 +2,7 @@ package com.example.tgmusicai.ui.screens
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,23 +26,27 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.BarChart
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -49,6 +54,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -60,17 +66,23 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.tgmusicai.data.repository.ArtistPlayStats
 import com.example.tgmusicai.data.repository.DailyListeningData
 import com.example.tgmusicai.data.repository.ProducerStat
 import com.example.tgmusicai.data.repository.SongWithStats
+import com.example.tgmusicai.ui.theme.generateDistinctChartPalette
 import com.example.tgmusicai.ui.util.FormatUtils
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
 import com.example.tgmusicai.ui.viewmodel.PlaylistStorageInfo
@@ -146,7 +158,8 @@ fun StatsScreen(
             } else {
                 StorageStatsTab(
                     overview = storageOverview,
-                    isLoading = isLoadingStorage
+                    isLoading = isLoadingStorage,
+                    onRemoveDownload = statsViewModel::removeDownload
                 )
             }
         }
@@ -165,7 +178,11 @@ private fun ListeningStatsTab(
 ) {
     if (mostPlayed.isEmpty()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            WrappedHeroSummaryCard(totalListenTimeMs = totalListenTimeMs, totalPlays = totalPlays)
+            WrappedHeroSummaryCard(
+                totalListenTimeMs = totalListenTimeMs,
+                totalPlays = totalPlays,
+                weeklyTrend = weeklyTrend
+            )
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -196,7 +213,11 @@ private fun ListeningStatsTab(
         contentPadding = PaddingValues(bottom = 80.dp)
     ) {
         item {
-            WrappedHeroSummaryCard(totalListenTimeMs = totalListenTimeMs, totalPlays = totalPlays)
+            WrappedHeroSummaryCard(
+                totalListenTimeMs = totalListenTimeMs,
+                totalPlays = totalPlays,
+                weeklyTrend = weeklyTrend
+            )
         }
 
         if (weeklyTrend.any { it.minutes > 0 }) {
@@ -262,19 +283,32 @@ private fun SectionHeader(title: String) {
     )
 }
 
-/** Hero card: total listening time (h/m), total plays, and a rough daily average over the trailing week. */
+/**
+ * Hero card: total listening time (h/m), total plays, and the daily average over the trailing
+ * 7 days (from [weeklyTrend]) -- not all-time total minutes divided by 7, which understates the
+ * real recent pace for any listener with history older than a week.
+ */
 @Composable
-private fun WrappedHeroSummaryCard(totalListenTimeMs: Long, totalPlays: Int) {
+private fun WrappedHeroSummaryCard(
+    totalListenTimeMs: Long,
+    totalPlays: Int,
+    weeklyTrend: List<DailyListeningData>
+) {
     val totalMinutes = (totalListenTimeMs / (1000 * 60)).toInt()
     val hours = totalMinutes / 60
     val minutes = totalMinutes % 60
+    val dailyAvgMinutes = if (weeklyTrend.isNotEmpty()) {
+        weeklyTrend.sumOf { it.minutes } / weeklyTrend.size
+    } else {
+        0
+    }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
         ),
         shape = RoundedCornerShape(24.dp)
     ) {
@@ -287,12 +321,12 @@ private fun WrappedHeroSummaryCard(totalListenTimeMs: Long, totalPlays: Int) {
                 Text(
                     text = "Total Listening Time",
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Icon(
                     imageVector = Icons.Rounded.Headphones,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f),
+                    tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(24.dp)
                 )
             }
@@ -304,7 +338,7 @@ private fun WrappedHeroSummaryCard(totalListenTimeMs: Long, totalPlays: Int) {
                     text = "$hours",
                     style = MaterialTheme.typography.displayMedium,
                     fontWeight = FontWeight.Black,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
                     text = "h ",
@@ -317,7 +351,7 @@ private fun WrappedHeroSummaryCard(totalListenTimeMs: Long, totalPlays: Int) {
                     text = "$minutes",
                     style = MaterialTheme.typography.displayMedium,
                     fontWeight = FontWeight.Black,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
                     text = "m",
@@ -329,7 +363,7 @@ private fun WrappedHeroSummaryCard(totalListenTimeMs: Long, totalPlays: Int) {
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.15f))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
             Spacer(modifier = Modifier.height(16.dp))
 
             Row(
@@ -340,27 +374,26 @@ private fun WrappedHeroSummaryCard(totalListenTimeMs: Long, totalPlays: Int) {
                     Text(
                         text = "Total Plays",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
                         text = "$totalPlays",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = "Daily Average",
+                        text = "Daily Avg (7d)",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    val dailyAvg = if (totalMinutes > 0) "${totalMinutes / 7} min" else "0 min"
                     Text(
-                        text = dailyAvg,
+                        text = "$dailyAvgMinutes min",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
             }
@@ -368,13 +401,21 @@ private fun WrappedHeroSummaryCard(totalListenTimeMs: Long, totalPlays: Int) {
     }
 }
 
-/** 7-day listening trend bar chart, rendered with Canvas. */
+/**
+ * 7-day listening trend bar chart, rendered with Canvas. Peak day is the same hue as the other
+ * bars but at full opacity against dimmed neighbors, so it reads as "highlighted" regardless of
+ * which ColorScheme role a theme happens to map -- unlike [MaterialTheme.colorScheme.tertiary],
+ * which is a low-contrast grey in every [com.example.tgmusicai.ui.theme.AppTheme] here. Tapping a
+ * bar shows its exact value; value labels above each bar make that visible without a tap too.
+ */
 @Composable
 private fun WeeklyListeningBarChart(weeklyData: List<DailyListeningData>) {
     val maxMinutes = (weeklyData.maxOfOrNull { it.minutes } ?: 0).coerceAtLeast(1)
-    val barColor = MaterialTheme.colorScheme.primary
-    val peakBarColor = MaterialTheme.colorScheme.tertiary
+    val peakBarColor = MaterialTheme.colorScheme.primary
+    val normalBarColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+    val labelColor = MaterialTheme.colorScheme.onSurface
+    var selectedIndex by remember { mutableStateOf<Int?>(null) }
 
     Card(
         modifier = Modifier
@@ -384,17 +425,41 @@ private fun WeeklyListeningBarChart(weeklyData: List<DailyListeningData>) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
-            Text(
-                text = "Daily Listening Activity",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = "Minutes listened over the past 7 days",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Daily Listening Activity",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Minutes listened over the past 7 days",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                val tappedDay = selectedIndex?.let { weeklyData.getOrNull(it) }
+                if (tappedDay != null) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = "${tappedDay.dayName}: ${tappedDay.minutes} min",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(20.dp))
 
@@ -402,11 +467,28 @@ private fun WeeklyListeningBarChart(weeklyData: List<DailyListeningData>) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(140.dp)
+                    .pointerInput(weeklyData) {
+                        detectTapGestures { offset ->
+                            val barWidth = 28.dp.toPx()
+                            val spacing = (size.width - (barWidth * weeklyData.size)) / (weeklyData.size + 1)
+                            val tappedIndex = weeklyData.indices.firstOrNull { index ->
+                                val x = spacing + index * (barWidth + spacing)
+                                offset.x in x..(x + barWidth)
+                            }
+                            selectedIndex = if (tappedIndex == selectedIndex) null else tappedIndex
+                        }
+                    }
             ) {
                 val barWidth = 28.dp.toPx()
                 val totalWidth = size.width
                 val chartHeight = size.height
                 val spacing = (totalWidth - (barWidth * weeklyData.size)) / (weeklyData.size + 1)
+                val labelPaint = android.graphics.Paint().apply {
+                    color = labelColor.toArgb()
+                    textAlign = android.graphics.Paint.Align.CENTER
+                    textSize = 11.sp.toPx()
+                    isAntiAlias = true
+                }
 
                 weeklyData.forEachIndexed { index, day ->
                     val x = spacing + index * (barWidth + spacing)
@@ -423,11 +505,20 @@ private fun WeeklyListeningBarChart(weeklyData: List<DailyListeningData>) {
 
                     val isPeak = day.minutes == maxMinutes && maxMinutes > 0
                     drawRoundRect(
-                        color = if (isPeak) peakBarColor else barColor,
+                        color = if (isPeak) peakBarColor else normalBarColor,
                         topLeft = Offset(x, y),
                         size = Size(barWidth, currentBarHeight),
                         cornerRadius = CornerRadius(12.dp.toPx(), 12.dp.toPx())
                     )
+
+                    if (day.minutes > 0) {
+                        drawContext.canvas.nativeCanvas.drawText(
+                            "${day.minutes}",
+                            x + barWidth / 2f,
+                            (y - 6.dp.toPx()).coerceAtLeast(labelPaint.textSize),
+                            labelPaint
+                        )
+                    }
                 }
             }
 
@@ -455,17 +546,12 @@ private fun WeeklyListeningBarChart(weeklyData: List<DailyListeningData>) {
     }
 }
 
-/** Fixed, high-contrast palette cycled across however many artists/producers need a color. */
-private fun chartColorFor(index: Int, scheme: androidx.compose.material3.ColorScheme): Color {
-    val palette = listOf(scheme.primary, scheme.tertiary, scheme.secondary, scheme.error, scheme.outline)
-    return palette[index % palette.size]
-}
-
 @Composable
 private fun TopArtistsDonutCard(topArtists: List<ArtistPlayStats>) {
-    val scheme = MaterialTheme.colorScheme
-    val colored = remember(topArtists) {
-        topArtists.mapIndexed { index, stat -> stat to chartColorFor(index, scheme) }
+    val isDarkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val colored = remember(topArtists, isDarkTheme) {
+        val palette = generateDistinctChartPalette(topArtists.size, isDarkTheme)
+        topArtists.zip(palette)
     }
     val totalPlays = topArtists.sumOf { it.totalPlayCount }.coerceAtLeast(1)
 
@@ -596,11 +682,13 @@ private fun StatSongItem(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Muted metallic tones instead of web-bright gold/silver/bronze, which clash against the
+    // app's desaturated dark surfaces.
     val rankBadgeColor = when (rank) {
-        1 -> Color(0xFFFFD700) // Gold
-        2 -> Color(0xFFC0C0C0) // Silver
-        3 -> Color(0xFFCD7F32) // Bronze
-        else -> MaterialTheme.colorScheme.surfaceVariant
+        1 -> Color(0xFFD4AF37) // muted gold
+        2 -> Color(0xFFA8A8A8) // muted silver
+        3 -> Color(0xFFB08D57) // muted bronze
+        else -> MaterialTheme.colorScheme.surfaceContainerHigh
     }
     val rankTextColor = when (rank) {
         1, 2, 3 -> Color.Black
@@ -706,7 +794,8 @@ private fun StatSongItem(
 @Composable
 private fun StorageStatsTab(
     overview: com.example.tgmusicai.ui.viewmodel.StorageOverview?,
-    isLoading: Boolean
+    isLoading: Boolean,
+    onRemoveDownload: (Long) -> Unit
 ) {
     if (overview == null) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -765,7 +854,11 @@ private fun StorageStatsTab(
             }
         } else {
             itemsIndexed(overview.biggestSongs, key = { _, item -> "song_${item.song.id}_${item.song.mediaUri}" }) { index, item ->
-                StorageSongRow(rank = index + 1, item = item)
+                StorageSongRow(
+                    rank = index + 1,
+                    item = item,
+                    onRemoveDownload = { onRemoveDownload(item.song.id) }
+                )
             }
         }
     }
@@ -774,9 +867,12 @@ private fun StorageStatsTab(
 /** Storage hero card with a segmented bar showing the top few playlists' share of total storage. */
 @Composable
 private fun StorageHeaderCard(overview: com.example.tgmusicai.ui.viewmodel.StorageOverview) {
-    val scheme = MaterialTheme.colorScheme
+    val isDarkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
     val topPlaylists = remember(overview) {
         overview.playlists.sortedByDescending { it.sizeBytes }.take(4)
+    }
+    val palette = remember(topPlaylists, isDarkTheme) {
+        generateDistinctChartPalette(topPlaylists.size, isDarkTheme)
     }
     val totalBytes = overview.totalBytes.coerceAtLeast(1L)
 
@@ -785,7 +881,7 @@ private fun StorageHeaderCard(overview: com.example.tgmusicai.ui.viewmodel.Stora
             .fillMaxWidth()
             .padding(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
         ),
         shape = RoundedCornerShape(24.dp)
     ) {
@@ -799,13 +895,13 @@ private fun StorageHeaderCard(overview: com.example.tgmusicai.ui.viewmodel.Stora
                     Text(
                         text = "Total Music Storage",
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
                         text = FormatUtils.formatBytes(overview.totalBytes),
                         style = MaterialTheme.typography.displaySmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
                 Icon(
@@ -832,7 +928,7 @@ private fun StorageHeaderCard(overview: com.example.tgmusicai.ui.viewmodel.Stora
                             modifier = Modifier
                                 .fillMaxHeight()
                                 .weight(fraction)
-                                .background(chartColorFor(index, scheme))
+                                .background(palette[index])
                         )
                     }
                 }
@@ -850,13 +946,13 @@ private fun StorageHeaderCard(overview: com.example.tgmusicai.ui.viewmodel.Stora
                             modifier = Modifier
                                 .size(8.dp)
                                 .clip(CircleShape)
-                                .background(chartColorFor(index, scheme))
+                                .background(palette[index])
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = info.playlist.name,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
@@ -865,7 +961,7 @@ private fun StorageHeaderCard(overview: com.example.tgmusicai.ui.viewmodel.Stora
                             text = FormatUtils.formatBytes(info.sizeBytes),
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }
@@ -931,8 +1027,40 @@ private fun StoragePlaylistRow(info: PlaylistStorageInfo, fraction: Float) {
     }
 }
 
+/** Biggest-downloaded-song row. The trailing trash icon frees local storage for that one song
+ *  (behind a confirmation, since deleting the file is not undoable) while keeping the song in
+ *  the library and every playlist to stream from YouTube instead. */
 @Composable
-private fun StorageSongRow(rank: Int, item: SongStorageInfo) {
+private fun StorageSongRow(rank: Int, item: SongStorageInfo, onRemoveDownload: () -> Unit) {
+    var showConfirm by remember { mutableStateOf(false) }
+
+    if (showConfirm) {
+        AlertDialog(
+            onDismissRequest = { showConfirm = false },
+            title = { Text("Remove download?") },
+            text = {
+                Text(
+                    "Deletes the local file for \"${item.song.title}\" to free " +
+                        "${FormatUtils.formatBytes(item.sizeBytes)}. It stays in your library " +
+                        "and playlists, streaming from YouTube instead."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showConfirm = false
+                    onRemoveDownload()
+                }) {
+                    Text("Remove")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirm = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -984,6 +1112,14 @@ private fun StorageSongRow(rank: Int, item: SongStorageInfo) {
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            IconButton(onClick = { showConfirm = true }) {
+                Icon(
+                    imageVector = Icons.Rounded.DeleteOutline,
+                    contentDescription = "Remove download for ${item.song.title}",
+                    tint = MaterialTheme.colorScheme.error
                 )
             }
         }
