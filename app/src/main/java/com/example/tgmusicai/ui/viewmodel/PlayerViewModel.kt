@@ -242,6 +242,21 @@ class PlayerViewModel(
     }
 
     /**
+     * Whether playback evens out the loudness difference between tracks. Like skip-silence, the
+     * effect itself lives in [com.example.tgmusicai.playback.PlaybackService], which observes the
+     * same DataStore flow; this is only the Settings screen's read/write surface.
+     */
+    val volumeNormalizationEnabled: StateFlow<Boolean> = appPreferences?.volumeNormalizationEnabledFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+        ?: MutableStateFlow(true).asStateFlow()
+
+    fun setVolumeNormalizationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            appPreferences?.setVolumeNormalizationEnabled(enabled)
+        }
+    }
+
+    /**
      * The active color theme name (e.g. "YT_DARK"), read here (not just threaded through as a
      * plain composable parameter from `MainActivity`) so [com.example.tgmusicai.ui.screens.SettingsScreen]'s
      * theme picker reflects a change immediately. `SettingsScreen` is rendered through a

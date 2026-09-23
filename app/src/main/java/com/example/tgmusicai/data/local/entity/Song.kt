@@ -76,5 +76,25 @@ data class Song(
      * True if pinned on the Speed Dial Home Tab.
      */
     @ColumnInfo(name = "is_pinned")
-    val isPinned: Boolean = false
+    val isPinned: Boolean = false,
+
+    /**
+     * Track loudness relative to the ReplayGain 2.0 reference level (-18 LUFS), in decibels.
+     * Negative for tracks louder than the reference, positive for quieter ones -- so applying it
+     * brings every track to the same perceived loudness. Read from the file's own
+     * `REPLAYGAIN_TRACK_GAIN` tag when present, otherwise measured on-device from decoded audio
+     * (see [com.example.tgmusicai.ai.LoudnessAnalyzer]). Null means "not known yet", which plays
+     * the track unmodified rather than guessing.
+     */
+    @ColumnInfo(name = "replay_gain_db")
+    val replayGainDb: Float? = null,
+
+    /**
+     * Highest absolute sample value in the track, normalized so 1.0 is full scale. Used to clamp
+     * the applied gain: boosting a track whose peak is already near 1.0 by its full ReplayGain
+     * value would clip. Null when unknown, which makes the limiter fall back to a conservative
+     * fixed ceiling.
+     */
+    @ColumnInfo(name = "replay_peak")
+    val replayPeak: Float? = null
 )

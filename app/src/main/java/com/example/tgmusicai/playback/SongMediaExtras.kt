@@ -19,6 +19,8 @@ object SongMediaExtras {
     private const val KEY_DURATION_MS = "tgmusicai.duration_ms"
     private const val KEY_YOUTUBE_ID = "tgmusicai.youtube_id"
     private const val KEY_IS_DOWNLOADED = "tgmusicai.is_downloaded"
+    private const val KEY_REPLAY_GAIN_DB = "tgmusicai.replay_gain_db"
+    private const val KEY_REPLAY_PEAK = "tgmusicai.replay_peak"
 
     fun fromSong(song: Song): Bundle = Bundle().apply {
         putLong(KEY_SONG_ID, song.id)
@@ -26,7 +28,20 @@ object SongMediaExtras {
         putLong(KEY_DURATION_MS, song.durationMs)
         song.youtubeId?.let { putString(KEY_YOUTUBE_ID, it) }
         putBoolean(KEY_IS_DOWNLOADED, song.isDownloaded)
+        // Only written when known. Absent and "zero" mean different things for loudness -- 0 dB is
+        // a real gain meaning "already at reference level" -- so the keys stay missing rather than
+        // defaulting, and the readers below distinguish the two.
+        song.replayGainDb?.let { putFloat(KEY_REPLAY_GAIN_DB, it) }
+        song.replayPeak?.let { putFloat(KEY_REPLAY_PEAK, it) }
     }
+
+    /** The track's stored loudness offset in dB, or null if it has never been determined. */
+    fun replayGainDb(extras: Bundle?): Float? =
+        if (extras?.containsKey(KEY_REPLAY_GAIN_DB) == true) extras.getFloat(KEY_REPLAY_GAIN_DB) else null
+
+    /** The track's measured peak as a fraction of full scale, or null if unknown. */
+    fun replayPeak(extras: Bundle?): Float? =
+        if (extras?.containsKey(KEY_REPLAY_PEAK) == true) extras.getFloat(KEY_REPLAY_PEAK) else null
 
     /** The real DB song id embedded in [extras], or null if absent/never persisted (id == 0). */
     fun songId(extras: Bundle?): Long? = extras?.getLong(KEY_SONG_ID, 0L)?.takeIf { it != 0L }
@@ -44,7 +59,9 @@ object SongMediaExtras {
             mediaUri = mediaUri,
             artworkUri = extras?.getString(KEY_ARTWORK_URI),
             youtubeId = extras?.getString(KEY_YOUTUBE_ID),
-            isDownloaded = extras?.getBoolean(KEY_IS_DOWNLOADED, true) ?: true
+            isDownloaded = extras?.getBoolean(KEY_IS_DOWNLOADED, true) ?: true,
+            replayGainDb = replayGainDb(extras),
+            replayPeak = replayPeak(extras)
         )
     }
 }

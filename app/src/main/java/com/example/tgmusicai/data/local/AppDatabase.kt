@@ -46,7 +46,7 @@ import com.example.tgmusicai.data.local.entity.SongStats
         AiSongTags::class,
         ListeningHistory::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -200,6 +200,22 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Adds the per-track loudness columns to `songs`, backing volume normalization.
+         *
+         * Both stay null for existing rows. A null gain plays the track unmodified, so an upgrading
+         * user hears exactly what they heard before until the value is filled in -- either from the
+         * file's own ReplayGain tag on the next media scan, or measured from decoded audio by the
+         * background loudness pass. Guessing a value here would be worse than leaving it unset:
+         * applying a wrong gain is audible, applying none is not.
+         */
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE songs ADD COLUMN replay_gain_db REAL")
+                db.execSQL("ALTER TABLE songs ADD COLUMN replay_peak REAL")
+            }
+        }
+
+        /**
          * Returns the app-wide singleton [AppDatabase], creating it on first call.
          * Double-checked locking (`synchronized` + null check twice) avoids building the
          * database twice if two threads race to call this before [INSTANCE] is set.
@@ -217,7 +233,7 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 .addMigrations(
                     MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                    MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
+                    MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15,
                 )
                 .fallbackToDestructiveMigration()
                 .build()

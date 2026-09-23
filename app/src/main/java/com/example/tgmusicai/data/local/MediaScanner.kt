@@ -97,6 +97,18 @@ object MediaScanner {
                             rawArtist = if (artist != "Unknown Artist") artist else null
                         )
 
+                        // Take the file's own loudness tag if it has one. Reading it costs a tag
+                        // parse, against the two minutes of audio decoding it saves the background
+                        // measurement pass from doing for this track later.
+                        val replayGain = path?.let { filePath ->
+                            try {
+                                AudioTagIo.readReplayGain(java.io.File(filePath))
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Could not read ReplayGain tags from $filePath", e)
+                                null
+                            }
+                        }
+
                         songDao.insertSong(
                             Song(
                                 title = cleaned.cleanTitle,
@@ -104,7 +116,9 @@ object MediaScanner {
                                 album = album,
                                 durationMs = finalDuration,
                                 mediaUri = uri.toString(),
-                                producer = cleaned.producer
+                                producer = cleaned.producer,
+                                replayGainDb = replayGain?.trackGainDb,
+                                replayPeak = replayGain?.trackPeak
                             )
                         )
                         Log.d(TAG, "Added song: $title")

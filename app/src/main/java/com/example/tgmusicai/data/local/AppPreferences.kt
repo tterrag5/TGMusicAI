@@ -64,6 +64,22 @@ class AppPreferences(private val context: Context) {
         val CROSSFADE_ENABLED = booleanPreferencesKey("crossfade_enabled")
         val CROSSFADE_DURATION_SEC = intPreferencesKey("crossfade_duration_sec")
         val LYRICS_TRANSLATION_LANGUAGE = stringPreferencesKey("lyrics_translation_language")
+        val VOLUME_NORMALIZATION_ENABLED = booleanPreferencesKey("volume_normalization_enabled")
+    }
+
+    /**
+     * Whether playback evens out the volume difference between tracks.
+     *
+     * Defaults on. The mixed local-plus-YouTube library this app is built around is exactly the
+     * case where track-to-track loudness jumps are worst, and a track whose loudness has not been
+     * determined yet plays unmodified either way -- so enabling it by default can only ever make
+     * playback more consistent than leaving it off, never less.
+     */
+    val volumeNormalizationEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[VOLUME_NORMALIZATION_ENABLED] ?: true }
+
+    suspend fun setVolumeNormalizationEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[VOLUME_NORMALIZATION_ENABLED] = enabled }
     }
 
     /** True once the user has completed (or skipped) the first-run onboarding flow. */

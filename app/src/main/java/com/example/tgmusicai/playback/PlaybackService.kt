@@ -10,8 +10,13 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import androidx.media3.common.audio.SonicAudioProcessor
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.SilenceSkippingAudioProcessor
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.CommandButton
 import androidx.media3.session.LibraryResult
@@ -56,19 +61,95 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var repository: MusicRepository
     private val youtubeExtractor: YouTubeExtractor by lazy { YouTubeExtractor() }
     private var loudnessEnhancer: LoudnessEnhancer? = null
+    private val replayGainProcessor = ReplayGainAudioProcessor()
+    private lateinit var loudnessNormalization: LoudnessNormalizationManager
 
-    /** (Re)attaches the loudness normalizer to [audioSessionId], releasing any previous instance. */
+    /**
+     * Whether per-track volume normalization is on. Mirrored into a field because it is read on
+     * every media item transition, where suspending to consult DataStore would delay the gain
+     * being applied until after the track had already started at the wrong volume.
+     */
+    @Volatile
+    private var volumeNormalizationEnabled: Boolean = true
+
+    /**
+     * (Re)attaches the fixed-gain loudness booster to [audioSessionId], releasing any previous
+     * instance.
+     *
+     * This applies the same boost to every track, so it makes the whole library louder without
+     * making any two tracks match -- which is why it is used only when per-track normalization is
+     * switched off. When normalization is on, [ReplayGainAudioProcessor] is doing the real work and
+     * stacking a blanket boost on top of it would push the tracks it just brought into line back
+     * toward clipping.
+     */
     private fun attachLoudnessEnhancer(audioSessionId: Int) {
         if (audioSessionId == C.AUDIO_SESSION_ID_UNSET) return
         loudnessEnhancer?.release()
-        loudnessEnhancer = try {
-            LoudnessEnhancer(audioSessionId).apply {
-                setTargetGain(LOUDNESS_TARGET_GAIN_MILLIBELS)
-                enabled = true
-            }
-        } catch (e: Exception) {
-            android.util.Log.w("PlaybackService", "Failed to attach LoudnessEnhancer to session $audioSessionId", e)
+        loudnessEnhancer = if (volumeNormalizationEnabled) {
             null
+        } else {
+            try {
+                LoudnessEnhancer(audioSessionId).apply {
+                    setTargetGain(LOUDNESS_TARGET_GAIN_MILLIBELS)
+                    enabled = true
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("PlaybackService", "Failed to attach LoudnessEnhancer to session $audioSessionId", e)
+                null
+            }
+        }
+    }
+
+    /**
+     * Applies the volume scale for [mediaItem], so it plays at the same perceived loudness as the
+     * track before it.
+     *
+     * The gain travels in the MediaItem's own extras where one is available, which is the common
+     * case and costs no database read on the transition. A queue item built before this feature
+     * existed, or one appended by another controller, carries no such value and is looked up by
+     * song id instead -- asynchronously, so a slow read delays the correction rather than the
+     * track. A track with no known loudness plays unmodified.
+     */
+    private fun applyReplayGain(mediaItem: MediaItem?) {
+        if (!volumeNormalizationEnabled || mediaItem == null) {
+            replayGainProcessor.clearTrackScale()
+            return
+        }
+
+        val extras = mediaItem.mediaMetadata.extras
+        val embeddedGain = SongMediaExtras.replayGainDb(extras)
+        if (embeddedGain != null) {
+            replayGainProcessor.setTrackScale(
+                ReplayGainAudioProcessor.gainToScale(embeddedGain, SongMediaExtras.replayPeak(extras))
+            )
+            return
+        }
+
+        replayGainProcessor.clearTrackScale()
+        val songId = SongMediaExtras.songId(extras) ?: return
+        serviceScope.launch {
+            val song = try {
+                database.songDao().getSongById(songId)
+            } catch (e: Throwable) {
+                android.util.Log.w("PlaybackService", "Could not load loudness for song $songId", e)
+                null
+            } ?: return@launch
+            // The queue may have moved on while this read was in flight; applying a stale gain
+            // would be worse than applying none.
+            val stillCurrent = withContext(Dispatchers.Main) {
+                player.currentMediaItem?.mediaId == mediaItem.mediaId
+            }
+            if (!stillCurrent) return@launch
+            val gain = song.replayGainDb
+            if (gain != null) {
+                replayGainProcessor.setTrackScale(
+                    ReplayGainAudioProcessor.gainToScale(gain, song.replayPeak)
+                )
+            } else {
+                // Not measured yet. Measure it now so the next play of this track is normalized;
+                // correcting it mid-play would be an audible jump in volume.
+                loudnessNormalization.analyzeIfNeeded(song)
+            }
         }
     }
 
@@ -96,7 +177,34 @@ class PlaybackService : MediaLibraryService() {
         // music for GPS voice prompts (AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK), pauses for phone calls
         // (AUDIOFOCUS_LOSS_TRANSIENT) and resumes on AUDIOFOCUS_GAIN, and pauses when a
         // Bluetooth/aux device disconnects mid-playback (setHandleAudioBecomingNoisy).
-        player = ExoPlayer.Builder(this)
+        loudnessNormalization = LoudnessNormalizationManager(this, database.songDao())
+
+        // Per-track volume normalization has to sit inside the audio pipeline, because it scales
+        // the samples themselves. The processor is inserted ahead of ExoPlayer's own chain rather
+        // than replacing it: passing the default silence-skipping and speed-adjustment processors
+        // through keeps `skipSilenceEnabled` and playback speed working, both of which silently
+        // stop responding if the chain is rebuilt without them.
+        val renderersFactory = object : DefaultRenderersFactory(this) {
+            override fun buildAudioSink(
+                context: android.content.Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): AudioSink {
+                return DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessorChain(
+                        DefaultAudioSink.DefaultAudioProcessorChain(
+                            arrayOf(replayGainProcessor),
+                            SilenceSkippingAudioProcessor(),
+                            SonicAudioProcessor()
+                        )
+                    )
+                    .build()
+            }
+        }
+
+        player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(cacheDataSourceFactory))
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -171,6 +279,7 @@ class PlaybackService : MediaLibraryService() {
                         // skippable, instead of only ever appearing reactively after a stop.
                         maybeExtendQueueForAutoplay(this@apply)
                         resetListenTracking(mediaItem)
+                        applyReplayGain(mediaItem)
                         updateCustomLayout()
                     }
 
@@ -187,6 +296,30 @@ class PlaybackService : MediaLibraryService() {
         serviceScope.launch(Dispatchers.Main) {
             AppPreferences(applicationContext).skipSilenceEnabledFlow.collect { enabled ->
                 player.skipSilenceEnabled = enabled
+            }
+        }
+
+        // Volume normalization, observed rather than read once so the Settings toggle takes effect
+        // on the track already playing. Turning it off also restores the blanket loudness boost it
+        // replaces, and turning it on tears that boost back down.
+        serviceScope.launch(Dispatchers.Main) {
+            AppPreferences(applicationContext).volumeNormalizationEnabledFlow.collect { enabled ->
+                volumeNormalizationEnabled = enabled
+                applyReplayGain(player.currentMediaItem)
+                attachLoudnessEnhancer(player.audioSessionId)
+            }
+        }
+
+        // Work through the library's unmeasured tracks in the background, so normalization applies
+        // to songs the user has not played yet rather than only correcting each track from its
+        // second play onward.
+        serviceScope.launch {
+            while (isActive) {
+                val analyzed = loudnessNormalization.runBackfillBatch()
+                if (analyzed == 0) break
+                // A pause between batches keeps a large library's measurement pass from competing
+                // with playback for CPU on a low-end device.
+                delay(LOUDNESS_BACKFILL_PAUSE_MS)
             }
         }
 
@@ -219,6 +352,8 @@ class PlaybackService : MediaLibraryService() {
         private const val LOUDNESS_TARGET_GAIN_MILLIBELS = 500
         private const val MAX_CONSECUTIVE_PLAYBACK_ERRORS = 2
         private const val LISTEN_TIME_FLUSH_INTERVAL_MS = 10_000L
+        /** Idle gap between loudness-measurement batches, so the pass never competes with playback. */
+        private const val LOUDNESS_BACKFILL_PAUSE_MS = 5_000L
         private const val YOUTUBE_FALLBACK_SEARCH_CANDIDATES = 6
         private const val YOUTUBE_FALLBACK_RESOLVE_TARGET = 3
 

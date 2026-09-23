@@ -283,6 +283,37 @@ private class FakeSongDao : SongDao {
             songs[index] = songs[index].copy(artist = artist)
         }
     }
+
+    override suspend fun updateReplayGain(id: Long, gainDb: Float?, peak: Float?) {
+        val index = songs.indexOfFirst { it.id == id }
+        if (index >= 0) {
+            songs[index] = songs[index].copy(replayGainDb = gainDb, replayPeak = peak)
+        }
+    }
+
+    override suspend fun getSongsMissingReplayGain(limit: Int): List<Song> =
+        songs.filter { it.replayGainDb == null && it.isDownloaded }.take(limit)
+
+    override fun countSongsMissingReplayGain(): Flow<Int> =
+        flowOf(songs.count { it.replayGainDb == null && it.isDownloaded })
+
+    override suspend fun updateEditedMetadata(
+        id: Long,
+        title: String,
+        artist: String,
+        album: String,
+        producer: String?
+    ) {
+        val index = songs.indexOfFirst { it.id == id }
+        if (index >= 0) {
+            songs[index] = songs[index].copy(
+                title = title,
+                artist = artist,
+                album = album,
+                producer = producer
+            )
+        }
+    }
 }
 
 private class FakePlaylistDao(private val songDao: FakeSongDao) : PlaylistDao {

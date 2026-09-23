@@ -127,4 +127,33 @@ interface SongDao {
     /** Updates just a song's artist name, e.g. after [com.example.tgmusicai.data.local.AiMetadataCleaner] cleans up a messy YouTube channel name. */
     @Query("UPDATE songs SET artist = :artist WHERE id = :id")
     suspend fun updateSongArtist(id: Long, artist: String)
+
+    /** Stores a track's measured (or tag-supplied) loudness, used to normalize playback volume. */
+    @Query("UPDATE songs SET replay_gain_db = :gainDb, replay_peak = :peak WHERE id = :id")
+    suspend fun updateReplayGain(id: Long, gainDb: Float?, peak: Float?)
+
+    /**
+     * Local tracks whose loudness has never been determined, for the background measurement pass.
+     *
+     * Cloud-only tracks are excluded: measuring one means downloading it, and a stream that has
+     * never been on the device would be re-fetched on every pass and still never gain a value.
+     */
+    @Query("SELECT * FROM songs WHERE replay_gain_db IS NULL AND is_downloaded = 1 LIMIT :limit")
+    suspend fun getSongsMissingReplayGain(limit: Int): List<Song>
+
+    /** How many local tracks still need measuring, for the progress readout in Settings. */
+    @Query("SELECT COUNT(*) FROM songs WHERE replay_gain_db IS NULL AND is_downloaded = 1")
+    fun countSongsMissingReplayGain(): Flow<Int>
+
+    /** Applies an in-app tag edit to the library row backing the file that was just rewritten. */
+    @Query(
+        "UPDATE songs SET title = :title, artist = :artist, album = :album, producer = :producer WHERE id = :id"
+    )
+    suspend fun updateEditedMetadata(
+        id: Long,
+        title: String,
+        artist: String,
+        album: String,
+        producer: String?
+    )
 }

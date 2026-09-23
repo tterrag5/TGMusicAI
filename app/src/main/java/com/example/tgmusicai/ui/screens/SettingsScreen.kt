@@ -96,6 +96,7 @@ fun SettingsScreen(
     val themeMode by playerViewModel.themeMode.collectAsState()
     val dynamicColorEnabled by playerViewModel.dynamicColorEnabled.collectAsState()
     val skipSilenceEnabled by playerViewModel.skipSilenceEnabled.collectAsState()
+    val volumeNormalizationEnabled by playerViewModel.volumeNormalizationEnabled.collectAsState()
     val crossfadeEnabled by playerViewModel.crossfadeEnabled.collectAsState()
     val crossfadeDurationSec by playerViewModel.crossfadeDurationSec.collectAsState()
     var draggedCrossfadeDurationSec by remember(crossfadeDurationSec) { mutableStateOf(crossfadeDurationSec.toFloat()) }
@@ -110,6 +111,7 @@ fun SettingsScreen(
         "${ThemeMode.fromName(themeMode).displayName} - ${AppTheme.fromName(currentTheme).displayName}"
     }
     val playbackSummary = listOfNotNull(
+        "Normalize volume".takeIf { volumeNormalizationEnabled },
         "Skip silence".takeIf { skipSilenceEnabled },
         "Crossfade".takeIf { crossfadeEnabled }
     ).joinToString(", ").ifEmpty { "Default playback behavior" }
@@ -168,6 +170,7 @@ fun SettingsScreen(
         ) {
             item {
                 SettingsSection(
+                    sectionId = SettingsSectionId.APPEARANCE,
                     title = "Appearance",
                     icon = Icons.Rounded.Palette,
                     summary = appearanceSummary,
@@ -198,12 +201,20 @@ fun SettingsScreen(
 
             item {
                 SettingsSection(
+                    sectionId = SettingsSectionId.PLAYBACK,
                     title = "Playback",
                     icon = Icons.Rounded.PlayCircle,
                     summary = playbackSummary,
                     expanded = expandedSection == SettingsSectionId.PLAYBACK,
                     onToggle = { expandedSection = it }
                 ) {
+                    SettingsToggleRow(
+                        title = "Normalize volume",
+                        subtitle = "Play every track at the same loudness, so a quiet local file and a loud YouTube stream don't jump in volume.",
+                        checked = volumeNormalizationEnabled,
+                        onCheckedChange = playerViewModel::setVolumeNormalizationEnabled
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
                     SettingsToggleRow(
                         title = "Skip silence",
                         subtitle = "Auto-trim dead silence at the start/end of tracks, common on YouTube-sourced audio.",
@@ -246,6 +257,7 @@ fun SettingsScreen(
 
             item {
                 SettingsSection(
+                    sectionId = SettingsSectionId.BACKUP,
                     title = "Backup & Restore",
                     icon = Icons.Rounded.CloudSync,
                     summary = if (isBackupLoading) "Working..." else "Export or restore your library",
@@ -291,8 +303,14 @@ fun SettingsScreen(
     }
 }
 
-/** The collapsible groups on the Settings screen. */
-private enum class SettingsSectionId { APPEARANCE, PLAYBACK, BACKUP }
+/**
+ * The collapsible groups on the Settings screen.
+ *
+ * Passed explicitly to [SettingsSection] rather than derived from the section's display title:
+ * matching on the title meant renaming a heading silently re-pointed it at another section's
+ * expand state, and every new section defaulted into whichever branch the `else` happened to name.
+ */
+private enum class SettingsSectionId { APPEARANCE, PLAYBACK, SCROBBLING, BACKUP }
 
 /**
  * A collapsible Settings group: a tappable header showing the section name and its current state,
@@ -304,6 +322,7 @@ private enum class SettingsSectionId { APPEARANCE, PLAYBACK, BACKUP }
  */
 @Composable
 private fun SettingsSection(
+    sectionId: SettingsSectionId,
     title: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     summary: String,
@@ -311,11 +330,6 @@ private fun SettingsSection(
     onToggle: (SettingsSectionId?) -> Unit,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val sectionId = when (title) {
-        "Appearance" -> SettingsSectionId.APPEARANCE
-        "Playback" -> SettingsSectionId.PLAYBACK
-        else -> SettingsSectionId.BACKUP
-    }
     val chevronRotation by animateFloatAsState(
         targetValue = if (expanded) 180f else 0f,
         label = "settingsSectionChevron"
