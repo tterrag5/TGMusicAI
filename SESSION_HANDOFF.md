@@ -1,6 +1,6 @@
 # TGMusicAI — Session Handoff (state of the work)
 
-Snapshot of everything completed in the previous working session, so no conversation history is needed to continue. For the one remaining task, see **`PHASE2_POTOKEN_HANDOFF.md`**.
+Snapshot of the work completed so far, so no conversation history is needed to continue. Cloud streaming and downloads have since been fixed as well -- see **`PHASE2_POTOKEN_HANDOFF.md`** for what shipped there and why the originally planned approach was dropped.
 
 ---
 
@@ -8,7 +8,7 @@ Snapshot of everything completed in the previous working session, so no conversa
 
 - **Committed** on branch `feature/ui-overhaul-and-keyless-ai` (`main` untouched, nothing pushed). Working tree clean, builds green, 51 unit tests pass.
 - To hand this to a fresh AI session, paste the message in **`NEXT_SESSION_PROMPT.md`**.
-- Five of six planned phases are **done and verified on an emulator**. Phase 2 (cloud stream resolution) is **not started**.
+- All six planned phases are **done and verified on an emulator**, including Phase 2 (cloud stream resolution).
 - `CLAUDE.md` was updated to match the new architecture — trust it over any older internal notes.
 
 ### Build environment
@@ -55,7 +55,7 @@ Import worked but carried four data-loss bugs: it reused the backup's primary ke
 
 Now: drawer holds only Stats / Import from YouTube / Downloads / **Settings**, plus playlist shortcuts. A new `MainScreen.navigateTopLevel` pops back to an existing entry instead of clearing. Every top-level screen takes `onOpenDrawer` and renders a hamburger. *Verified: back from Stats returns to Library rather than exiting.*
 
-**Explore merged into Library.** The Explore tab is gone; Library search now shows local matches then a "From YouTube" section. "Downloaded only" moved from Home to Library and is persisted in `AppPreferences` (it used to be a ViewModel-only flag that reset each launch and filtered only three Home sections); with it on, cloud results are suppressed entirely. `YouTubeScreen.kt` deleted, its result row extracted to `ui/components/YouTubeSearchResultItem.kt`. Bottom nav is now four tabs. **Cloud search works — only resolution is broken.**
+**Explore merged into Library.** The Explore tab is gone; Library search now shows local matches then a "From YouTube" section. "Downloaded only" moved from Home to Library and is persisted in `AppPreferences` (it used to be a ViewModel-only flag that reset each launch and filtered only three Home sections); with it on, cloud results are suppressed entirely. `YouTubeScreen.kt` deleted, its result row extracted to `ui/components/YouTubeSearchResultItem.kt`. Bottom nav is now four tabs. **Cloud search and resolution both work** (resolution was fixed later; see item 3 below).
 
 **Theming.** Rebuilt data-driven: 8 palettes (added Violet Dusk, Forest, Rose Quartz, Mono), each with real light *and* dark variants, plus a **Dim** middle mode derived from the dark spec, a Material You toggle on Android 12+, and colour swatches in the picker. Previously there were four dark-only presets and a `darkTheme` parameter that was accepted but never applied. Hardcoded colours in the nav bar and mini-player were replaced with theme roles so light mode doesn't render a black slab.
 
@@ -89,7 +89,9 @@ nix develop                 # or -Dorg.gradle.java.home=<jdk17>
 
 ## What is left — backlog
 
-Four items, requested by the project owner. **They do not need to be done in this order**, though item 3 is the only one that unblocks broken functionality, so it is the most valuable. Items 1 and 4 are small and independent; item 2 produces a document, not code.
+Originally four items, requested by the project owner. **Item 3 (cloud streaming and downloads) is
+done** — see below. Three remain and do not need to be done in any particular order: items 1 and 4
+are small and independent, and item 2 produces a document rather than code.
 
 ---
 
@@ -142,13 +144,24 @@ Concretely, the document must nail down **all** of the following, with no "we co
 
 ---
 
-### 3. Fix cloud streaming and downloads (the unfinished Phase 2)
+### 3. Fix cloud streaming and downloads (the unfinished Phase 2) — **DONE**
 
-Tapping a cloud song currently shows an error toast; cloud downloads fail identically, because both go through the same resolver and every public Piped/Invidious instance it depends on is dead or blocking.
+Cloud tracks stream and cloud downloads resolve. Resolution now has a Tier 0 that talks to YouTube
+directly through NewPipeExtractor, ahead of the Piped/Invidious fallbacks, and resolves in about 6
+seconds where exhausting the dead tiers took ~110s and never succeeded.
 
-This is fully specified already in **`PHASE2_POTOKEN_HANDOFF.md`** — verified API signatures, architecture, code sketches, the upstream files to port, licensing notes, risks, a verification plan, and a 10-step order of work. Follow that plan rather than improvising.
+The deferred follow-up is done too: `StreamPrefetcher` caches the current and next track to disk
+through `AudioCacheManager`.
 
-Its deferred follow-up also belongs here: prefetching whole tracks through the existing `AudioCacheManager` for playback reliability, which is useless until resolution works.
+Two things were found along the way that were not in the plan, and both mattered: playback needed
+the same User-Agent the stream was verified with (YouTube answers 403 to Media3's default, so
+correctly resolved streams were still unplayable), and there was no `onPlayerError` handling at all,
+so a failing cloud URL ended playback silently instead of being re-resolved.
+
+**The PoToken approach the plan specified was built, proven to mint real tokens, and then removed**
+as unnecessary — current NewPipeExtractor's `setPoTokenProvider` is a documented no-op. See
+`PHASE2_POTOKEN_HANDOFF.md` for the full reasoning, the dependency-pinning trap that goes with it,
+and the verification commands.
 
 ---
 
