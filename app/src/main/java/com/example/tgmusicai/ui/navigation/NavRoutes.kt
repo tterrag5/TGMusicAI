@@ -64,4 +64,32 @@ sealed interface Screen : NavKey {
      */
     @Serializable
     data object Settings : Screen
+
+    /**
+     * YouTube Music discovery: mood and genre categories, and the current charts.
+     */
+    @Serializable
+    data object Discover : Screen
+
+    /**
+     * A YouTube Music artist's page: top tracks, albums, singles and related artists.
+     *
+     * Carries the artist's name alongside its id so the screen has a title to show while the page
+     * is still loading, rather than appearing blank for the length of a network round trip.
+     */
+    @Serializable
+    data class ArtistDetail(
+        val browseId: String,
+        val artistName: String
+    ) : Screen
+
+    /**
+     * A YouTube Music album's page and its track listing. Carries the title for the same reason
+     * [ArtistDetail] carries the artist's name.
+     */
+    @Serializable
+    data class AlbumDetail(
+        val browseId: String,
+        val albumTitle: String
+    ) : Screen
 }

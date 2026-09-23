@@ -235,13 +235,17 @@ class YouTubeInnerTubeClient(private val cookieManager: InnerTubeCookieManager) 
     }
 }
 
-// --- InnerTube renderer-tree parsing helpers -------------------------------------------------
+// --- InnerTube renderer-tree parsing helpers ---
+// Visible to the rest of this package rather than file-private: YouTubeMusicBrowser parses the same
+// renderer trees for artist, album and chart pages, and a second copy of these would be a second
+// thing to fix every time Google reshuffles its markup.
+// --- (original note follows) -------------------------------------------------
 // InnerTube's response is an unversioned, deeply-nested tree of "renderer" objects. These walk
 // the whole tree looking for known keys rather than hardcoding exact paths, so minor reshuffles
 // in Google's own markup don't silently break every field at once.
 
 /** Collects every [JSONObject] value found anywhere in [node] under a property named [key]. */
-private fun collectRenderers(node: Any?, key: String, out: MutableList<JSONObject>) {
+internal fun collectRenderers(node: Any?, key: String, out: MutableList<JSONObject>) {
     when (node) {
         is JSONObject -> {
             (node.opt(key) as? JSONObject)?.let { out.add(it) }
@@ -254,7 +258,7 @@ private fun collectRenderers(node: Any?, key: String, out: MutableList<JSONObjec
 }
 
 /** Depth-first search for the first String value found anywhere under a property named [key]. */
-private fun findFirstString(node: Any?, key: String): String? {
+internal fun findFirstString(node: Any?, key: String): String? {
     when (node) {
         is JSONObject -> {
             (node.opt(key) as? String)?.let { return it }
@@ -272,7 +276,7 @@ private fun findFirstString(node: Any?, key: String): String? {
 }
 
 /** Depth-first search for the highest-resolution thumbnail URL anywhere under [node]. */
-private fun findThumbnailUrl(node: Any?): String? {
+internal fun findThumbnailUrl(node: Any?): String? {
     when (node) {
         is JSONObject -> {
             val thumbs = node.optJSONArray("thumbnails")
@@ -293,13 +297,13 @@ private fun findThumbnailUrl(node: Any?): String? {
 }
 
 /** Concatenates every run's `text` inside a `{ runs: [...] }` holder, e.g. a title or subtitle field. */
-private fun runsText(runsHolder: JSONObject?): String {
+internal fun runsText(runsHolder: JSONObject?): String {
     val runs = runsHolder?.optJSONArray("runs") ?: return ""
     return (0 until runs.length()).joinToString("") { runs.optJSONObject(it)?.optString("text") ?: "" }
 }
 
 /** Text of the Nth `flexColumns` entry of a `musicResponsiveListItemRenderer` row. */
-private fun flexColumnText(item: JSONObject, index: Int): String {
+internal fun flexColumnText(item: JSONObject, index: Int): String {
     val renderer = item.optJSONArray("flexColumns")
         ?.optJSONObject(index)
         ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
@@ -307,14 +311,14 @@ private fun flexColumnText(item: JSONObject, index: Int): String {
     return runsText(renderer.optJSONObject("text"))
 }
 
-private val DURATION_TEXT_REGEX = Regex("^\\d{1,2}(:\\d{2}){1,2}$")
+internal val DURATION_TEXT_REGEX = Regex("^\\d{1,2}(:\\d{2}){1,2}$")
 
 /**
  * Finds a track's duration by scanning every run of text in [item] for one that looks like a
  * clock duration (e.g. "3:45"), taking the last match -- InnerTube's row layout conventionally
  * places the duration in the last text column, after title/artist/album.
  */
-private fun extractDurationSeconds(item: JSONObject): Long {
+internal fun extractDurationSeconds(item: JSONObject): Long {
     val texts = mutableListOf<String>()
     collectAllRunTexts(item, texts)
     val durationText = texts.lastOrNull { DURATION_TEXT_REGEX.matches(it.trim()) } ?: return 0L
@@ -326,7 +330,7 @@ private fun extractDurationSeconds(item: JSONObject): Long {
     }
 }
 
-private fun collectAllRunTexts(node: Any?, out: MutableList<String>) {
+internal fun collectAllRunTexts(node: Any?, out: MutableList<String>) {
     when (node) {
         is JSONObject -> {
             node.optJSONArray("runs")?.let { runs ->
@@ -343,7 +347,7 @@ private fun collectAllRunTexts(node: Any?, out: MutableList<String>) {
 }
 
 /** Finds the next page's continuation token, if [root]'s renderer tree includes one. */
-private fun findContinuationToken(root: JSONObject): String? {
+internal fun findContinuationToken(root: JSONObject): String? {
     val holders = mutableListOf<JSONObject>()
     collectRenderers(root, "nextContinuationData", holders)
     return holders.firstOrNull()?.optString("continuation")?.takeIf { it.isNotBlank() }

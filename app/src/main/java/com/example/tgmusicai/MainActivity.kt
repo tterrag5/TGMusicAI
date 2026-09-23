@@ -20,6 +20,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.tgmusicai.data.google.YouTubePlaylistSyncManager
 import com.example.tgmusicai.data.youtube.InnerTubeCookieManager
 import com.example.tgmusicai.data.youtube.YouTubeInnerTubeClient
+import com.example.tgmusicai.data.youtube.YouTubeMusicBrowser
 import com.example.tgmusicai.data.local.AppDatabase
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.MediaScanner
@@ -37,6 +38,7 @@ import com.example.tgmusicai.ui.screens.MainScreen
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
 import com.example.tgmusicai.ui.viewmodel.AlarmViewModel
 import com.example.tgmusicai.ui.viewmodel.EqualizerViewModel
+import com.example.tgmusicai.ui.viewmodel.DiscoverViewModel
 import com.example.tgmusicai.ui.viewmodel.GoogleSyncViewModel
 import com.example.tgmusicai.ui.viewmodel.HomeViewModel
 import com.example.tgmusicai.ui.viewmodel.LibraryViewModel
@@ -117,6 +119,9 @@ class MainActivity : ComponentActivity() {
         // YouTubeInnerTubeClient's doc comment.
         val innerTubeCookieManager = InnerTubeCookieManager(appPreferences)
         val youTubeInnerTubeClient = YouTubeInnerTubeClient(innerTubeCookieManager)
+        // Browses YouTube Music's public catalogue -- artists, albums, moods, charts. Takes the
+        // cookie manager only to personalise results; unlike playlist sync it works signed out.
+        val youTubeMusicBrowser = YouTubeMusicBrowser(innerTubeCookieManager)
         val youTubePlaylistSyncManager = YouTubePlaylistSyncManager(
             songDao = database.songDao(),
             playlistDao = database.playlistDao(),
@@ -164,7 +169,8 @@ class MainActivity : ComponentActivity() {
                                     aiFeatureManager = aiFeatureManager,
                                     appPreferences = appPreferences,
                                     youtubeExtractor = youTubeExtractor,
-                                    tagEditorManager = tagEditorManager
+                                    tagEditorManager = tagEditorManager,
+                                    musicBrowser = youTubeMusicBrowser
                                 )
                             }
                         )
@@ -210,6 +216,9 @@ class MainActivity : ComponentActivity() {
                         )
 
                         val youTubeViewModel: YouTubeViewModel = viewModel()
+                        val discoverViewModel: DiscoverViewModel = viewModel(
+                            factory = remember { DiscoverViewModel.Factory(youTubeMusicBrowser) }
+                        )
                         val googleSyncViewModel: GoogleSyncViewModel = viewModel(
                             factory = remember {
                                 GoogleSyncViewModel.Factory(
@@ -231,6 +240,7 @@ class MainActivity : ComponentActivity() {
                             equalizerViewModel = equalizerViewModel,
                             youTubeViewModel = youTubeViewModel,
                             googleSyncViewModel = googleSyncViewModel,
+                            discoverViewModel = discoverViewModel,
                             mediaControllerManager = mediaControllerManager,
                             currentTheme = selectedTheme,
                             onSelectTheme = { themeKey ->

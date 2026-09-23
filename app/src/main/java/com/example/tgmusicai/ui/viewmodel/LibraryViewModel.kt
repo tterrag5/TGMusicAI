@@ -12,6 +12,9 @@ import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.AudioTagIo
 import com.example.tgmusicai.data.repository.TagEditorManager
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.example.tgmusicai.data.youtube.YouTubeAlbumRef
+import com.example.tgmusicai.data.youtube.YouTubeArtistRef
+import com.example.tgmusicai.data.youtube.YouTubeMusicBrowser
 import com.example.tgmusicai.data.youtube.YouTubeSearchResult
 import com.example.tgmusicai.data.repository.MusicFolderTree
 import com.example.tgmusicai.data.repository.MusicRepository
@@ -32,6 +35,8 @@ import kotlinx.coroutines.launch
  * Collects songs from the database, filters them, handles playlist addition,
  * and triggers cover art & lyrics scraping for selected tracks.
  */
+private const val CLOUD_ENTITY_RESULT_LIMIT = 5
+
 class LibraryViewModel(
     private val repository: MusicRepository,
     private val lyricsRepository: LyricsRepository? = null,
@@ -39,7 +44,8 @@ class LibraryViewModel(
     private val aiFeatureManager: AiFeatureManager? = null,
     private val appPreferences: AppPreferences? = null,
     private val youtubeExtractor: YouTubeExtractor? = null,
-    private val tagEditorManager: TagEditorManager? = null
+    private val tagEditorManager: TagEditorManager? = null,
+    private val musicBrowser: YouTubeMusicBrowser? = null
 ) : ViewModel() {
 
     // User search query for filtering songs
@@ -179,6 +185,19 @@ class LibraryViewModel(
     private var cloudSearchJob: Job? = null
 
     /**
+     * Artists and albums matching the query, shown above the individual tracks.
+     *
+     * A separate lookup from the track search: that one goes through NewPipeExtractor, which
+     * returns videos and has no notion of a YouTube Music artist or album page. Searching for an
+     * artist and being offered only a scattering of their songs is the gap this closes.
+     */
+    private val _cloudArtists = MutableStateFlow<List<YouTubeArtistRef>>(emptyList())
+    val cloudArtists: StateFlow<List<YouTubeArtistRef>> = _cloudArtists.asStateFlow()
+
+    private val _cloudAlbums = MutableStateFlow<List<YouTubeAlbumRef>>(emptyList())
+    val cloudAlbums: StateFlow<List<YouTubeAlbumRef>> = _cloudAlbums.asStateFlow()
+
+    /**
      * Debounced so typing doesn't fire a network request per keystroke, and skipped entirely in
      * downloaded-only mode. Local filtering above is synchronous and unaffected by this.
      */
@@ -186,6 +205,8 @@ class LibraryViewModel(
         cloudSearchJob?.cancel()
         if (youtubeExtractor == null || query.length < 2 || downloadedOnly.value) {
             _cloudResults.value = emptyList()
+            _cloudArtists.value = emptyList()
+            _cloudAlbums.value = emptyList()
             _isSearchingCloud.value = false
             return
         }
@@ -198,6 +219,13 @@ class LibraryViewModel(
                 _cloudResults.value = emptyList()
             } finally {
                 _isSearchingCloud.value = false
+            }
+            // Deliberately after the track search rather than alongside it: tracks are what the
+            // user is usually after, and making them wait on two round trips to see any result at
+            // all would be a worse search for the sake of a less common case.
+            if (musicBrowser != null) {
+                _cloudArtists.value = musicBrowser.searchArtists(query).take(CLOUD_ENTITY_RESULT_LIMIT)
+                _cloudAlbums.value = musicBrowser.searchAlbums(query).take(CLOUD_ENTITY_RESULT_LIMIT)
             }
         }
     }
@@ -467,7 +495,8 @@ class LibraryViewModel(
         private val aiFeatureManager: AiFeatureManager? = null,
         private val appPreferences: AppPreferences? = null,
         private val youtubeExtractor: YouTubeExtractor? = null,
-        private val tagEditorManager: TagEditorManager? = null
+        private val tagEditorManager: TagEditorManager? = null,
+        private val musicBrowser: YouTubeMusicBrowser? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -478,7 +507,8 @@ class LibraryViewModel(
                 aiFeatureManager = aiFeatureManager,
                 appPreferences = appPreferences,
                 youtubeExtractor = youtubeExtractor,
-                tagEditorManager = tagEditorManager
+                tagEditorManager = tagEditorManager,
+                musicBrowser = musicBrowser
             ) as T
         }
     }

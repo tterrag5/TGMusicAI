@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.LibraryMusic
@@ -96,6 +97,7 @@ fun MainScreen(
     equalizerViewModel: com.example.tgmusicai.ui.viewmodel.EqualizerViewModel,
     youTubeViewModel: YouTubeViewModel,
     googleSyncViewModel: GoogleSyncViewModel,
+    discoverViewModel: com.example.tgmusicai.ui.viewmodel.DiscoverViewModel,
     mediaControllerManager: MediaControllerManager,
     modifier: Modifier = Modifier,
     currentTheme: String = "YT_DARK",
@@ -206,6 +208,26 @@ fun MainScreen(
                     // The drawer deliberately holds only destinations that are NOT bottom tabs.
                     // Home, Library and Explore used to be listed here as well, which meant three
                     // of the six entries did exactly what the bottom bar already did.
+
+                    // Nav item: Discover (YouTube Music moods, genres and charts)
+                    NavigationDrawerItem(
+                        icon = { Icon(Icons.Rounded.Explore, contentDescription = null) },
+                        label = { Text("Discover", fontWeight = FontWeight.SemiBold) },
+                        selected = currentDestination is Screen.Discover,
+                        onClick = {
+                            navigateTopLevel(Screen.Discover)
+                            scope.launch { drawerState.close() }
+                        },
+                        colors = NavigationDrawerItemDefaults.colors(
+                            selectedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.onBackground,
+                            unselectedContainerColor = Color.Transparent,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        modifier = Modifier.padding(vertical = 2.dp)
+                    )
 
                     // Nav item: Stats
                     NavigationDrawerItem(
@@ -490,6 +512,56 @@ fun MainScreen(
                                             onOpenSettings = { backStack.add(Screen.Settings) }
                                         )
                                     }
+                                    is Screen.Discover -> {
+                                        DiscoverScreen(
+                                            discoverViewModel = discoverViewModel,
+                                            onOpenDrawer = { scope.launch { drawerState.open() } },
+                                            onPlayTrack = { result ->
+                                                youTubeViewModel.playTrack(result, mediaControllerManager)
+                                                playerViewModel.expandNowPlaying()
+                                            },
+                                            onDownloadTrack = { result -> youTubeViewModel.downloadTrack(result) },
+                                            onOpenAlbum = { album ->
+                                                backStack.add(Screen.AlbumDetail(album.browseId, album.title))
+                                            }
+                                        )
+                                    }
+                                    is Screen.ArtistDetail -> {
+                                        ArtistDetailScreen(
+                                            browseId = key.browseId,
+                                            artistName = key.artistName,
+                                            discoverViewModel = discoverViewModel,
+                                            onBack = {
+                                                if (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+                                            },
+                                            onPlayTrack = { result ->
+                                                youTubeViewModel.playTrack(result, mediaControllerManager)
+                                                playerViewModel.expandNowPlaying()
+                                            },
+                                            onDownloadTrack = { result -> youTubeViewModel.downloadTrack(result) },
+                                            onOpenAlbum = { album ->
+                                                backStack.add(Screen.AlbumDetail(album.browseId, album.title))
+                                            },
+                                            onOpenArtist = { related ->
+                                                backStack.add(Screen.ArtistDetail(related.browseId, related.name))
+                                            }
+                                        )
+                                    }
+                                    is Screen.AlbumDetail -> {
+                                        AlbumDetailScreen(
+                                            browseId = key.browseId,
+                                            albumTitle = key.albumTitle,
+                                            discoverViewModel = discoverViewModel,
+                                            onBack = {
+                                                if (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+                                            },
+                                            onPlayTrack = { result ->
+                                                youTubeViewModel.playTrack(result, mediaControllerManager)
+                                                playerViewModel.expandNowPlaying()
+                                            },
+                                            onDownloadTrack = { result -> youTubeViewModel.downloadTrack(result) }
+                                        )
+                                    }
                                     is Screen.Settings -> {
                                         SettingsScreen(
                                             homeViewModel = homeViewModel,
@@ -513,6 +585,12 @@ fun MainScreen(
                                             },
                                             onDownloadCloudResult = { result ->
                                                 youTubeViewModel.downloadTrack(result)
+                                            },
+                                            onOpenArtist = { artist ->
+                                                backStack.add(Screen.ArtistDetail(artist.browseId, artist.name))
+                                            },
+                                            onOpenAlbum = { album ->
+                                                backStack.add(Screen.AlbumDetail(album.browseId, album.title))
                                             }
                                         )
                                     }

@@ -93,6 +93,8 @@ fun LibraryScreen(
     onOpenDrawer: () -> Unit = {},
     onPlayCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {},
     onDownloadCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {},
+    onOpenArtist: (com.example.tgmusicai.data.youtube.YouTubeArtistRef) -> Unit = {},
+    onOpenAlbum: (com.example.tgmusicai.data.youtube.YouTubeAlbumRef) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val songs by libraryViewModel.filteredSongs.collectAsState()
@@ -109,6 +111,8 @@ fun LibraryScreen(
     val downloadedOnly by libraryViewModel.downloadedOnly.collectAsState()
     val cloudResults by libraryViewModel.cloudResults.collectAsState()
     val isSearchingCloud by libraryViewModel.isSearchingCloud.collectAsState()
+    val cloudArtists by libraryViewModel.cloudArtists.collectAsState()
+    val cloudAlbums by libraryViewModel.cloudAlbums.collectAsState()
     val songForTagEdit by libraryViewModel.songForTagEdit.collectAsState()
     val folderBrowsingEnabled by libraryViewModel.folderBrowsingEnabled.collectAsState()
     val currentFolder by libraryViewModel.currentFolder.collectAsState()
@@ -385,6 +389,68 @@ fun LibraryScreen(
                             onSwipeToLike = { libraryViewModel.toggleLikeSong(song) },
                             liveDownloadStatus = song.youtubeId?.let { downloadMap[it]?.status }
                         )
+                    }
+
+                    if (cloudArtists.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = "Artists",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                            )
+                        }
+                        items(cloudArtists, key = { "artist_${it.browseId}" }) { artist ->
+                            Surface(
+                                onClick = { onOpenArtist(artist) },
+                                color = MaterialTheme.colorScheme.surface,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = artist.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    if (cloudAlbums.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = "Albums",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                            )
+                        }
+                        items(cloudAlbums, key = { "cloudalbum_${it.browseId}" }) { album ->
+                            Surface(
+                                onClick = { onOpenAlbum(album) },
+                                color = MaterialTheme.colorScheme.surface,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                                    Text(
+                                        text = album.title,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (album.subtitle.isNotBlank()) {
+                                        Text(
+                                            text = album.subtitle,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     if (isSearchingCloud || cloudResults.isNotEmpty()) {
