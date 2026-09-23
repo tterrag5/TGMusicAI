@@ -308,11 +308,15 @@ class PlayerViewModel(
     }
 
     /**
-     * Transcribes the current song's downloaded audio via a bundled on-device Whisper-tiny.en
-     * model when no lyrics could be found any other way -- see
-     * [com.example.tgmusicai.ai.WhisperTranscriptionEngine]. No API key needed. A no-op (with a
-     * clear status message) if the song isn't downloaded yet, since the model needs the actual
-     * local audio file.
+     * Transcribes the current song's audio via a bundled on-device Whisper-tiny.en model when no
+     * lyrics could be found any other way -- see
+     * [com.example.tgmusicai.ai.WhisperTranscriptionEngine]. No API key needed.
+     *
+     * Works for streamed cloud tracks as well as downloaded ones: a cloud song has a `youtubeId`,
+     * which is enough for [LyricsRepository.transcribeWithWhisper] to fetch its audio to a
+     * temporary file and decode that. Requiring a download first made transcription the one
+     * feature a cloud track could not use, which is why the gate is now "no audio reachable at
+     * all" rather than "not downloaded".
      */
     fun transcribeLyricsWithAi(song: Song? = currentSong.value) {
         val target = song ?: return
@@ -322,8 +326,8 @@ class PlayerViewModel(
             return
         }
         viewModelScope.launch {
-            if (!target.isDownloaded) {
-                _transcribeError.value = "Download this song first to transcribe its lyrics with AI."
+            if (!target.isDownloaded && target.youtubeId.isNullOrBlank()) {
+                _transcribeError.value = "This song has no audio available to transcribe."
                 return@launch
             }
             _isTranscribing.value = true
