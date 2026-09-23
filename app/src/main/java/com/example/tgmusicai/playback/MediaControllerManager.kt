@@ -36,7 +36,14 @@ class MediaControllerManager(
     private val context: Context
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    
+
+    /**
+     * Pulls the playing track and the one after it fully onto disk, so a signed stream URL
+     * expiring or throttling mid-song cannot kill playback partway through. Best-effort only --
+     * see [StreamPrefetcher].
+     */
+    private val prefetcher = StreamPrefetcher(context, scope)
+
     private var controller: MediaController? = null
 
     // Reactive StateFlows for UI binding
@@ -136,6 +143,7 @@ class MediaControllerManager(
                 _currentPositionMs.value = 0L
                 updateCurrentMediaItem(mediaItem)
                 resolveAheadIfNeeded()
+                prefetchAroundCurrent()
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -370,6 +378,30 @@ class MediaControllerManager(
         player.setMediaItems(mediaItems, validIndex, 0L)
         player.prepare()
         player.play()
+        prefetchAroundCurrent()
+    }
+
+    /**
+     * Caches the playing track and the next one in full, and drops prefetches for anything else.
+     *
+     * Only these two: the point is to protect the track being heard and the handover to the one
+     * after it, not to download the whole queue. Local tracks are ignored by [StreamPrefetcher],
+     * and an unresolved cloud URL is skipped here because prefetching a watch page is pointless --
+     * it is picked up on the next transition, once resolution has patched a real URL in.
+     */
+    private fun prefetchAroundCurrent() {
+        val player = controller ?: return
+        val currentIndex = player.currentMediaItemIndex
+
+        val wanted = listOfNotNull(
+            currentSongList.getOrNull(currentIndex),
+            currentSongList.getOrNull(currentIndex + 1),
+        )
+            .map { it.mediaUri }
+            .filterNot { isUnresolvedCloudUri(it) }
+
+        prefetcher.retainOnly(wanted)
+        wanted.forEach(prefetcher::prefetch)
     }
 
     // Caps how many cloud-stream resolutions run at once. Firing a dozen concurrent requests at
@@ -431,6 +463,8 @@ class MediaControllerManager(
                 currentSongList = currentSongList.toMutableList().also { it[idx] = resolved }
                 _playlist.value = currentSongList
                 controller?.replaceMediaItem(idx, buildMediaItem(resolved))
+                // Now that this one has a real stream URL, it is worth caching ahead.
+                prefetchAroundCurrent()
             }
         }
     }
@@ -650,6 +684,7 @@ class MediaControllerManager(
 
     fun release() {
         stopPositionTicker()
+        prefetcher.cancelAll()
         controller?.release()
         controller = null
         scope.cancel()
