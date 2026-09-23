@@ -46,7 +46,7 @@ moshiKotlinCodegen = "1.15.2"
 datastorePreferences = "1.1.7"
 material = "1.4.+"
 media3 = "1.11.1"
-newpipeExtractor = "0.24.8"
+newpipeExtractor = "13a655fe53e0c3065f88725fc1fb594c3ede0169" # commit, not a tag -- see newpipe-extractor below
 tensorflowLite = "2.17.0"
 onnxruntimeAndroid = "1.19.2"
 paletteKtx = "1.0.0"
@@ -108,7 +108,13 @@ material = { group = "com.google.android.material", name = "material", version.r
 androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 androidx-media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3" }
 androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
-newpipe-extractor = { group = "com.github.TeamNewPipe.NewPipeExtractor", name = "extractor", version = "v0.24.8" }
+# Pinned to a commit rather than a release tag, and to the whole-repository JitPack artifact
+# (com.github.TeamNewPipe:NewPipeExtractor) rather than the older `...NewPipeExtractor:extractor`
+# submodule coordinate. Both changes follow what NewPipe itself does upstream: JitPack periodically
+# deletes tag-built artifacts, so `v0.26.5` resolves to nothing, while commit builds persist. The
+# project's own maven repo (maven.schabi.org) is not a usable alternative -- it currently serves a
+# certificate that does not match its hostname.
+newpipe-extractor = { module = "com.github.TeamNewPipe:NewPipeExtractor", version.ref = "newpipeExtractor" }
 tensorflow-lite = { group = "org.tensorflow", name = "tensorflow-lite", version.ref = "tensorflowLite" }
 onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntimeAndroid" }
 androidx-palette-ktx = { group = "androidx.palette", name = "palette-ktx", version.ref = "paletteKtx" }

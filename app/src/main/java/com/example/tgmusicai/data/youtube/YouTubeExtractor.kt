@@ -12,6 +12,7 @@ import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
+import org.schabi.newpipe.extractor.stream.StreamInfo
 import org.schabi.newpipe.extractor.stream.StreamInfoItem
 import java.io.IOException
 import java.net.URLEncoder
@@ -394,6 +395,55 @@ class YouTubeExtractor {
     }
 
     /**
+     * Resolves audio streams by talking to YouTube directly through NewPipeExtractor.
+     *
+     * This is the primary resolution path, and the reason cloud playback works at all: the
+     * Piped/Invidious tiers that used to be the only path depend on public instances that rot
+     * continuously, and every one of them was measured dead or blocking. This path depends on
+     * nothing but YouTube itself.
+     *
+     * No Proof-of-Origin token is involved. Current NewPipeExtractor resolves through InnerTube
+     * clients that do not require one -- in practice the visionOS client, visible as `c=VISIONOS`
+     * in the resulting stream URLs -- and its own `YoutubeStreamExtractor.setPoTokenProvider` is
+     * documented as a no-op "until SABR support is added to the extractor". An earlier revision of
+     * this work included a full BotGuard/WebView poToken generator; it was removed once it was
+     * shown to never be consulted. If YouTube forces poTokens again, recover it from git history
+     * rather than rewriting it.
+     *
+     * Returns an empty list rather than throwing, so callers can simply fall through to the
+     * remaining tiers.
+     */
+    private suspend fun tryNewPipeStreamExtractions(videoId: String): List<YouTubeAudioStream> =
+        withContext(Dispatchers.IO) {
+            try {
+                val info = StreamInfo.getInfo(
+                    ServiceList.YouTube,
+                    "https://www.youtube.com/watch?v=$videoId",
+                )
+                info.audioStreams
+                    // Highest bitrate wins regardless of container. Android Auto is unaffected by
+                    // the choice: it renders this app's browse tree while audio plays through the
+                    // app's own ExoPlayer, so the container never reaches the head unit.
+                    .sortedByDescending { it.averageBitrate }
+                    .mapNotNull { stream ->
+                        val url = stream.content ?: return@mapNotNull null
+                        if (url.isBlank()) return@mapNotNull null
+                        YouTubeAudioStream(
+                            url = url,
+                            format = normalizeAudioFormat(
+                                stream.format?.mimeType.orEmpty(),
+                                stream.format?.suffix.orEmpty(),
+                            ),
+                            bitrate = stream.averageBitrate,
+                        )
+                    }
+            } catch (e: Exception) {
+                Log.e("TGMusicCloud", "Tier 0 NewPipe extraction failed for $videoId: ${e.message}", e)
+                emptyList()
+            }
+        }
+
+    /**
      * Fetches the current list of public HTTPS Invidious instances from the official
      * `api.invidious.io/instances.json` directory. Unlike Piped (which has no equivalent live,
      * reachable directory as of this writing), Invidious publishes one, so this makes the
@@ -661,6 +711,16 @@ class YouTubeExtractor {
         val cleanId = extractVideoId(videoId) ?: videoId
         val candidateStreams = mutableListOf<YouTubeAudioStream>()
 
+        // Tier 0 first, so downloads try the direct YouTube streams before the public-instance
+        // fallbacks. CloudDownloadManager attempts candidates in order and names the file from the
+        // chosen stream's format, so order here decides both which source is used and the on-disk
+        // extension.
+        try {
+            candidateStreams.addAll(tryNewPipeStreamExtractions(cleanId))
+        } catch (e: Exception) {
+            Log.e("TGMusicCloud", "Tier 0 NewPipe extractions failed for $cleanId: ${e.message}", e)
+        }
+
         try {
             candidateStreams.addAll(tryPipedStreamExtractions(cleanId))
         } catch (e: Exception) {
@@ -692,6 +752,19 @@ class YouTubeExtractor {
                 return@withContext cached.stream
             }
             streamCache.remove(cleanId)
+        }
+
+        try {
+            val newPipeStreams = tryNewPipeStreamExtractions(cleanId)
+            for (candidate in newPipeStreams) {
+                if (verifyStreamUrl(candidate.url)) {
+                    Log.d("TGMusicCloud", "Tier 0 NewPipe resolved verified stream for $cleanId: ${candidate.url}")
+                    streamCache[cleanId] = CachedStream(candidate, expiryFromStreamUrl(candidate.url))
+                    return@withContext candidate
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("TGMusicCloud", "Tier 0 NewPipe extraction failed for $cleanId: ${e.message}", e)
         }
 
         try {
