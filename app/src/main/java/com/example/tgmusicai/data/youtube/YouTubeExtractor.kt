@@ -691,6 +691,19 @@ class YouTubeExtractor {
      * fast answer (e.g. direct playback). Tries each tier in order and returns as soon as a
      * candidate passes the [verifyStreamUrl] pre-flight check.
      */
+    /**
+     * Forgets any cached stream URL for [videoId], so the next [extractAudioStream] resolves anew.
+     *
+     * Needed because a resolved URL can stop working before this cache would expire it: YouTube's
+     * signed URLs carry their own lifetime and are throttled per address, so one can start
+     * answering HTTP 403 while still looking fresh here. Without this, a track that failed once
+     * would keep failing for as long as the stale entry survived.
+     */
+    fun invalidateCachedStream(videoId: String) {
+        val cleanId = extractVideoId(videoId) ?: videoId
+        streamCache.remove(cleanId)
+    }
+
     suspend fun extractAudioStream(videoId: String): YouTubeAudioStream? = withContext(Dispatchers.IO) {
         val cleanId = extractVideoId(videoId) ?: videoId
 

@@ -6,6 +6,7 @@ import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -149,7 +150,13 @@ class MediaControllerManager(
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
                     _durationMs.value = controller?.duration?.coerceAtLeast(0L) ?: 0L
+                    // A track that actually played is allowed a fresh retry next time it fails.
+                    reresolveAttempts.clear()
                 }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                recoverFromPlaybackError(error)
             }
 
             override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
@@ -379,6 +386,70 @@ class MediaControllerManager(
         player.prepare()
         player.play()
         prefetchAroundCurrent()
+    }
+
+    /** Cloud tracks re-resolved after a playback failure, so one bad URL cannot loop forever. */
+    private val reresolveAttempts = mutableSetOf<String>()
+
+    /**
+     * Recovers from a playback failure by resolving the track again, once.
+     *
+     * A resolved YouTube URL is signed and expires, and YouTube throttles repeated fetches from
+     * one address, so a URL that worked a moment ago can start answering HTTP 403 while the
+     * resolver still considers it fresh. Before this, that ended playback outright with no
+     * recovery. Re-resolving is the correct response, and is what makes a stale URL a hiccup
+     * rather than a dead queue.
+     *
+     * Only cloud tracks are retried, and each only once between successful plays -- a local file
+     * that fails to open will not start working because it was asked for twice, and retrying
+     * forever would spin.
+     */
+    private fun recoverFromPlaybackError(error: PlaybackException) {
+        val player = controller ?: return
+        val index = player.currentMediaItemIndex
+        val song = currentSongList.getOrNull(index) ?: return
+        val videoId = song.youtubeId
+
+        if (videoId.isNullOrBlank()) {
+            android.util.Log.w("TGMusicCloud", "Playback failed for a local track: ${error.errorCodeName}")
+            return
+        }
+        if (!reresolveAttempts.add(videoId)) {
+            android.util.Log.w(
+                "TGMusicCloud",
+                "Giving up on \"${song.title}\": still failing after re-resolving (${error.errorCodeName})"
+            )
+            _playbackError.value = "Can't stream \"${song.title}\" right now. Download it to play offline."
+            return
+        }
+
+        android.util.Log.w(
+            "TGMusicCloud",
+            "Playback failed for \"${song.title}\" (${error.errorCodeName}); re-resolving its stream"
+        )
+
+        val generation = queueGeneration
+        scope.launch {
+            // The cached URL is the one that just failed, so it has to go before re-resolving.
+            withContext(Dispatchers.IO) { youtubeExtractor.invalidateCachedStream(videoId) }
+            val resolved = resolveSongForPlayback(song.copy(mediaUri = "https://www.youtube.com/watch?v=$videoId"))
+
+            if (queueGeneration != generation) return@launch
+            if (isUnresolvedCloudUri(resolved.mediaUri)) {
+                _playbackError.value =
+                    "Can't stream \"${song.title}\" right now. Download it to play offline."
+                return@launch
+            }
+
+            val activePlayer = controller ?: return@launch
+            currentSongList = currentSongList.toMutableList().also {
+                if (index < it.size) it[index] = resolved
+            }
+            _playlist.value = currentSongList
+            activePlayer.replaceMediaItem(index, buildMediaItem(resolved))
+            activePlayer.prepare()
+            activePlayer.play()
+        }
     }
 
     /**
