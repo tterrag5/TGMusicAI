@@ -4,11 +4,11 @@ Everything below the line is the message. Paste it as your first message in the 
 
 ---
 
-I'm continuing work on TGMusicAI, an Android music player (Kotlin, Jetpack Compose, Media3, Room). A previous session finished a large UI/UX overhaul and left one task outstanding. Nothing is in your context, so start by reading these three files in the repo root, in this order:
+I'm continuing work on TGMusicAI, an Android music player (Kotlin, Jetpack Compose, Media3, Room). A previous session finished a large UI/UX overhaul and left four items outstanding. Nothing is in your context, so start by reading these three files in the repo root, in this order:
 
 1. `SESSION_HANDOFF.md` — what was done and why, plus the current state of the repo.
 2. `CLAUDE.md` — project architecture and the rules that matter (read the build-environment note near the top).
-3. `PHASE2_POTOKEN_HANDOFF.md` — the full research paper for the one remaining task.
+3. `PHASE2_POTOKEN_HANDOFF.md` — the full research paper for backlog item 3 (cloud streaming).
 
 **There are four outstanding items**, listed under "What is left — backlog" in `SESSION_HANDOFF.md`. They don't have to be done in that order:
 
