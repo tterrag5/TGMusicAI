@@ -10,7 +10,14 @@ I'm continuing work on TGMusicAI, an Android music player (Kotlin, Jetpack Compo
 2. `CLAUDE.md` — project architecture and the rules that matter (read the build-environment note near the top).
 3. `PHASE2_POTOKEN_HANDOFF.md` — the full research paper for the one remaining task.
 
-**The remaining task is Phase 2: fix YouTube stream resolution.** Right now, tapping any cloud song shows an error toast instead of playing, and cloud downloads fail the same way, because the app resolves stream URLs through public Piped/Invidious instances and every one of them is dead or blocking. The fix is to resolve through NewPipeExtractor directly using a `PoTokenProvider` backed by a hidden WebView running BotGuard. `PHASE2_POTOKEN_HANDOFF.md` has the verified API signatures, architecture, code sketches, the upstream files to port, the risks, and a 10-step plan. Follow its plan rather than improvising a different approach.
+**There are four outstanding items**, listed under "What is left — backlog" in `SESSION_HANDOFF.md`. They don't have to be done in that order:
+
+1. **Drag-to-reorder playlists** — reorder songs inside a playlist, and reorder the playlists themselves in the Playlists tab and the drawer.
+2. **Recommendations** — produce a *complete implementation specification*. This one is a document, not code: read its section carefully, because the bar is "a fresh session could implement it without asking a single design question", not a general survey.
+3. **Fix cloud streaming and downloads** — the unfinished Phase 2, and the only item that unblocks broken functionality. Tapping any cloud song currently shows an error toast, and downloads fail identically, because the app resolves stream URLs through public Piped/Invidious instances and every one of them is dead or blocking. The fix is to resolve through NewPipeExtractor directly using a `PoTokenProvider` backed by a hidden WebView running BotGuard. `PHASE2_POTOKEN_HANDOFF.md` has the verified API signatures, architecture, code sketches, the upstream files to port, the risks, and a 10-step plan — follow it rather than improvising a different approach.
+4. **"Import from YouTube" tab** on the Playlists screen, so it isn't drawer-only.
+
+Each backlog entry lists what already exists in the codebase for that task. Read those notes before designing anything — several of them point at working code that is currently dormant, and a couple of the tasks are much smaller than they sound because of it. Ask me which item to start with if it isn't obvious.
 
 Two things that will waste your time if you don't know them:
 
@@ -19,7 +26,7 @@ Two things that will waste your time if you don't know them:
 
 Before you change anything, confirm the baseline: `./gradlew test` should report 51 passing tests and `./gradlew assembleDebug` should succeed. The working tree should be clean, with the latest commit on branch `feature/ui-overhaul-and-keyless-ai`.
 
-Please start at **step 3 of the plan in `PHASE2_POTOKEN_HANDOFF.md`** — get a poToken minting standalone and logged before integrating it into anything. That checkpoint exists because if token generation doesn't work, nothing downstream can, and integrating first makes the failure much harder to localise.
+If you start with item 3, begin at **step 3 of the plan in `PHASE2_POTOKEN_HANDOFF.md`** — get a poToken minting standalone and logged before integrating it into anything. That checkpoint exists because if token generation doesn't work, nothing downstream can, and integrating first makes the failure much harder to localise.
 
 Two standing constraints from the previous work, both documented in `CLAUDE.md`:
 

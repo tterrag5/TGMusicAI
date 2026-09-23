@@ -87,8 +87,75 @@ nix develop                 # or -Dorg.gradle.java.home=<jdk17>
 
 ---
 
-## What is left
+## What is left — backlog
 
-Only **Phase 2: durable cloud stream resolution**. Cloud playback and cloud downloads are both non-functional until it lands, because every public Piped/Invidious instance the app depends on is dead or blocking. Full research, verified API signatures, architecture, code sketches, risks and a step-by-step plan are in **`PHASE2_POTOKEN_HANDOFF.md`**.
+Four items, requested by the project owner. **They do not need to be done in this order**, though item 3 is the only one that unblocks broken functionality, so it is the most valuable. Items 1 and 4 are small and independent; item 2 produces a document, not code.
 
-One deliberately deferred follow-up, documented at the end of that file: prefetching whole tracks through the existing `AudioCacheManager` for playback reliability. It is useless before resolution works.
+---
+
+### 1. Drag-to-reorder playlists
+
+Let the user reorder tracks *within* a playlist by dragging, and reorder the playlists themselves in the Playlists tab and in the navigation drawer's playlist list.
+
+**Most of the groundwork already exists — check it before designing anything:**
+
+- **`PlaylistSongCrossRef.position: Int` already exists** (`data/local/entity/PlaylistSongCrossRef.kt:34`). No schema change or migration is needed to order songs inside a playlist.
+- **But nothing currently orders by it.** `PlaylistDao.getPlaylistWithSongs` / `getPlaylistWithSongsSync` are plain `SELECT * FROM playlists WHERE playlistId = :id` with a Room `@Relation`, so songs come back in whatever order the junction happens to yield. Room's `@Relation` cannot `ORDER BY` a junction column, so this needs a hand-written query (or a post-query sort against the cross-ref rows). **This is the crux of the task** — persisting a drag is pointless until reads respect `position`.
+- **A working drag implementation already exists in this codebase**: `ui/components/QueueSheet.kt` (~line 246-267) hand-rolls drag-to-reorder over a `LazyColumn` with `pointerInput`/`detectDragGestures`, wired to `PlayerViewModel.moveQueueItem(from, to)` → `MediaControllerManager.moveQueueItem`. Reuse that pattern rather than adding a third-party reorderable-list dependency; note its comment about the gesture not restarting mid-drag, which is a real trap.
+
+**Reordering the playlists themselves** is the part with no existing support: `Playlist` has `isPinned` and `createdAt` but **no `position` column**, and `PlaylistsScreen` currently sorts by `isPinned` only. That half *does* need a schema change — add a `position` column with an additive `MIGRATION_11_12`. Per `CLAUDE.md`, never use `fallbackToDestructiveMigration()` for a shipped schema bump.
+
+Scope note: the drawer's playlist list (`MainScreen.kt`) and the Playlists tab must share one ordering, or the two views will disagree.
+
+**Done when:** dragging a song inside a playlist persists across app restart; dragging a playlist persists and is reflected in both the Playlists tab and the drawer; the six protected smart playlists behave sensibly (they are computed, not cross-ref-backed — decide explicitly whether they are reorderable or pinned to a fixed position, and say which).
+
+---
+
+### 2. Recommendations — produce a complete implementation specification
+
+**Read this framing carefully, because the deliverable is not what "research" usually means here.**
+
+You are **not** producing a general survey of how recommendation systems work, and you are **not** writing the feature yet. You are producing a **full, implementation-ready breakdown** — a document so complete that the session which picks it up afterwards has no design decisions left to make and no unknowns to resolve. It should only need to write code.
+
+Concretely, the document must nail down **all** of the following, with no "we could either…" left unresolved:
+
+- **The chosen algorithm**, stated exactly: what signals feed it, how candidates are generated, how they are scored and ranked, how ties and cold-start cases are handled, and why that approach over the alternatives you rejected. Name the rejected options and the reason each lost.
+- **How comparable apps actually do it** (Spotify, YouTube Music, Plexamp, and any on-device recommender worth copying), and specifically which parts of their approach are and are not viable for an offline-first app with no backend and no user-behaviour corpus beyond this one device.
+- **Every library or model** you intend to use: exact artifact coordinates, version, licence, size on disk, whether it runs on-device, and whether it needs a dependency bump. If you propose a new model asset, state its size and confirm it can be bundled (`androidResources { noCompress += ... }` already keeps `.tflite`/`.onnx` uncompressed).
+- **The exact data model changes**: new tables/columns, the Room migration number and its SQL, and what backfills existing rows.
+- **The exact new/changed files**, with the function signatures you intend to add.
+- **Where it surfaces in the UI**, tied to real screens that exist today.
+- **Compute and storage budget**: when the work runs (foreground? on scan? background?), how long it takes for a library of N songs, and what it costs in battery and disk.
+- **How you will evaluate it.** "Recommendations feel good" is not a test. Define something checkable.
+- **What will go wrong**, and the failure behaviour for each case.
+
+**Start from what this codebase already has, because it is more than it looks and a survey that ignores it would be wasted work:**
+
+- **`ai_song_tags` table** already stores, per song: YAMNet audio tags (up to 8, score ≥ 0.08, from `SongTaggingEngine`) and a **384-dimension MiniLM lyrics embedding** (`LyricsEmbeddingEngine.EMBEDDING_DIM`), plus `computedAt`. `AiFeatureManager.backfillAll()` can populate it across the library.
+- **`AiFeatureManager.rankBySimilarLyrics(seedSongId, candidateSongIds, limit)` already exists and works** — cosine similarity over those embeddings, with `LyricsEmbeddingEngine.cosineSimilarity` as the primitive. **It is currently dead code: nothing in the app calls it.**
+- **`listening_history` table** (songId, timestampMs, durationMs) is **written on every play but never read by anything**. It is a complete play log sitting unused — almost certainly your richest behavioural signal.
+- **`song_stats`** holds `playCount`, `lastPlayedAt`, `totalListenTimeMs` per song.
+- **`MusicRepository.buildRadioQueue(seedSong, limit)` is the existing "recommendation"**, and it is purely metadata-based: same producer, then same artist, then random, each bucket shuffled with under-played songs first. **It ignores the embeddings and tags entirely.** Wiring the existing similarity ranking into this is probably the cheapest meaningful win available, and your spec should say whether that is step one or whether you are replacing it wholesale.
+- All AI work must stay inside the containment rules in `CLAUDE.md`: engines self-initialise behind try-catch, mark themselves permanently unavailable on failure, and return `AiModelResult` rather than throwing. **A model failure must never be able to affect playback.**
+
+**Done when:** a reviewer can hand the document to a fresh session and that session can implement the feature without asking a single design question.
+
+---
+
+### 3. Fix cloud streaming and downloads (the unfinished Phase 2)
+
+Tapping a cloud song currently shows an error toast; cloud downloads fail identically, because both go through the same resolver and every public Piped/Invidious instance it depends on is dead or blocking.
+
+This is fully specified already in **`PHASE2_POTOKEN_HANDOFF.md`** — verified API signatures, architecture, code sketches, the upstream files to port, licensing notes, risks, a verification plan, and a 10-step order of work. Follow that plan rather than improvising.
+
+Its deferred follow-up also belongs here: prefetching whole tracks through the existing `AudioCacheManager` for playback reliability, which is useless until resolution works.
+
+---
+
+### 4. "Import from YouTube" tab on the Playlists screen
+
+Importing from YouTube currently lives only in the navigation drawer (`Screen.GoogleSync`), which is an odd place for something that produces playlists. Surface it at the top of the Playlists screen as a small tab/segmented control so it sits next to the thing it creates.
+
+Relevant context: `PlaylistsScreen.kt` already has a top bar carrying a grid/list toggle and a file-import action, and a selection-mode variant of that bar; the destination already exists as `Screen.GoogleSync` and is reachable via `MainScreen.navigateTopLevel`. Keep the drawer entry as well, or remove it deliberately and say so — do not end up with the same ambiguity the duplicate create-playlist buttons caused.
+
+**Done when:** the entry point is visible from the Playlists tab without opening the drawer, and navigating to it and back leaves the back stack intact (see the `navigateTopLevel` rule above).
