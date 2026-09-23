@@ -24,4 +24,8 @@ local.properties
 skills-lock.json
 
 # Internal Documentation / Working Notes
+# Every markdown file is a local working note -- architecture cheat sheets, session handoffs,
+# agent instructions -- and stays off the repo. The README is the one document meant for readers.
 MD Files/
+*.md
+!README.md
