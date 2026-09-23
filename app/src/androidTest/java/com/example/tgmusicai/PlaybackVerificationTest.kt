@@ -47,8 +47,26 @@ class PlaybackVerificationTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
 
+    /**
+     * Resolves a cloud track and plays it.
+     *
+     * A signed `googlevideo` URL can be rejected with HTTP 403 even when it was valid moments
+     * earlier -- YouTube throttles repeated fetches of the same track from one address, which this
+     * suite provokes by design. That is a property of the dependency, not a defect, and the
+     * correct response to it is to resolve again rather than to declare playback broken, so the
+     * test does exactly that once before failing.
+     */
     @Test
     fun playsAResolvedCloudStream() = runBlocking {
+        val failure = attemptCloudPlayback() ?: return@runBlocking
+        Log.w(TAG, "First cloud playback attempt failed (${failure.message}); re-resolving once")
+
+        val secondFailure = attemptCloudPlayback()
+        if (secondFailure != null) throw secondFailure
+    }
+
+    /** Returns null on success, or the failure to report if playback did not become ready. */
+    private suspend fun attemptCloudPlayback(): AssertionError? {
         val stream = withTimeout(RESOLVE_TIMEOUT_MS) {
             YouTubeExtractor().extractAudioStream(TEST_VIDEO_ID)
         }
@@ -56,7 +74,12 @@ class PlaybackVerificationTest {
         requireNotNull(stream)
 
         Log.i(TAG, "Playing resolved cloud stream (${stream.format}, ${stream.bitrate}kbps)")
-        assertPlaysToReady(Uri.parse(stream.url), "cloud stream")
+        return try {
+            assertPlaysToReady(Uri.parse(stream.url), "cloud stream")
+            null
+        } catch (e: AssertionError) {
+            e
+        }
     }
 
     /**
