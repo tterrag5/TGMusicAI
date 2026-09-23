@@ -1,6 +1,9 @@
 package com.example.tgmusicai.ui.screens
 
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -66,6 +69,7 @@ import com.example.tgmusicai.ui.components.AddToPlaylistDialog
 import com.example.tgmusicai.ui.components.SongGridItem
 import com.example.tgmusicai.ui.components.YouTubeSearchResultItem
 import com.example.tgmusicai.ui.components.SongItem
+import com.example.tgmusicai.ui.components.TagEditorDialog
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
 import com.example.tgmusicai.ui.viewmodel.LibraryViewModel
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
@@ -102,6 +106,8 @@ fun LibraryScreen(
     val downloadedOnly by libraryViewModel.downloadedOnly.collectAsState()
     val cloudResults by libraryViewModel.cloudResults.collectAsState()
     val isSearchingCloud by libraryViewModel.isSearchingCloud.collectAsState()
+    val songForTagEdit by libraryViewModel.songForTagEdit.collectAsState()
+    val tagWriteConsentRequest by libraryViewModel.tagWriteConsentRequest.collectAsState()
 
     val context = LocalContext.current
     var showBulkDeleteConfirm by remember { mutableStateOf(false) }
@@ -119,6 +125,34 @@ fun LibraryScreen(
             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             playerViewModel.clearStatusMessage()
         }
+    }
+
+    // Rewriting a file that came from MediaStore needs the system's own per-file consent dialog.
+    // It arrives as a PendingIntent the app has to launch; approving it re-runs the edit the user
+    // already typed rather than making them enter it again.
+    val tagWriteConsentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            libraryViewModel.retryPendingTagEdit()
+        } else {
+            libraryViewModel.cancelPendingTagEdit()
+        }
+    }
+
+    LaunchedEffect(tagWriteConsentRequest) {
+        tagWriteConsentRequest?.let { request ->
+            tagWriteConsentLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+        }
+    }
+
+    songForTagEdit?.let { song ->
+        TagEditorDialog(
+            song = song,
+            loadTags = { libraryViewModel.loadFileTags(it) },
+            onDismiss = libraryViewModel::closeTagEditor,
+            onSave = { tags -> libraryViewModel.saveTags(song, tags) }
+        )
     }
 
     Scaffold(
@@ -300,6 +334,11 @@ fun LibraryScreen(
                             onScrapeClicked = { libraryViewModel.scrapeArtworkAndLyrics(song) },
                             onStartRadioClicked = { playerViewModel.startRadio(song) },
                             onAnalyzeWithAiClicked = { libraryViewModel.analyzeSongWithAi(song) },
+                            onEditTagsClicked = if (libraryViewModel.canEditTags(song)) {
+                                { libraryViewModel.openTagEditor(song) }
+                            } else {
+                                null
+                            },
                             onSwipeToQueue = { playerViewModel.addToQueue(song) },
                             onSwipeToLike = { libraryViewModel.toggleLikeSong(song) },
                             liveDownloadStatus = song.youtubeId?.let { downloadMap[it]?.status }
@@ -435,6 +474,11 @@ fun LibraryScreen(
                             },
                             onAnalyzeWithAiClicked = {
                                 libraryViewModel.analyzeSongWithAi(song)
+                            },
+                            onEditTagsClicked = if (libraryViewModel.canEditTags(song)) {
+                                { libraryViewModel.openTagEditor(song) }
+                            } else {
+                                null
                             },
                             onSwipeToQueue = { playerViewModel.addToQueue(song) },
                             onSwipeToLike = { libraryViewModel.toggleLikeSong(song) },

@@ -9,6 +9,8 @@ import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.local.AppPreferences
+import com.example.tgmusicai.data.local.AudioTagIo
+import com.example.tgmusicai.data.repository.TagEditorManager
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
 import com.example.tgmusicai.data.youtube.YouTubeSearchResult
 import com.example.tgmusicai.data.repository.MusicRepository
@@ -34,12 +36,81 @@ class LibraryViewModel(
     private val coverArtScraper: CoverArtScraper? = null,
     private val aiFeatureManager: AiFeatureManager? = null,
     private val appPreferences: AppPreferences? = null,
-    private val youtubeExtractor: YouTubeExtractor? = null
+    private val youtubeExtractor: YouTubeExtractor? = null,
+    private val tagEditorManager: TagEditorManager? = null
 ) : ViewModel() {
 
     // User search query for filtering songs
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    // The song whose tags are open for editing, or null when the editor is closed.
+    private val _songForTagEdit = MutableStateFlow<Song?>(null)
+    val songForTagEdit: StateFlow<Song?> = _songForTagEdit.asStateFlow()
+
+    /**
+     * A consent request the system wants shown before a shared-storage file may be rewritten.
+     * The screen launches it and, once granted, re-submits the same edit.
+     */
+    private val _tagWriteConsentRequest = MutableStateFlow<android.app.PendingIntent?>(null)
+    val tagWriteConsentRequest: StateFlow<android.app.PendingIntent?> = _tagWriteConsentRequest.asStateFlow()
+
+    // Held so the edit can be retried verbatim after consent is granted, rather than making the
+    // user retype everything they had just entered.
+    private var pendingTagEdit: Pair<Song, AudioTagIo.EditableTags>? = null
+
+    /** True when this track has a local file whose tags can be edited at all. */
+    fun canEditTags(song: Song): Boolean = tagEditorManager != null && song.isDownloaded
+
+    fun openTagEditor(song: Song) {
+        _songForTagEdit.value = song
+    }
+
+    fun closeTagEditor() {
+        _songForTagEdit.value = null
+    }
+
+    /** Reads the tags currently in the file, for pre-filling the editor. */
+    suspend fun loadFileTags(song: Song): AudioTagIo.EditableTags? = tagEditorManager?.readTags(song)
+
+    /**
+     * Writes edited tags into the file and the library, surfacing whatever happened as a status
+     * message. A permission request is not a failure -- it is stored so the screen can prompt and
+     * then call [retryPendingTagEdit].
+     */
+    fun saveTags(song: Song, tags: AudioTagIo.EditableTags) {
+        val manager = tagEditorManager ?: return
+        _songForTagEdit.value = null
+        viewModelScope.launch {
+            when (val result = manager.writeTags(song, tags)) {
+                is TagEditorManager.Result.Success ->
+                    _statusMessage.value = "Tags saved to the file."
+                is TagEditorManager.Result.NeedsPermission -> {
+                    pendingTagEdit = song to tags
+                    _tagWriteConsentRequest.value = result.request
+                }
+                is TagEditorManager.Result.NotALocalFile ->
+                    _statusMessage.value = "This track has no local file to edit."
+                is TagEditorManager.Result.Failed ->
+                    _statusMessage.value = result.reason
+            }
+        }
+    }
+
+    /** Re-runs the edit the user already made, now that the system has granted the write. */
+    fun retryPendingTagEdit() {
+        val (song, tags) = pendingTagEdit ?: return
+        pendingTagEdit = null
+        _tagWriteConsentRequest.value = null
+        saveTags(song, tags)
+    }
+
+    /** Drops a pending edit the user declined to grant permission for. */
+    fun cancelPendingTagEdit() {
+        pendingTagEdit = null
+        _tagWriteConsentRequest.value = null
+        _statusMessage.value = "Tags weren't changed."
+    }
 
     // Currently selected song for the "Add to Playlist" dialog
     private val _songForAddToPlaylist = MutableStateFlow<Song?>(null)
@@ -328,7 +399,8 @@ class LibraryViewModel(
         private val coverArtScraper: CoverArtScraper? = null,
         private val aiFeatureManager: AiFeatureManager? = null,
         private val appPreferences: AppPreferences? = null,
-        private val youtubeExtractor: YouTubeExtractor? = null
+        private val youtubeExtractor: YouTubeExtractor? = null,
+        private val tagEditorManager: TagEditorManager? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -338,7 +410,8 @@ class LibraryViewModel(
                 coverArtScraper = coverArtScraper,
                 aiFeatureManager = aiFeatureManager,
                 appPreferences = appPreferences,
-                youtubeExtractor = youtubeExtractor
+                youtubeExtractor = youtubeExtractor,
+                tagEditorManager = tagEditorManager
             ) as T
         }
     }

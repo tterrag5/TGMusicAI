@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudQueue
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -74,6 +75,7 @@ import kotlin.math.roundToInt
  * @param onClick Callback triggered when the song row is tapped to initiate playback.
  * @param onAddToPlaylistClicked Callback triggered from the overflow menu to add to playlist.
  * @param onScrapeClicked Optional callback to fetch high-res cover art and lyrics.
+ * @param onEditTagsClicked Optional callback to edit the metadata stored inside the local audio file. Omitted for cloud-only tracks, which have no file to edit.
  * @param onSwipeToQueue Optional callback fired when the row is swiped right far enough -- appends the track to the Up Next queue.
  * @param onSwipeToLike Optional callback fired when the row is swiped left far enough -- toggles Like / Save to Playlist.
  */
@@ -87,6 +89,7 @@ fun SongItem(
     onScrapeClicked: (() -> Unit)? = null,
     onStartRadioClicked: (() -> Unit)? = null,
     onAnalyzeWithAiClicked: (() -> Unit)? = null,
+    onEditTagsClicked: (() -> Unit)? = null,
     onSwipeToQueue: (() -> Unit)? = null,
     onSwipeToLike: (() -> Unit)? = null,
     isPlaying: Boolean = false,
@@ -314,6 +317,16 @@ fun SongItem(
                         onClick = {
                             showMenu = false
                             onAnalyzeWithAiClicked()
+                        }
+                    )
+                }
+                if (onEditTagsClicked != null) {
+                    DropdownMenuItem(
+                        text = { Text("Edit tags") },
+                        leadingIcon = { Icon(Icons.Rounded.Edit, contentDescription = null) },
+                        onClick = {
+                            showMenu = false
+                            onEditTagsClicked()
                         }
                     )
                 }

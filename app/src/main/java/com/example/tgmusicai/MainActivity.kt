@@ -28,6 +28,7 @@ import com.example.tgmusicai.ai.AiFeatureManager
 import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.TagEditorManager
 import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.ui.onboarding.OnboardingScreen
@@ -99,6 +100,7 @@ class MainActivity : ComponentActivity() {
         // into it is self-contained and catches its own failures, so constructing it here can
         // never affect app startup even if the AI deps/models turn out to be broken on a device.
         val aiFeatureManager = AiFeatureManager(this, database.aiSongTagsDao())
+        val tagEditorManager = TagEditorManager(this, database.songDao())
 
         mediaControllerManager = MediaControllerManager(this)
 
@@ -157,7 +159,8 @@ class MainActivity : ComponentActivity() {
                                     coverArtScraper = coverArtScraper,
                                     aiFeatureManager = aiFeatureManager,
                                     appPreferences = appPreferences,
-                                    youtubeExtractor = youTubeExtractor
+                                    youtubeExtractor = youTubeExtractor,
+                                    tagEditorManager = tagEditorManager
                                 )
                             }
                         )
