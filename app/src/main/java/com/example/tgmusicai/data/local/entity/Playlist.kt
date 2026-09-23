@@ -54,5 +54,14 @@ data class Playlist(
      * (or not a YouTube-synced playlist).
      */
     @ColumnInfo(name = "last_synced_at")
-    val lastSyncedAt: Long? = null
+    val lastSyncedAt: Long? = null,
+
+    /**
+     * The playlist's place in the user's own ordering, set by dragging in the Playlists tab.
+     *
+     * Every playlist starts at 0, which makes the ordering queries fall back to [createdAt] --
+     * the order the app used before reordering existed -- until the user drags something.
+     */
+    @ColumnInfo(name = "position")
+    val position: Int = 0
 )

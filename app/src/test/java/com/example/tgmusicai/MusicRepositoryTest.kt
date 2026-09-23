@@ -12,6 +12,7 @@ import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.local.entity.SongStats
 import com.example.tgmusicai.data.repository.MusicRepository
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
@@ -112,6 +113,91 @@ class MusicRepositoryTest {
         // Ensure song is NOT deleted
         assertEquals(1, fakeSongDao.songs.size)
     }
+
+    @Test
+    fun movingASongInAPlaylistPersistsTheNewOrder() = runBlocking {
+        val playlistId = seedPlaylistWithSongs("Road trip", listOf(1L, 2L, 3L))
+
+        repository.moveSongInPlaylist(playlistId, fromIndex = 0, toIndex = 2)
+
+        assertEquals(
+            listOf(2L, 3L, 1L),
+            fakePlaylistDao.getOrderedSongsForPlaylistSync(playlistId).map { it.id },
+        )
+    }
+
+    @Test
+    fun movingASongRenumbersEveryRowRatherThanPatchingTwo() = runBlocking {
+        // Playlists built before reordering existed hold position 0 on every row. Patching only
+        // the two moved rows would leave the rest tied and still arbitrarily ordered, so the whole
+        // list has to be renumbered.
+        val playlistId = seedPlaylistWithSongs("Legacy", listOf(1L, 2L, 3L), allPositionsZero = true)
+
+        repository.moveSongInPlaylist(playlistId, fromIndex = 2, toIndex = 0)
+
+        val positions = fakePlaylistDao.crossRefs
+            .filter { it.playlistId == playlistId }
+            .map { it.position }
+            .sorted()
+        assertEquals(listOf(0, 1, 2), positions)
+    }
+
+    @Test
+    fun movingASongIgnoresOutOfRangeAndNoOpDrags() = runBlocking {
+        val playlistId = seedPlaylistWithSongs("Stable", listOf(1L, 2L, 3L))
+        val before = fakePlaylistDao.getOrderedSongsForPlaylistSync(playlistId).map { it.id }
+
+        repository.moveSongInPlaylist(playlistId, fromIndex = 1, toIndex = 1)
+        repository.moveSongInPlaylist(playlistId, fromIndex = -1, toIndex = 2)
+        repository.moveSongInPlaylist(playlistId, fromIndex = 0, toIndex = 99)
+
+        assertEquals(before, fakePlaylistDao.getOrderedSongsForPlaylistSync(playlistId).map { it.id })
+    }
+
+    @Test
+    fun movingAPlaylistPersistsTheNewOrder() = runBlocking {
+        val first = seedPlaylistWithSongs("First", listOf(1L))
+        val second = seedPlaylistWithSongs("Second", listOf(2L))
+        val third = seedPlaylistWithSongs("Third", listOf(3L))
+
+        repository.movePlaylist(listOf(first, second, third), fromIndex = 2, toIndex = 0)
+
+        val positionById = fakePlaylistDao.createdPlaylists.associate { it.playlistId to it.position }
+        assertEquals(0, positionById[third])
+        assertEquals(1, positionById[first])
+        assertEquals(2, positionById[second])
+    }
+
+    /** Creates a playlist holding [songIds] in order, and returns its id. */
+    private suspend fun seedPlaylistWithSongs(
+        name: String,
+        songIds: List<Long>,
+        allPositionsZero: Boolean = false,
+    ): Long {
+        val playlistId = repository.createPlaylist(name)
+        songIds.forEachIndexed { index, songId ->
+            if (songId !in fakeSongDao.songs.map { it.id }) {
+                fakeSongDao.songs.add(
+                    Song(
+                        id = songId,
+                        title = "Song $songId",
+                        artist = "Artist",
+                        album = "Album",
+                        durationMs = 1000L,
+                        mediaUri = "file:///$songId.mp3",
+                    )
+                )
+            }
+            fakePlaylistDao.insertCrossRefRaw(
+                PlaylistSongCrossRef(
+                    playlistId = playlistId,
+                    songId = songId,
+                    position = if (allPositionsZero) 0 else index,
+                )
+            )
+        }
+        return playlistId
+    }
 }
 
 private class FakeSongDao : SongDao {
@@ -204,13 +290,58 @@ private class FakePlaylistDao(private val songDao: FakeSongDao) : PlaylistDao {
     val crossRefs = mutableListOf<PlaylistSongCrossRef>()
 
     override suspend fun insertPlaylist(playlist: Playlist): Long {
-        createdPlaylists.add(playlist)
-        return createdPlaylists.size.toLong()
+        // Store the row under the id that is handed back, the way Room does. Keeping the
+        // incoming playlistId of 0 made every later lookup by id miss.
+        // Next id past the highest in use, not size + 1: after a delete those differ, and the
+        // size-based guess would collide with a row that is still there and overwrite it.
+        val assignedId = if (playlist.playlistId != 0L) {
+            playlist.playlistId
+        } else {
+            (createdPlaylists.maxOfOrNull { it.playlistId } ?: 0L) + 1L
+        }
+        createdPlaylists.removeAll { it.playlistId == assignedId }
+        createdPlaylists.add(playlist.copy(playlistId = assignedId))
+        return assignedId
     }
 
     override suspend fun insertPlaylistSongCrossRef(crossRef: PlaylistSongCrossRef) {
         crossRefs.add(crossRef)
     }
+
+
+    override suspend fun insertCrossRefRaw(crossRef: PlaylistSongCrossRef) {
+        crossRefs.removeAll { it.playlistId == crossRef.playlistId && it.songId == crossRef.songId }
+        crossRefs.add(crossRef)
+    }
+
+    override suspend fun getSongPositionInPlaylist(playlistId: Long, songId: Long): Int? =
+        crossRefs.find { it.playlistId == playlistId && it.songId == songId }?.position
+
+    override suspend fun getMaxPositionInPlaylist(playlistId: Long): Int? =
+        crossRefs.filter { it.playlistId == playlistId }.maxOfOrNull { it.position }
+
+    override suspend fun updateSongPosition(playlistId: Long, songId: Long, position: Int) {
+        val index = crossRefs.indexOfFirst { it.playlistId == playlistId && it.songId == songId }
+        if (index >= 0) crossRefs[index] = crossRefs[index].copy(position = position)
+    }
+
+    override suspend fun updatePlaylistPosition(playlistId: Long, position: Int) {
+        val index = createdPlaylists.indexOfFirst { it.playlistId == playlistId }
+        if (index >= 0) createdPlaylists[index] = createdPlaylists[index].copy(position = position)
+    }
+
+    // Mirrors the real ordered join: position first, row id as the stable tie-break.
+    private fun orderedSongs(playlistId: Long): List<Song> {
+        val ordered = crossRefs.filter { it.playlistId == playlistId }
+            .sortedWith(compareBy({ it.position }, { it.songId }))
+        return ordered.mapNotNull { ref -> songDao.songs.find { it.id == ref.songId } }
+    }
+
+    override fun getOrderedSongsForPlaylist(playlistId: Long): Flow<List<Song>> =
+        flowOf(orderedSongs(playlistId))
+
+    override suspend fun getOrderedSongsForPlaylistSync(playlistId: Long): List<Song> =
+        orderedSongs(playlistId)
 
     override fun getAllPlaylists(): Flow<List<Playlist>> = flow { emit(createdPlaylists.toList()) }
 

@@ -313,6 +313,41 @@ private class FakeTestPlaylistDao(private val songDao: FakeTestSongDao) : Playli
     override suspend fun deleteCrossRefsForSong(songId: Long) {
         crossRefs.removeAll { it.songId == songId }
     }
+
+    override suspend fun insertCrossRefRaw(crossRef: PlaylistSongCrossRef) {
+        crossRefs.removeAll { it.playlistId == crossRef.playlistId && it.songId == crossRef.songId }
+        crossRefs.add(crossRef)
+    }
+
+    override suspend fun getSongPositionInPlaylist(playlistId: Long, songId: Long): Int? =
+        crossRefs.find { it.playlistId == playlistId && it.songId == songId }?.position
+
+    override suspend fun getMaxPositionInPlaylist(playlistId: Long): Int? =
+        crossRefs.filter { it.playlistId == playlistId }.maxOfOrNull { it.position }
+
+    override suspend fun updateSongPosition(playlistId: Long, songId: Long, position: Int) {
+        val index = crossRefs.indexOfFirst { it.playlistId == playlistId && it.songId == songId }
+        if (index >= 0) crossRefs[index] = crossRefs[index].copy(position = position)
+    }
+
+    override suspend fun updatePlaylistPosition(playlistId: Long, position: Int) {
+        val index = createdPlaylists.indexOfFirst { it.playlistId == playlistId }
+        if (index >= 0) createdPlaylists[index] = createdPlaylists[index].copy(position = position)
+    }
+
+    // Mirrors the real ordered join: position first, row id as the stable tie-break.
+    private fun orderedSongs(playlistId: Long): List<Song> {
+        val ordered = crossRefs.filter { it.playlistId == playlistId }
+            .sortedWith(compareBy({ it.position }, { it.songId }))
+        return ordered.mapNotNull { ref -> songDao.songs.find { it.id == ref.songId } }
+    }
+
+    override fun getOrderedSongsForPlaylist(playlistId: Long): Flow<List<Song>> =
+        flowOf(orderedSongs(playlistId))
+
+    override suspend fun getOrderedSongsForPlaylistSync(playlistId: Long): List<Song> =
+        orderedSongs(playlistId)
+
 }
 
 private class FakeTestSongStatsDao : SongStatsDao {

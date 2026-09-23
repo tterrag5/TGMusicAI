@@ -62,7 +62,8 @@ class MusicRepository(
     private val songStatsDao: SongStatsDao,
     private val alarmDao: AlarmDao,
     private val listeningHistoryDao: ListeningHistoryDao? = null,
-    private val database: com.example.tgmusicai.data.local.AppDatabase? = null
+    private val database: com.example.tgmusicai.data.local.AppDatabase? = null,
+    private val recommendationEngine: RecommendationEngine? = null
 ) {
     private val TAG = "MusicRepository"
 
@@ -125,8 +126,10 @@ class MusicRepository(
      */
     fun playlistWithSongsFlow(playlist: Playlist): Flow<PlaylistWithSongs> {
         if (!playlist.isSmart) {
-            return getPlaylistWithSongs(playlist.playlistId).map {
-                it ?: PlaylistWithSongs(playlist = playlist, songs = emptyList())
+            // The ordered join rather than the Room @Relation: a relation cannot sort by the
+            // junction's position column, so it would undo any drag-to-reorder the user did.
+            return playlistDao.getOrderedSongsForPlaylist(playlist.playlistId).map { songs ->
+                PlaylistWithSongs(playlist = playlist, songs = songs)
             }
         }
         return when (playlist.name) {
@@ -145,10 +148,49 @@ class MusicRepository(
             CLOUD_NINE_NAME -> notDownloadedSongs.map { songs ->
                 PlaylistWithSongs(playlist = playlist, songs = songs)
             }
-            else -> getPlaylistWithSongs(playlist.playlistId).map {
-                it ?: PlaylistWithSongs(playlist = playlist, songs = emptyList())
+            else -> playlistDao.getOrderedSongsForPlaylist(playlist.playlistId).map { songs ->
+                PlaylistWithSongs(playlist = playlist, songs = songs)
             }
         }
+    }
+
+    /**
+     * Moves the song at [fromIndex] to [toIndex] within [playlistId] and persists the new order.
+     *
+     * The whole list is renumbered rather than the two moved rows patched, because positions can
+     * start out tied -- every row in a playlist created before reordering existed holds 0 -- and
+     * patching a pair would leave the rest of them still tied and still arbitrarily ordered.
+     *
+     * A no-op for a smart playlist: those are computed, not backed by cross-ref rows, so there is
+     * no stored order to change. The UI does not offer the gesture there either, but the guard
+     * belongs here too, next to every other protection for them.
+     */
+    suspend fun moveSongInPlaylist(playlistId: Long, fromIndex: Int, toIndex: Int) {
+        val playlist = playlistDao.getPlaylistById(playlistId) ?: return
+        if (isProtectedSmartPlaylist(playlist)) return
+
+        val songs = playlistDao.getOrderedSongsForPlaylistSync(playlistId).toMutableList()
+        if (fromIndex !in songs.indices || toIndex !in songs.indices || fromIndex == toIndex) return
+
+        songs.add(toIndex, songs.removeAt(fromIndex))
+        playlistDao.applySongOrder(playlistId, songs.map { it.id })
+    }
+
+    /**
+     * Moves the playlist at [fromIndex] to [toIndex] and persists the new order.
+     *
+     * [visiblePlaylistIds] is the list the user is actually looking at, in the order shown, so the
+     * drag means what it looked like it meant. The Playlists tab and the navigation drawer read
+     * the same ordered query, so a reorder in one shows up in the other.
+     */
+    suspend fun movePlaylist(visiblePlaylistIds: List<Long>, fromIndex: Int, toIndex: Int) {
+        if (fromIndex !in visiblePlaylistIds.indices) return
+        if (toIndex !in visiblePlaylistIds.indices) return
+        if (fromIndex == toIndex) return
+
+        val reordered = visiblePlaylistIds.toMutableList()
+        reordered.add(toIndex, reordered.removeAt(fromIndex))
+        playlistDao.applyPlaylistOrder(reordered)
     }
 
     /**
@@ -285,6 +327,21 @@ class MusicRepository(
      * overlap only, not the full producer/artist/genre similarity the original spec described.
      */
     suspend fun buildRadioQueue(seedSong: Song, limit: Int = 20): List<Song> {
+        // The engine blends how the songs sound, what they say, and what actually gets played
+        // together; the producer/artist walk below is kept as its fallback. A recommendation
+        // failure must never turn Start Radio into a dead button, so anything going wrong in
+        // there drops through to the original behaviour rather than propagating.
+        recommendationEngine?.let { engine ->
+            try {
+                val recommended = engine.recommendFor(seedSong, limit - 1)
+                if (recommended.isNotEmpty()) {
+                    return (listOf(seedSong) + recommended).distinctBy { it.id }.take(limit)
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "Recommendation engine failed for '${seedSong.title}', using metadata fallback", e)
+            }
+        }
+
         val allSongs = songDao.getAllSongsList().filter { it.id != seedSong.id }
         val sameProducer = if (!seedSong.producer.isNullOrBlank()) {
             allSongs.filter { it.producer.equals(seedSong.producer, ignoreCase = true) }

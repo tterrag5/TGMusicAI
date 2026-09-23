@@ -46,7 +46,7 @@ import com.example.tgmusicai.data.local.entity.SongStats
         AiSongTags::class,
         ListeningHistory::class
     ],
-    version = 11,
+    version = 13,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -158,6 +158,34 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Adds the acoustic profile column to `ai_song_tags`.
+         *
+         * Existing rows are left null rather than backfilled here: the value can only be produced
+         * by re-running YAMNet over the audio, which is minutes of work for a large library and
+         * has no business happening inside a migration.
+         * [com.example.tgmusicai.ai.AiFeatureManager.analyzeSongIfNeeded] fills them in on the
+         * next backfill instead.
+         */
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ai_song_tags ADD COLUMN audioProfile TEXT")
+            }
+        }
+
+        /**
+         * Adds the user-ordering column to `playlists`.
+         *
+         * Defaulting to 0 leaves every existing playlist tied, which the ordering queries break by
+         * falling back to `createdAt` -- so an upgrading user sees exactly the order they had
+         * until the first time they drag something.
+         */
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playlists ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
          * Returns the app-wide singleton [AppDatabase], creating it on first call.
          * Double-checked locking (`synchronized` + null check twice) avoids building the
          * database twice if two threads race to call this before [INSTANCE] is set.
@@ -173,7 +201,10 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "tgmusicai_database"
                 )
-                .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                .addMigrations(
+                    MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
+                    MIGRATION_11_12, MIGRATION_12_13,
+                )
                 .fallbackToDestructiveMigration()
                 .build()
                 .also { INSTANCE = it }

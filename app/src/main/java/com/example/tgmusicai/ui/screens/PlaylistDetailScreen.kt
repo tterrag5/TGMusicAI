@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -69,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import com.example.tgmusicai.ui.util.ShareUtils
 import coil.compose.AsyncImage
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.ui.components.ReorderDragHandle
 import com.example.tgmusicai.ui.components.SongItem
 import com.example.tgmusicai.ui.util.FormatUtils
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
@@ -155,6 +157,15 @@ fun PlaylistDetailScreen(
 
     val selectedSongIds by playlistViewModel.selectedSongIds.collectAsState()
     val isSelectionMode = selectedSongIds.isNotEmpty()
+
+    // Drag-to-reorder is offered only where it can actually persist: a computed smart playlist has
+    // no cross-ref rows to renumber, selection mode owns the same gesture space, and a filtered
+    // list would report indices that do not match the playlist's real order.
+    val canReorderSongs = playlist != null &&
+        !isReadOnlyComputedPlaylist &&
+        !isSelectionMode &&
+        songQuery.isBlank() &&
+        visibleSongs.size > 1
 
     LaunchedEffect(playlist?.description) {
         descriptionText = playlist?.description ?: ""
@@ -439,11 +450,27 @@ fun PlaylistDetailScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 80.dp)
                 ) {
-                    items(visibleSongs, key = { it.id }) { song ->
+                    itemsIndexed(visibleSongs, key = { _, song -> song.id }) { index, song ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // Reordering is only meaningful for a real, unfiltered, cross-ref-backed
+                            // playlist: a computed playlist has no stored order to change, and while
+                            // a search is active the visible indices are not the playlist's indices.
+                            if (canReorderSongs) {
+                                ReorderDragHandle(
+                                    index = index,
+                                    itemCount = visibleSongs.size,
+                                    stableKey = song.id,
+                                    onMove = { from, to ->
+                                        playlist?.playlistId?.let { id ->
+                                            playlistViewModel.moveSongInPlaylist(id, from, to)
+                                        }
+                                    },
+                                    modifier = Modifier.padding(start = 12.dp),
+                                )
+                            }
                             Box(modifier = Modifier.weight(1f)) {
                                 SongItem(
                                     song = song,

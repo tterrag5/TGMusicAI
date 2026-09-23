@@ -28,6 +28,7 @@ import com.example.tgmusicai.ai.AiFeatureManager
 import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.ui.onboarding.OnboardingScreen
 import com.example.tgmusicai.ui.screens.MainScreen
@@ -73,13 +74,22 @@ class MainActivity : ComponentActivity() {
 
         val appPreferences = AppPreferences(this)
         val database = AppDatabase.getDatabase(this)
+        // Blends acoustic, lyrical, behavioural and metadata signals for Start Radio and the
+        // Home screen's recommendations row. Reads only; it can never touch playback state.
+        val recommendationEngine = RecommendationEngine(
+            songDao = database.songDao(),
+            songStatsDao = database.songStatsDao(),
+            aiSongTagsDao = database.aiSongTagsDao(),
+            listeningHistoryDao = database.listeningHistoryDao()
+        )
         val repository = MusicRepository(
             songDao = database.songDao(),
             playlistDao = database.playlistDao(),
             songStatsDao = database.songStatsDao(),
             alarmDao = database.alarmDao(),
             listeningHistoryDao = database.listeningHistoryDao(),
-            database = database
+            database = database,
+            recommendationEngine = recommendationEngine
         )
 
         networkObserver = NetworkObserver(this)
@@ -134,7 +144,8 @@ class MainActivity : ComponentActivity() {
                                 HomeViewModel.Factory(
                                     repository = repository,
                                     networkObserver = networkObserver,
-                                    appPreferences = appPreferences
+                                    appPreferences = appPreferences,
+                                    recommendationEngine = recommendationEngine
                                 )
                             }
                         )

@@ -16,7 +16,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -55,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.ui.components.ReorderDragHandle
 import com.example.tgmusicai.data.local.entity.PlaylistWithSongs
 import com.example.tgmusicai.ui.components.CreatePlaylistDialog
 import com.example.tgmusicai.ui.components.PlaylistCard
@@ -220,7 +223,13 @@ fun PlaylistsScreen(
                 }
             }
         } else {
+            // Pinned playlists stay on top; the flow underneath already returns the user's own
+            // order. Dragging writes positions for the whole visible list, so an item dragged
+            // across the pinned boundary settles at the edge of its own group rather than
+            // jumping the boundary -- the pin is the stronger statement of the two.
             val sortedPlaylists = playlistsWithSongs.sortedByDescending { it.playlist.isPinned }
+
+            val canReorderPlaylists = !isSelectionMode && sortedPlaylists.size > 1
 
             // The extra bottom padding keeps the last row of cards clear of the FAB and of the
             // mini player MainScreen draws over the bottom of this screen -- without it the
@@ -280,9 +289,36 @@ fun PlaylistsScreen(
                         .padding(innerPadding),
                     contentPadding = listContentPadding
                 ) {
-                    items(sortedPlaylists, key = { it.playlist.playlistId }) { pws ->
-                        Box(modifier = Modifier.animateItem()) {
-                            playlistCardFor(pws, compact = false)
+                    itemsIndexed(
+                        sortedPlaylists,
+                        key = { _, pws -> pws.playlist.playlistId },
+                    ) { index, pws ->
+                        Row(
+                            modifier = Modifier.animateItem(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // List view only. A vertical drag on a three-column grid cell has no
+                            // unambiguous meaning, so the grid keeps the order the list sets.
+                            if (canReorderPlaylists) {
+                                ReorderDragHandle(
+                                    index = index,
+                                    itemCount = sortedPlaylists.size,
+                                    stableKey = pws.playlist.playlistId,
+                                    onMove = { from, to ->
+                                        playlistViewModel.movePlaylist(
+                                            sortedPlaylists.map { it.playlist.playlistId },
+                                            from,
+                                            to,
+                                        )
+                                    },
+                                    rowHeight = 88.dp,
+                                    contentDescription = "Drag to reorder playlists",
+                                    modifier = Modifier.padding(start = 8.dp),
+                                )
+                            }
+                            Box(modifier = Modifier.weight(1f)) {
+                                playlistCardFor(pws, compact = false)
+                            }
                         }
                     }
                 }

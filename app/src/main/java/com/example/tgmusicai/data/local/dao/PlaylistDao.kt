@@ -9,6 +9,7 @@ import androidx.room.Transaction
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.PlaylistSongCrossRef
 import com.example.tgmusicai.data.local.entity.PlaylistWithSongs
+import com.example.tgmusicai.data.local.entity.Song
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -20,24 +21,51 @@ interface PlaylistDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPlaylist(playlist: Playlist): Long
 
-    /** Adds one song to one playlist at a given [PlaylistSongCrossRef.position], or overwrites the existing link if that (playlist, song) pair is already present. */
+    /** Raw link insert. Prefer [insertPlaylistSongCrossRef], which fills in a sensible position. */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertPlaylistSongCrossRef(crossRef: PlaylistSongCrossRef)
+    suspend fun insertCrossRefRaw(crossRef: PlaylistSongCrossRef)
+
+    /** The position a song currently holds in a playlist, or null if it is not in it. */
+    @Query("SELECT position FROM playlist_song_cross_ref WHERE playlistId = :playlistId AND songId = :songId")
+    suspend fun getSongPositionInPlaylist(playlistId: Long, songId: Long): Int?
+
+    /**
+     * Adds one song to one playlist, appending it to the end unless an explicit
+     * [PlaylistSongCrossRef.position] is given.
+     *
+     * Position defaults to 0 on the entity, and before reordering existed every caller took that
+     * default -- so every row in every playlist held position 0 and the column ordered nothing.
+     * Filling it in here rather than at each call site means playlist imports, YouTube sync and
+     * the add-to-playlist dialog all get a real order without having to know about it.
+     *
+     * A song already in the playlist keeps the position it has: re-adding it must not quietly
+     * move it to the end.
+     */
+    @Transaction
+    suspend fun insertPlaylistSongCrossRef(crossRef: PlaylistSongCrossRef) {
+        if (crossRef.position != 0) {
+            insertCrossRefRaw(crossRef)
+            return
+        }
+        val existing = getSongPositionInPlaylist(crossRef.playlistId, crossRef.songId)
+        val position = existing ?: ((getMaxPositionInPlaylist(crossRef.playlistId) ?: -1) + 1)
+        insertCrossRefRaw(crossRef.copy(position = position))
+    }
 
     /** Live list of every playlist (user-made and smart), newest-created first; backs the Playlists screen. */
-    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    @Query("SELECT * FROM playlists ORDER BY position ASC, createdAt DESC")
     fun getAllPlaylists(): Flow<List<Playlist>>
 
     /** One-shot (non-Flow) read of every playlist, newest-created first. */
-    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    @Query("SELECT * FROM playlists ORDER BY position ASC, createdAt DESC")
     suspend fun getAllPlaylistsList(): List<Playlist>
 
     /** Live list of playlists pinned to the Home tab's speed-dial row. */
-    @Query("SELECT * FROM playlists WHERE is_pinned = 1 ORDER BY createdAt DESC")
+    @Query("SELECT * FROM playlists WHERE is_pinned = 1 ORDER BY position ASC, createdAt DESC")
     fun getPinnedPlaylists(): Flow<List<Playlist>>
 
     /** Live list of app-generated smart playlists (e.g. Top Played, Recently Added, Unplayed), as opposed to user-created ones. */
-    @Query("SELECT * FROM playlists WHERE is_smart = 1 ORDER BY createdAt DESC")
+    @Query("SELECT * FROM playlists WHERE is_smart = 1 ORDER BY position ASC, createdAt DESC")
     fun getSmartPlaylists(): Flow<List<Playlist>>
 
     /** Looks up one playlist by exact name match; used to avoid creating duplicate-named playlists. Ambiguous if names aren't unique -- see [getPlaylistsByName]. */
@@ -61,6 +89,76 @@ interface PlaylistDao {
     @Transaction
     @Query("SELECT * FROM playlists WHERE playlistId = :playlistId")
     suspend fun getPlaylistWithSongsSync(playlistId: Long): PlaylistWithSongs?
+
+    /**
+     * The songs in a playlist in the user's chosen order.
+     *
+     * Room's `@Relation` cannot order by a column on the junction table, so
+     * [PlaylistWithSongs.songs] comes back in whatever order the join happens to yield -- which is
+     * why `PlaylistSongCrossRef.position` existed for a long time without actually ordering
+     * anything. This hand-written join is what makes drag-to-reorder stick.
+     *
+     * Ties break on rowid so the order is stable for playlists built before positions were
+     * assigned, where every row still holds the default 0.
+     */
+    @Query(
+        """
+        SELECT songs.* FROM songs
+        INNER JOIN playlist_song_cross_ref AS ref ON songs.id = ref.songId
+        WHERE ref.playlistId = :playlistId
+        ORDER BY ref.position ASC, songs.id ASC
+        """
+    )
+    fun getOrderedSongsForPlaylist(playlistId: Long): Flow<List<Song>>
+
+    /** One-shot variant of [getOrderedSongsForPlaylist]. */
+    @Query(
+        """
+        SELECT songs.* FROM songs
+        INNER JOIN playlist_song_cross_ref AS ref ON songs.id = ref.songId
+        WHERE ref.playlistId = :playlistId
+        ORDER BY ref.position ASC, songs.id ASC
+        """
+    )
+    suspend fun getOrderedSongsForPlaylistSync(playlistId: Long): List<Song>
+
+    /** Highest position currently used in a playlist, or null when it is empty. */
+    @Query("SELECT MAX(position) FROM playlist_song_cross_ref WHERE playlistId = :playlistId")
+    suspend fun getMaxPositionInPlaylist(playlistId: Long): Int?
+
+    /** Moves one song to an explicit position. Used by the reorder transaction, not directly. */
+    @Query("UPDATE playlist_song_cross_ref SET position = :position WHERE playlistId = :playlistId AND songId = :songId")
+    suspend fun updateSongPosition(playlistId: Long, songId: Long, position: Int)
+
+    /**
+     * Rewrites every position in [playlistId] so the songs sit in the order given by [songIds].
+     *
+     * Done as one transaction because a half-applied reorder leaves duplicate positions, and the
+     * ordering query would then return an arbitrary order for the tied rows.
+     */
+    @Transaction
+    suspend fun applySongOrder(playlistId: Long, songIds: List<Long>) {
+        songIds.forEachIndexed { index, songId ->
+            updateSongPosition(playlistId, songId, index)
+        }
+    }
+
+    /** Moves one playlist to an explicit position. Used by [applyPlaylistOrder], not directly. */
+    @Query("UPDATE playlists SET position = :position WHERE playlistId = :playlistId")
+    suspend fun updatePlaylistPosition(playlistId: Long, position: Int)
+
+    /**
+     * Rewrites every playlist position so they sit in the order given by [playlistIds].
+     *
+     * One transaction, for the same reason the song reorder is: a half-applied order leaves
+     * ties, and tied rows come back in whatever order the fallback sort yields.
+     */
+    @Transaction
+    suspend fun applyPlaylistOrder(playlistIds: List<Long>) {
+        playlistIds.forEachIndexed { index, playlistId ->
+            updatePlaylistPosition(playlistId, index)
+        }
+    }
 
     /** Removes every song-link row for a playlist, without touching the playlist row or the songs themselves. Call before deleting a playlist (see [deletePlaylist]) or when clearing its contents. */
     @Query("DELETE FROM playlist_song_cross_ref WHERE playlistId = :playlistId")

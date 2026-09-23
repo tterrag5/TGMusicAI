@@ -300,4 +300,28 @@ class PlaylistViewModel(
             return PlaylistViewModel(repository, importExportManager, appPreferences) as T
         }
     }
+
+    /**
+     * Moves a song within a playlist and persists the new order.
+     *
+     * Dragging fires this once per single-step swap, so the write is one renumbering transaction
+     * per row crossed rather than one per pixel.
+     */
+    fun moveSongInPlaylist(playlistId: Long, fromIndex: Int, toIndex: Int) {
+        viewModelScope.launch {
+            repository.moveSongInPlaylist(playlistId, fromIndex, toIndex)
+        }
+    }
+
+    /**
+     * Moves a playlist within the list the user is looking at and persists the new order.
+     *
+     * [visiblePlaylistIds] is passed in rather than re-read here so the drag means what it looked
+     * like it meant, even if the visible list is filtered.
+     */
+    fun movePlaylist(visiblePlaylistIds: List<Long>, fromIndex: Int, toIndex: Int) {
+        viewModelScope.launch {
+            repository.movePlaylist(visiblePlaylistIds, fromIndex, toIndex)
+        }
+    }
 }
