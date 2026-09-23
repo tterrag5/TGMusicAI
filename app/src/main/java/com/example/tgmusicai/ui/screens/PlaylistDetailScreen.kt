@@ -1,5 +1,8 @@
 package com.example.tgmusicai.ui.screens
 
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import com.example.tgmusicai.data.local.entity.Song
 import androidx.compose.foundation.layout.Box
@@ -23,11 +26,13 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.FileDownload
 import androidx.compose.material.icons.rounded.HeartBroken
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicOff
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.ThumbUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -42,6 +47,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -55,9 +62,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.tgmusicai.ui.util.ShareUtils
 import coil.compose.AsyncImage
 import com.example.tgmusicai.data.repository.MusicRepository
 import com.example.tgmusicai.ui.components.SongItem
@@ -88,8 +97,41 @@ fun PlaylistDetailScreen(
 
     val playlistWithSongs by playlistViewModel.selectedPlaylistWithSongs.collectAsState()
     val songs = playlistWithSongs?.songs ?: emptyList()
+
+    // Search within this playlist. Matches the fields LibraryViewModel.filteredSongs searches, so
+    // the two search boxes behave the same way.
+    var songQuery by remember { mutableStateOf("") }
+    val visibleSongs = remember(songs, songQuery) {
+        if (songQuery.isBlank()) {
+            songs
+        } else {
+            songs.filter { song ->
+                song.title.contains(songQuery, ignoreCase = true) ||
+                    song.artist.contains(songQuery, ignoreCase = true) ||
+                    song.album.contains(songQuery, ignoreCase = true) ||
+                    (song.producer?.contains(songQuery, ignoreCase = true) == true)
+            }
+        }
+    }
     val playlist = playlistWithSongs?.playlist
+    val context = LocalContext.current
+
+    // Export goes through the system save dialog: writing to a self-chosen path in public storage
+    // needs a permission this app doesn't hold, so it always failed.
+    val exportCsvLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri: android.net.Uri? ->
+        uri?.let { playlistViewModel.exportPlaylist(context, it, playlistName, songs) }
+    }
     val currentSong by playerViewModel.currentSong.collectAsState()
+    val exportStatusMessage by playlistViewModel.exportStatusMessage.collectAsState()
+
+    LaunchedEffect(exportStatusMessage) {
+        exportStatusMessage?.let {
+            Toast.makeText(context, it, Toast.LENGTH_LONG).show()
+            playlistViewModel.clearExportStatus()
+        }
+    }
 
     // Prefer the loaded Playlist's isSmart+exact-name check (matches MusicRepository's real
     // protected-playlist definition); fall back to the nav-arg name only before it has loaded.
@@ -216,6 +258,24 @@ fun PlaylistDetailScreen(
                                     showMoreMenu = false
                                 }
                             )
+                            DropdownMenuItem(
+                                text = { Text("Share") },
+                                leadingIcon = { Icon(Icons.Rounded.Share, contentDescription = null) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    ShareUtils.sharePlaylist(context, playlistName, songs)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export to file") },
+                                leadingIcon = { Icon(Icons.Rounded.FileDownload, contentDescription = null) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    exportCsvLauncher.launch(
+                                        playlistViewModel.suggestedExportFileName(playlistName)
+                                    )
+                                }
+                            )
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -339,11 +399,47 @@ fun PlaylistDetailScreen(
                     }
                 }
 
+                // Filters only what this list renders. Everything else on the screen -- Play All,
+                // the per-song queue, Like all, Share, Export, the song count -- deliberately keeps
+                // using the unfiltered `songs`, so searching never silently narrows those actions.
+                OutlinedTextField(
+                    value = songQuery,
+                    onValueChange = { songQuery = it },
+                    placeholder = {
+                        Text(
+                            "Search in playlist",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.Search,
+                            contentDescription = "Search icon"
+                        )
+                    },
+                    trailingIcon = {
+                        if (songQuery.isNotEmpty()) {
+                            IconButton(onClick = { songQuery = "" }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Clear,
+                                    contentDescription = "Clear search"
+                                )
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(28.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 80.dp)
                 ) {
-                    items(songs, key = { it.id }) { song ->
+                    items(visibleSongs, key = { it.id }) { song ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically

@@ -67,6 +67,17 @@ class MediaControllerManager(
     private val _isResolving = MutableStateFlow(false)
     val isResolving: StateFlow<Boolean> = _isResolving.asStateFlow()
 
+    // Set when a cloud song can't be turned into a playable stream URL at all (every Piped and
+    // Invidious endpoint failed). Without this the failure was completely silent: the unresolved
+    // watch URL was still handed to ExoPlayer, which errored internally, so onMediaItemTransition
+    // never fired and the Now Playing screen just sat on "No Song Selected" with no explanation.
+    private val _playbackError = MutableStateFlow<String?>(null)
+    val playbackError: StateFlow<String?> = _playbackError.asStateFlow()
+
+    fun clearPlaybackError() {
+        _playbackError.value = null
+    }
+
     private var positionTickerJob: Job? = null
     private var currentSongList: List<Song> = emptyList()
 
@@ -117,6 +128,12 @@ class MediaControllerManager(
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // Reset immediately rather than waiting for the next 500ms position-ticker tick --
+                // otherwise _currentPositionMs briefly still holds the outgoing track's last
+                // position while _durationMs (set below) already reflects the new track, which
+                // would misreport progress into the new song for up to 500ms (and, since crossfade
+                // reads both flows together, briefly fade the new track's volume to 0).
+                _currentPositionMs.value = 0L
                 updateCurrentMediaItem(mediaItem)
                 resolveAheadIfNeeded()
             }
@@ -228,7 +245,11 @@ class MediaControllerManager(
                 if (dur > 0) {
                     _durationMs.value = dur
                 }
-                delay(500)
+                // 100ms rather than 500ms: at half-second granularity the synced-lyrics view held
+                // a line and then jumped to the next one, instead of tracking playback the way
+                // YouTube Music does. MediaController.currentPosition is extrapolated locally
+                // between session updates, so polling it more often costs no extra IPC.
+                delay(POSITION_TICK_INTERVAL_MS)
             }
         }
     }
@@ -311,8 +332,24 @@ class MediaControllerManager(
         controller?.pause()
         scope.launch {
             _isResolving.value = true
+            _playbackError.value = null
             val startSong = resolveSongForPlayback(queue[startIndex])
             _isResolving.value = false
+
+            // Handing an unresolved watch URL to ExoPlayer can only ever produce a silent internal
+            // error, so report it to the user instead of pretending playback started.
+            if (isUnresolvedCloudUri(startSong.mediaUri)) {
+                android.util.Log.w(
+                    "TGMusicCloud",
+                    "Giving up on \"${startSong.title}\": no Piped/Invidious endpoint returned a playable stream"
+                )
+                // Kept short: a Toast truncates, so the actionable part has to come first.
+                _playbackError.value =
+                    "Can't stream \"${startSong.title}\" right now. Download it to play offline."
+                onStarted()
+                return@launch
+            }
+
             val initialQueue = queue.toMutableList().also { it[startIndex] = startSong }
             playInternal(initialQueue, startIndex)
             onStarted()
@@ -453,6 +490,18 @@ class MediaControllerManager(
     }
 
     /**
+     * Appends [song] to the end of the live "Up Next" queue without interrupting current
+     * playback. If nothing was queued yet, prepares the player so the newly-added item is ready
+     * to play, without forcing playback to start.
+     */
+    fun addToQueue(song: Song) {
+        val player = controller ?: return
+        val wasEmpty = player.mediaItemCount == 0
+        player.addMediaItem(buildMediaItem(song))
+        if (wasEmpty) player.prepare()
+    }
+
+    /**
      * The ExoPlayer's current audio session id, or 0 if no controller is connected yet.
      * [AudioEffectsManager] attaches the system Equalizer/BassBoost to this id -- since those
      * effects operate on the platform mixer for a given session, attaching from here (the UI
@@ -530,6 +579,19 @@ class MediaControllerManager(
     }
 
     /**
+     * Removes the queue items at [indices] (e.g. a bulk multi-select removal from the "Up Next"
+     * queue view). Indices are removed highest-first so each `removeMediaItem` call still targets
+     * the intended item even as earlier removals shift everything after them down by one.
+     */
+    fun removeQueueItems(indices: List<Int>) {
+        val player = controller ?: return
+        val count = player.mediaItemCount
+        indices.distinct().sortedDescending().forEach { index ->
+            if (index in 0 until count) player.removeMediaItem(index)
+        }
+    }
+
+    /**
      * Toggles shuffle mode on/off.
      */
     fun toggleShuffle() {
@@ -554,6 +616,9 @@ class MediaControllerManager(
     }
 
     companion object {
+        /** How often [currentPositionMs] is refreshed while playing -- see [startPositionTicker]. */
+        private const val POSITION_TICK_INTERVAL_MS = 100L
+
         /**
          * Calculates the next repeat mode in the exact 3-state loop:
          * REPEAT_MODE_OFF -> REPEAT_MODE_ALL -> REPEAT_MODE_ONE -> REPEAT_MODE_OFF

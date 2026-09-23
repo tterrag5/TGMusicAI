@@ -1,8 +1,14 @@
 package com.example.tgmusicai.ui.components
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,18 +17,22 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudQueue
 import androidx.compose.material.icons.rounded.DownloadDone
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -34,17 +44,25 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.youtube.DownloadStatus
 import com.example.tgmusicai.ui.util.FormatUtils
+import com.example.tgmusicai.ui.util.ShareUtils
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * Reusable list item component representing a single song in lists/searches.
@@ -56,6 +74,8 @@ import com.example.tgmusicai.ui.util.FormatUtils
  * @param onClick Callback triggered when the song row is tapped to initiate playback.
  * @param onAddToPlaylistClicked Callback triggered from the overflow menu to add to playlist.
  * @param onScrapeClicked Optional callback to fetch high-res cover art and lyrics.
+ * @param onSwipeToQueue Optional callback fired when the row is swiped right far enough -- appends the track to the Up Next queue.
+ * @param onSwipeToLike Optional callback fired when the row is swiped left far enough -- toggles Like / Save to Playlist.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -67,21 +87,87 @@ fun SongItem(
     onScrapeClicked: (() -> Unit)? = null,
     onStartRadioClicked: (() -> Unit)? = null,
     onAnalyzeWithAiClicked: (() -> Unit)? = null,
+    onSwipeToQueue: (() -> Unit)? = null,
+    onSwipeToLike: (() -> Unit)? = null,
     isPlaying: Boolean = false,
     liveDownloadStatus: DownloadStatus? = null,
     isSelected: Boolean = false,
     onLongClick: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val swipeEnabled = onSwipeToQueue != null || onSwipeToLike != null
+    val offsetX = remember { Animatable(0f) }
+    val swipeScope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val swipeTriggerPx = with(density) { 88.dp.toPx() }
+    val swipeMaxPx = with(density) { 96.dp.toPx() }
 
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surface)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+    Box(modifier = modifier.fillMaxWidth()) {
+        if (swipeEnabled) {
+            // Swipe background revealed underneath the row: green Queue icon on the left (shown
+            // while dragging right), red Like icon on the right (shown while dragging left).
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        when {
+                            offsetX.value > 0f -> Color(0xFF2E7D32)
+                            offsetX.value < 0f -> Color(0xFFC62828)
+                            else -> Color.Transparent
+                        }
+                    )
+                    .padding(horizontal = 24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = if (offsetX.value >= 0f) Arrangement.Start else Arrangement.End
+            ) {
+                when {
+                    offsetX.value > 0f -> Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.QueueMusic,
+                        contentDescription = "Add to queue",
+                        tint = Color.White
+                    )
+                    offsetX.value < 0f -> Icon(
+                        imageVector = Icons.Rounded.Favorite,
+                        contentDescription = "Like",
+                        tint = Color.White
+                    )
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surface)
+                .then(
+                    if (swipeEnabled) {
+                        Modifier.draggable(
+                            orientation = Orientation.Horizontal,
+                            state = rememberDraggableState { delta ->
+                                swipeScope.launch {
+                                    offsetX.snapTo((offsetX.value + delta).coerceIn(-swipeMaxPx, swipeMaxPx))
+                                }
+                            },
+                            onDragStopped = {
+                                val finalOffset = offsetX.value
+                                if (finalOffset > swipeTriggerPx) {
+                                    onSwipeToQueue?.invoke()
+                                } else if (finalOffset < -swipeTriggerPx) {
+                                    onSwipeToLike?.invoke()
+                                }
+                                offsetX.animateTo(0f, tween(200))
+                            }
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
         // Expressive rounded album cover container with Coil AsyncImage support
         Box(
             modifier = Modifier
@@ -196,6 +282,14 @@ fun SongItem(
                         onAddToPlaylistClicked()
                     }
                 )
+                DropdownMenuItem(
+                    text = { Text("Share") },
+                    leadingIcon = { Icon(Icons.Rounded.Share, contentDescription = null) },
+                    onClick = {
+                        showMenu = false
+                        ShareUtils.shareSong(context, song)
+                    }
+                )
                 if (onScrapeClicked != null) {
                     DropdownMenuItem(
                         text = { Text("Fetch Cover Art & Lyrics") },
@@ -225,6 +319,7 @@ fun SongItem(
                 }
             }
         }
+        }
     }
 }
 
@@ -243,12 +338,17 @@ fun SongGridItem(
     onScrapeClicked: (() -> Unit)? = null,
     onStartRadioClicked: (() -> Unit)? = null,
     onAnalyzeWithAiClicked: (() -> Unit)? = null,
+    // Queue/Like are menu items here rather than the swipe gestures the list row uses: a swipe
+    // across a one-third-width tile is both cramped and ambiguous against the grid's own scrolling.
+    onAddToQueueClicked: (() -> Unit)? = null,
+    onToggleLikeClicked: (() -> Unit)? = null,
     isPlaying: Boolean = false,
+    liveDownloadStatus: DownloadStatus? = null,
     isSelected: Boolean = false,
     onLongClick: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    val hasMenu = onAddToPlaylistClicked != null || onScrapeClicked != null || onStartRadioClicked != null || onAnalyzeWithAiClicked != null
+    val context = LocalContext.current
 
     Column(
         modifier = modifier
@@ -293,7 +393,46 @@ fun SongGridItem(
                 }
             }
 
-            if (hasMenu && !isSelected) {
+            // Same download signal the list row shows, so switching to grid view doesn't hide
+            // whether a track is downloaded, cloud-only, or actively downloading right now.
+            if (!isSelected) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(4.dp)
+                ) {
+                    if (liveDownloadStatus == DownloadStatus.EXTRACTING ||
+                        liveDownloadStatus == DownloadStatus.DOWNLOADING
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else if (!song.youtubeId.isNullOrBlank()) {
+                        Icon(
+                            imageVector = if (song.isDownloaded) {
+                                Icons.Rounded.DownloadDone
+                            } else {
+                                Icons.Rounded.CloudQueue
+                            },
+                            contentDescription = if (song.isDownloaded) {
+                                "Downloaded"
+                            } else {
+                                "Cloud only, not downloaded"
+                            },
+                            tint = if (song.isDownloaded) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outline
+                            },
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+
+            if (!isSelected) {
                 Box(modifier = Modifier.align(Alignment.TopEnd)) {
                     IconButton(
                         onClick = { showMenu = true },
@@ -311,12 +450,28 @@ fun SongGridItem(
                         )
                     }
                     DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                        if (onAddToQueueClicked != null) {
+                            DropdownMenuItem(
+                                text = { Text("Add to Queue") },
+                                onClick = { showMenu = false; onAddToQueueClicked() }
+                            )
+                        }
+                        if (onToggleLikeClicked != null) {
+                            DropdownMenuItem(
+                                text = { Text("Like / Unlike") },
+                                onClick = { showMenu = false; onToggleLikeClicked() }
+                            )
+                        }
                         if (onAddToPlaylistClicked != null) {
                             DropdownMenuItem(
                                 text = { Text("Add to Playlist") },
                                 onClick = { showMenu = false; onAddToPlaylistClicked() }
                             )
                         }
+                        DropdownMenuItem(
+                            text = { Text("Share") },
+                            onClick = { showMenu = false; ShareUtils.shareSong(context, song) }
+                        )
                         if (onScrapeClicked != null) {
                             DropdownMenuItem(
                                 text = { Text("Fetch Cover Art & Lyrics") },

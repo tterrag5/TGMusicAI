@@ -1,7 +1,8 @@
 package com.example.tgmusicai.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +20,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DragHandle
 import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.MusicNote
@@ -26,6 +30,7 @@ import androidx.compose.material.icons.rounded.PlaylistAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -69,6 +74,7 @@ fun QueueSheet(
     onSongClick: (index: Int) -> Unit,
     onMoveSong: (from: Int, to: Int) -> Unit,
     onSaveQueueAsPlaylist: (name: String) -> Unit = {},
+    onRemoveSongs: (indices: List<Int>) -> Unit = {},
     onDismissRequest: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState()
@@ -76,6 +82,10 @@ fun QueueSheet(
     val listState = rememberLazyListState()
     var showSaveNameDialog by remember { mutableStateOf(false) }
     var saveName by remember { mutableStateOf("") }
+    // Tracked by media URI rather than index so a selection stays correct even if the queue
+    // itself changes (e.g. autoplay appending more songs) while the user is still selecting.
+    var selectedUris by remember { mutableStateOf(setOf<String>()) }
+    val isSelectionMode = selectedUris.isNotEmpty()
 
     LaunchedEffect(currentSong?.mediaUri, queue.size) {
         if (currentIndex >= 0) {
@@ -118,47 +128,83 @@ fun QueueSheet(
         onDismissRequest = onDismissRequest,
         sheetState = sheetState
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = "Playing from",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = playingFromSource,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            if (queue.isNotEmpty()) {
-                Surface(
-                    onClick = { showSaveNameDialog = true },
-                    shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh
+        if (isSelectionMode) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { selectedUris = emptySet() }) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Cancel selection")
+                    }
+                    Text(
+                        text = "${selectedUris.size} selected",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        val indices = queue.withIndex()
+                            .filter { (_, song) -> song.mediaUri in selectedUris }
+                            .map { (index, _) -> index }
+                        onRemoveSongs(indices)
+                        selectedUris = emptySet()
+                    }
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    Icon(
+                        imageVector = Icons.Rounded.Delete,
+                        contentDescription = "Remove selected from queue",
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Playing from",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = playingFromSource,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (queue.isNotEmpty()) {
+                    Surface(
+                        onClick = { showSaveNameDialog = true },
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.PlaylistAdd,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "Save",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PlaylistAdd,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Save",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }
@@ -183,7 +229,20 @@ fun QueueSheet(
                         index = index,
                         isCurrent = index == currentIndex,
                         queueSize = queue.size,
-                        onClick = { onSongClick(index) },
+                        isSelectionMode = isSelectionMode,
+                        isSelected = song.mediaUri in selectedUris,
+                        onClick = {
+                            if (isSelectionMode) {
+                                selectedUris = if (song.mediaUri in selectedUris) {
+                                    selectedUris - song.mediaUri
+                                } else {
+                                    selectedUris + song.mediaUri
+                                }
+                            } else {
+                                onSongClick(index)
+                            }
+                        },
+                        onLongClick = { selectedUris = selectedUris + song.mediaUri },
                         onMove = onMoveSong
                     )
                 }
@@ -192,13 +251,17 @@ fun QueueSheet(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun QueueRow(
     song: Song,
     index: Int,
     isCurrent: Boolean,
     queueSize: Int,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onMove: (from: Int, to: Int) -> Unit
 ) {
     // These let the drag gesture (which must not restart mid-drag -- see the stable
@@ -217,10 +280,13 @@ private fun QueueRow(
             .fillMaxWidth()
             .graphicsLayer { translationY = dragOffsetY }
             .background(
-                if (isDragging) MaterialTheme.colorScheme.surfaceContainerHigh
-                else MaterialTheme.colorScheme.surface
+                when {
+                    isSelected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                    isDragging -> MaterialTheme.colorScheme.surfaceContainerHigh
+                    else -> MaterialTheme.colorScheme.surface
+                }
             )
-            .clickable(enabled = !isDragging, onClick = onClick)
+            .combinedClickable(enabled = !isDragging, onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -234,7 +300,14 @@ private fun QueueRow(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            if (!song.artworkUri.isNullOrBlank()) {
+            if (isSelected) {
+                Icon(
+                    imageVector = Icons.Rounded.CheckCircle,
+                    contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp)
+                )
+            } else if (!song.artworkUri.isNullOrBlank()) {
                 AsyncImage(
                     model = FormatUtils.cacheBustedArtworkUri(song.artworkUri),
                     contentDescription = null,
@@ -269,34 +342,38 @@ private fun QueueRow(
             )
         }
         Spacer(modifier = Modifier.width(8.dp))
-        Icon(
-            imageVector = Icons.Rounded.DragHandle,
-            contentDescription = "Drag to reorder",
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            // Keyed on the song's stable media URI, not its list index, so the gesture isn't
-            // cancelled mid-drag just because reordering moved this row to a different index.
-            modifier = Modifier
-                .padding(start = 4.dp)
-                .pointerInput(song.mediaUri) {
-                    detectDragGestures(
-                        onDragStart = { isDragging = true; dragOffsetY = 0f },
-                        onDragEnd = { isDragging = false; dragOffsetY = 0f },
-                        onDragCancel = { isDragging = false; dragOffsetY = 0f },
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-                            dragOffsetY += dragAmount.y
-                            val curIndex = latestIndex.value
-                            val size = latestQueueSize.value
-                            if (dragOffsetY > rowHeightPx / 2 && curIndex < size - 1) {
-                                onMove(curIndex, curIndex + 1)
-                                dragOffsetY -= rowHeightPx
-                            } else if (dragOffsetY < -rowHeightPx / 2 && curIndex > 0) {
-                                onMove(curIndex, curIndex - 1)
-                                dragOffsetY += rowHeightPx
+        // Hidden during multi-select: dragging to reorder and selecting rows at once would be a
+        // confusing pair of gestures to support simultaneously on the same row.
+        if (!isSelectionMode) {
+            Icon(
+                imageVector = Icons.Rounded.DragHandle,
+                contentDescription = "Drag to reorder",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                // Keyed on the song's stable media URI, not its list index, so the gesture isn't
+                // cancelled mid-drag just because reordering moved this row to a different index.
+                modifier = Modifier
+                    .padding(start = 4.dp)
+                    .pointerInput(song.mediaUri) {
+                        detectDragGestures(
+                            onDragStart = { isDragging = true; dragOffsetY = 0f },
+                            onDragEnd = { isDragging = false; dragOffsetY = 0f },
+                            onDragCancel = { isDragging = false; dragOffsetY = 0f },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                dragOffsetY += dragAmount.y
+                                val curIndex = latestIndex.value
+                                val size = latestQueueSize.value
+                                if (dragOffsetY > rowHeightPx / 2 && curIndex < size - 1) {
+                                    onMove(curIndex, curIndex + 1)
+                                    dragOffsetY -= rowHeightPx
+                                } else if (dragOffsetY < -rowHeightPx / 2 && curIndex > 0) {
+                                    onMove(curIndex, curIndex - 1)
+                                    dragOffsetY += rowHeightPx
+                                }
                             }
-                        }
-                    )
-                }
-        )
+                        )
+                    }
+            )
+        }
     }
 }

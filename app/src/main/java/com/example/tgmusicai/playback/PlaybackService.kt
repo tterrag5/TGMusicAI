@@ -1,14 +1,18 @@
 package com.example.tgmusicai.playback
 
 import android.content.Intent
+import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Bundle
+import androidx.core.content.FileProvider
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.CommandButton
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
@@ -18,6 +22,7 @@ import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import com.example.tgmusicai.R
 import com.example.tgmusicai.data.local.AppDatabase
+import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.ListeningHistory
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.MusicRepository
@@ -50,6 +55,22 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var database: AppDatabase
     private lateinit var repository: MusicRepository
     private val youtubeExtractor: YouTubeExtractor by lazy { YouTubeExtractor() }
+    private var loudnessEnhancer: LoudnessEnhancer? = null
+
+    /** (Re)attaches the loudness normalizer to [audioSessionId], releasing any previous instance. */
+    private fun attachLoudnessEnhancer(audioSessionId: Int) {
+        if (audioSessionId == C.AUDIO_SESSION_ID_UNSET) return
+        loudnessEnhancer?.release()
+        loudnessEnhancer = try {
+            LoudnessEnhancer(audioSessionId).apply {
+                setTargetGain(LOUDNESS_TARGET_GAIN_MILLIBELS)
+                enabled = true
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("PlaybackService", "Failed to attach LoudnessEnhancer to session $audioSessionId", e)
+            null
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -63,11 +84,20 @@ class PlaybackService : MediaLibraryService() {
             listeningHistoryDao = database.listeningHistoryDao()
         )
 
+        // Zero-wasted-data stream caching: every HTTP(S) byte range ExoPlayer reads (YouTube
+        // audio streams in particular) is written through to a shared 500MB LRU disk cache, so
+        // re-listening to a recently played stream replays entirely from disk -- 0MB of data and
+        // works offline -- instead of re-downloading it from the network every time.
+        // Only http(s):// (YouTube streams) goes through the disk cache; local file:// / content://
+        // tracks (downloaded/scanned songs) bypass it entirely -- see SchemeAwareCacheDataSource.
+        val cacheDataSourceFactory = SchemeAwareCacheDataSourceFactory(this, AudioCacheManager.getCache(this))
+
         // Initialize ExoPlayer with Safe Driving Audio Focus: automatic focus handling ducks
         // music for GPS voice prompts (AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK), pauses for phone calls
         // (AUDIOFOCUS_LOSS_TRANSIENT) and resumes on AUDIOFOCUS_GAIN, and pauses when a
         // Bluetooth/aux device disconnects mid-playback (setHandleAudioBecomingNoisy).
         player = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(cacheDataSourceFactory))
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -78,6 +108,15 @@ class PlaybackService : MediaLibraryService() {
             .setHandleAudioBecomingNoisy(true)
             .build().apply {
                 repeatMode = Player.REPEAT_MODE_OFF
+                // Loudness Normalization: attaches a LoudnessEnhancer to whatever audio session
+                // id ExoPlayer is currently using, balancing playback volume across quiet local
+                // FLACs and loud YouTube streams. The session id can change (e.g. across
+                // player/renderer resets), so this re-attaches on every change rather than once.
+                addAnalyticsListener(object : AnalyticsListener {
+                    override fun onAudioSessionIdChanged(eventTime: AnalyticsListener.EventTime, audioSessionId: Int) {
+                        attachLoudnessEnhancer(audioSessionId)
+                    }
+                })
                 var consecutivePlaybackErrors = 0
                 addListener(object : Player.Listener {
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -141,6 +180,16 @@ class PlaybackService : MediaLibraryService() {
                 })
             }
 
+        // Skip Silence: auto-trims dead silence at the start/end of tracks (common on
+        // YouTube-sourced audio, which often has a beat of silence baked into the upload) via
+        // ExoPlayer's own built-in silence-skipping audio processor. Observed continuously (not
+        // just read once) so flipping the setting screen toggle takes effect immediately.
+        serviceScope.launch(Dispatchers.Main) {
+            AppPreferences(applicationContext).skipSilenceEnabledFlow.collect { enabled ->
+                player.skipSilenceEnabled = enabled
+            }
+        }
+
         // Tapping the media notification opens the app straight to the Now Playing screen,
         // instead of doing nothing / opening to whatever screen was last shown.
         val openNowPlayingIntent = Intent(this, com.example.tgmusicai.MainActivity::class.java).apply {
@@ -165,8 +214,13 @@ class PlaybackService : MediaLibraryService() {
 
     companion object {
         const val ACTION_OPEN_NOW_PLAYING = "com.example.tgmusicai.action.OPEN_NOW_PLAYING"
+        // +500 millibels (+5dB) target gain -- audible loudness normalization without pushing
+        // already-loud YouTube streams into clipping/distortion.
+        private const val LOUDNESS_TARGET_GAIN_MILLIBELS = 500
         private const val MAX_CONSECUTIVE_PLAYBACK_ERRORS = 2
         private const val LISTEN_TIME_FLUSH_INTERVAL_MS = 10_000L
+        private const val YOUTUBE_FALLBACK_SEARCH_CANDIDATES = 6
+        private const val YOUTUBE_FALLBACK_RESOLVE_TARGET = 3
 
         // Automotive media tree category IDs (children of ROOT_ID, surfaced via onGetChildren).
         const val ROOT_ID = "root"
@@ -187,10 +241,41 @@ class PlaybackService : MediaLibraryService() {
         const val EXTRAS_KEY_CONTENT_STYLE_PLAYABLE = "android.media.browse.CONTENT_STYLE_PLAYABLE"
         const val EXTRAS_VALUE_CONTENT_STYLE_GRID = 1
         const val EXTRAS_VALUE_CONTENT_STYLE_LIST = 2
+
+        // External processes that read MediaItem artwork over IPC and need a per-URI read grant
+        // for content:// URIs minted from local file:// cover art (see resolveCarArtworkUri).
+        private val CAR_ART_CONSUMER_PACKAGES = listOf(
+            "com.google.android.projection.gearhead", // Android Auto
+            "com.google.android.googlequicksearchbox" // Google app / Assistant / Gemini
+        )
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
         return mediaLibrarySession
+    }
+
+    /**
+     * Resolves a [Song.artworkUri] into a URI Android Auto's Gearhead process and the
+     * Assistant/Gemini app can actually open. Scraped local covers (see [CoverArtScraper]) are
+     * stored as `file://` paths into this app's private external storage, which those other
+     * processes cannot read over IPC -- handing that URI straight to a MediaItem silently fails
+     * to load art on the car screen. Remote/http(s) URIs (YouTube thumbnails, etc.) are returned
+     * unchanged since the receiving app fetches those itself.
+     */
+    private fun resolveCarArtworkUri(rawUri: String?): Uri? {
+        if (rawUri.isNullOrBlank()) return null
+        if (!rawUri.startsWith("file:")) return Uri.parse(rawUri)
+        return try {
+            val file = Uri.parse(rawUri).path?.let { java.io.File(it) } ?: return null
+            val contentUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            for (pkg in CAR_ART_CONSUMER_PACKAGES) {
+                grantUriPermission(pkg, contentUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            contentUri
+        } catch (e: Exception) {
+            android.util.Log.w("PlaybackService", "Failed to resolve car-safe artwork URI for $rawUri", e)
+            null
+        }
     }
 
     // Guards maybeExtendQueueForAutoplay against re-triggering for the same "now playing the
@@ -226,6 +311,7 @@ class PlaybackService : MediaLibraryService() {
                                 .setTitle(song.title)
                                 .setArtist(song.artist)
                                 .setAlbumTitle(song.album)
+                                .setArtworkUri(resolveCarArtworkUri(song.artworkUri))
                                 .setIsPlayable(true)
                                 .setExtras(SongMediaExtras.fromSong(song))
                                 .build()
@@ -257,6 +343,7 @@ class PlaybackService : MediaLibraryService() {
                             .setTitle(next.title)
                             .setArtist(next.artist)
                             .setAlbumTitle(next.album)
+                            .setArtworkUri(resolveCarArtworkUri(next.artworkUri))
                             .setIsPlayable(true)
                             .setExtras(SongMediaExtras.fromSong(next))
                             .build()
@@ -412,6 +499,8 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onDestroy() {
         stopTelemetryTicker()
+        loudnessEnhancer?.release()
+        loudnessEnhancer = null
         mediaLibrarySession?.run {
             player.release()
             release()
@@ -432,7 +521,13 @@ class PlaybackService : MediaLibraryService() {
             session: MediaSession,
             controller: MediaSession.ControllerInfo
         ): MediaSession.ConnectionResult {
-            val defaultResult = super.onConnect(session, controller)
+            // super.onConnect() (the deprecated sync overload we're forced to override for the
+            // custom session commands below) returns a sentinel EMPTY/EMPTY result, not a usable
+            // default -- unlike the newer onConnectAsync, it does NOT grant trusted controllers
+            // (including our own app's MediaControllerManager) any player commands at all, which
+            // silently blocked every play()/prepare()/setMediaItems() call from the UI. Build the
+            // real trust-aware default explicitly instead.
+            val defaultResult = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).build()
             val availableSessionCommands = defaultResult.availableSessionCommands.buildUpon()
                 .add(SessionCommand(ACTION_TOGGLE_LIKE, Bundle.EMPTY))
                 .add(SessionCommand(ACTION_TOGGLE_REPEAT_MODE, Bundle.EMPTY))
@@ -510,6 +605,7 @@ class PlaybackService : MediaLibraryService() {
                 val resolvedItems = mutableListOf<MediaItem>()
                 for (item in mediaItems) {
                     val mediaId = item.mediaId
+                    val searchQuery = item.requestMetadata.searchQuery
                     if (mediaId.isNotEmpty()) {
                         val song = database.songDao().getSongByUri(mediaId)
                         if (song != null) {
@@ -520,6 +616,11 @@ class PlaybackService : MediaLibraryService() {
                                 .build()
                             resolvedItems.add(resolvedItem)
                         }
+                    } else if (!searchQuery.isNullOrBlank()) {
+                        // "Add X to queue on TGMusic" -- Assistant/Gemini's legacy addQueueItem
+                        // call arrives here as a mediaId-less item carrying the raw query, same
+                        // shape onSetMediaItems handles for "play X on TGMusic".
+                        resolvedItems.addAll(searchSongsAndPlaylists(searchQuery).take(1))
                     } else {
                         resolvedItems.add(item)
                     }
@@ -768,24 +869,33 @@ class PlaybackService : MediaLibraryService() {
             // No local matches -- fall back to a live YouTube search and resolve real audio
             // streams up front, since (unlike the UI-side MediaControllerManager queue) this
             // service has no later "resolve ahead" pass for items it hands straight to ExoPlayer.
+            // Stream extraction is a multi-second network round trip per candidate; Gemini/Assistant
+            // abandons a playFromSearch voice command as failed if this call doesn't return within
+            // its own short timeout, so this stops as soon as enough playable results are found
+            // instead of always extracting every one of up to 10 candidates first.
             try {
-                youtubeExtractor.search(trimmed).take(10).mapNotNull { result ->
-                    val stream = youtubeExtractor.extractAudioStream(result.videoId) ?: return@mapNotNull null
-                    MediaItem.Builder()
-                        .setMediaId("yt:${result.videoId}")
-                        .setUri(Uri.parse(stream.url))
-                        .setMediaMetadata(
-                            MediaMetadata.Builder()
-                                .setTitle(result.title)
-                                .setArtist(result.uploader)
-                                .setArtworkUri(Uri.parse(result.thumbnailUri))
-                                .setIsBrowsable(false)
-                                .setIsPlayable(true)
-                                .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
-                                .build()
-                        )
-                        .build()
+                val resolved = mutableListOf<MediaItem>()
+                for (result in youtubeExtractor.search(trimmed).take(YOUTUBE_FALLBACK_SEARCH_CANDIDATES)) {
+                    if (resolved.size >= YOUTUBE_FALLBACK_RESOLVE_TARGET) break
+                    val stream = youtubeExtractor.extractAudioStream(result.videoId) ?: continue
+                    resolved.add(
+                        MediaItem.Builder()
+                            .setMediaId("yt:${result.videoId}")
+                            .setUri(Uri.parse(stream.url))
+                            .setMediaMetadata(
+                                MediaMetadata.Builder()
+                                    .setTitle(result.title)
+                                    .setArtist(result.uploader)
+                                    .setArtworkUri(Uri.parse(result.thumbnailUri))
+                                    .setIsBrowsable(false)
+                                    .setIsPlayable(true)
+                                    .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+                                    .build()
+                            )
+                            .build()
+                    )
                 }
+                resolved
             } catch (e: Exception) {
                 android.util.Log.e("PlaybackService", "YouTube fallback search failed for '$trimmed'", e)
                 emptyList()
@@ -801,7 +911,7 @@ class PlaybackService : MediaLibraryService() {
                         .setTitle(title)
                         .setArtist(artist)
                         .setAlbumTitle(album)
-                        .setArtworkUri(artworkUri?.let { Uri.parse(it) })
+                        .setArtworkUri(resolveCarArtworkUri(artworkUri))
                         .setIsBrowsable(false)
                         .setIsPlayable(true)
                         .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)

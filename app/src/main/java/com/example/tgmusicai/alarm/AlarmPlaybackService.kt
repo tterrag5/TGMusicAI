@@ -18,7 +18,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.tgmusicai.data.local.AppDatabase
-import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.Alarm
 import com.example.tgmusicai.data.local.entity.AlarmToneType
 import kotlinx.coroutines.CoroutineScope
@@ -28,7 +27,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -74,20 +72,22 @@ class AlarmPlaybackService : Service() {
 
         loadJob?.cancel()
         loadJob = serviceScope.launch {
-            val prefs = AppPreferences(applicationContext)
-            val forceMax = prefs.alarmForceMaxVolumeFlow.first()
-            rampUpEnabled = prefs.alarmVolumeRampUpFlow.first()
-            ensureAudibleAlarmVolume(forceMax)
-            player?.volume = if (rampUpEnabled) RAMP_START_VOLUME else 1f
-
-            if (alarmId == -1L) {
-                playFallbackRingtone()
-                return@launch
-            }
-            val alarm = withContext(Dispatchers.IO) {
-                AppDatabase.getDatabase(applicationContext).alarmDao().getAlarmById(alarmId)
+            // Volume behavior is per-alarm (Alarm.forceMaxVolume/volumeRampUp), not a global
+            // setting -- so the Alarm row has to be loaded before either can be applied. There's
+            // no alarm to look up in the -1L fallback-ringtone case, so both default off there.
+            val alarm = if (alarmId != -1L) {
+                withContext(Dispatchers.IO) {
+                    AppDatabase.getDatabase(applicationContext).alarmDao().getAlarmById(alarmId)
+                }
+            } else {
+                null
             }
             currentAlarm = alarm
+
+            ensureAudibleAlarmVolume(alarm?.forceMaxVolume ?: false)
+            rampUpEnabled = alarm?.volumeRampUp ?: false
+            player?.volume = if (rampUpEnabled) RAMP_START_VOLUME else 1f
+
             if (alarm == null) {
                 playFallbackRingtone()
                 return@launch

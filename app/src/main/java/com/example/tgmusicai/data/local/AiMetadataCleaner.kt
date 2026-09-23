@@ -3,10 +3,6 @@ package com.example.tgmusicai.data.local
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * Cleaned track metadata extracted from raw song titles and tags.
@@ -19,11 +15,11 @@ data class CleanedMetadata(
 )
 
 /**
- * Lightweight AI & Pattern Metadata Cleaner for music tracks.
- * Features:
- * 1. Offline Pattern Engine: Fast (<1 ms), zero-memory regex parser extracting terms like prod., feat., ft., produced by, [Official Audio], etc.
- * 2. Optional Online AI Engine: If a Gemini/OpenAI API key is present, executes a single transient HTTP POST request on Dispatchers.IO.
- * Discards all HTTP connections immediately afterwards for zero idle memory footprint.
+ * Pattern-based metadata cleaner for music tracks: a fast (<1 ms), zero-allocation regex parser
+ * that strips noise tags like [Official Audio] and extracts prod./feat./ft./produced by credits.
+ *
+ * Entirely on-device. An optional online tier that called Gemini/OpenAI with a user-supplied API
+ * key used to sit on top of this; it was removed along with the API key itself.
  */
 object AiMetadataCleaner {
 
@@ -154,129 +150,19 @@ object AiMetadataCleaner {
     }
 
     /**
-     * Cleans metadata offline, and if an API key is provided, attempts an online AI enrichment request on [Dispatchers.IO].
+     * Cleans metadata using the offline engine.
+     *
+     * This used to optionally call out to Gemini/OpenAI with a user-supplied API key. That path is
+     * gone: it required a key the app no longer asks for, it was pinned to a model that has since
+     * been retired, and it issued one network request per song during a library scan whose result
+     * was discarded for every song already in the database. [cleanOffline] does the real work and
+     * needs nothing but the device.
      */
     suspend fun clean(
         rawTitle: String,
-        rawArtist: String? = null,
-        apiKey: String? = null
+        rawArtist: String? = null
     ): CleanedMetadata = withContext(Dispatchers.IO) {
-        val offlineResult = cleanOffline(rawTitle, rawArtist)
-        if (apiKey.isNullOrBlank()) {
-            return@withContext offlineResult
-        }
-
-        try {
-            val onlineResult = fetchOnlineMetadata(rawTitle, rawArtist, apiKey)
-            if (onlineResult != null) {
-                CleanedMetadata(
-                    cleanTitle = onlineResult.cleanTitle.ifBlank { offlineResult.cleanTitle },
-                    artist = onlineResult.artist ?: offlineResult.artist,
-                    producer = onlineResult.producer ?: offlineResult.producer,
-                    featuredArtist = onlineResult.featuredArtist ?: offlineResult.featuredArtist
-                )
-            } else {
-                offlineResult
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Online AI metadata cleaning failed, falling back to offline", e)
-            offlineResult
-        }
+        cleanOffline(rawTitle, rawArtist)
     }
 
-    /**
-     * Sends one blocking HTTP request to Gemini (if [apiKey] looks like a Google API key, i.e.
-     * starts with "AIza") or OpenAI otherwise, asking the model to clean/split the raw title.
-     * Deliberately synchronous (called from within [clean]'s `withContext(Dispatchers.IO)`) with
-     * short 3s connect / 5s read timeouts -- this runs per-song during a library scan, so a slow
-     * or hanging API must not stall the whole scan. Returns null (never throws past this function)
-     * on any non-200 response or unparseable body, letting [clean] fall back to the offline result.
-     */
-    private fun fetchOnlineMetadata(
-        rawTitle: String,
-        rawArtist: String?,
-        apiKey: String
-    ): CleanedMetadata? {
-        val isGemini = apiKey.startsWith("AIza")
-        val urlString = if (isGemini) {
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"
-        } else {
-            "https://api.openai.com/v1/chat/completions"
-        }
-
-        val url = URL(urlString)
-        val connection = url.openConnection() as HttpURLConnection
-        connection.connectTimeout = 3000
-        connection.readTimeout = 5000
-        connection.requestMethod = "POST"
-        connection.setRequestProperty("Content-Type", "application/json")
-        if (!isGemini) {
-            connection.setRequestProperty("Authorization", "Bearer $apiKey")
-        }
-        connection.doOutput = true
-
-        val prompt = "Clean audio track title and metadata. Raw Title: \"$rawTitle\", Raw Artist: \"${rawArtist ?: ""}\". Respond JSON ONLY with keys: \"title\", \"artist\", \"producer\", \"featuredArtist\". No markdown."
-
-        val jsonPayload = if (isGemini) {
-            JSONObject().apply {
-                put("contents", JSONArray().put(
-                    JSONObject().put("parts", JSONArray().put(
-                        JSONObject().put("text", prompt)
-                    ))
-                ))
-            }.toString()
-        } else {
-            JSONObject().apply {
-                put("model", "gpt-4o-mini")
-                put("messages", JSONArray().apply {
-                    put(JSONObject().put("role", "system").put("content", "Respond ONLY with JSON with keys: title, artist, producer, featuredArtist."))
-                    put(JSONObject().put("role", "user").put("content", prompt))
-                })
-            }.toString()
-        }
-
-        try {
-            connection.outputStream.use { os ->
-                os.write(jsonPayload.toByteArray(Charsets.UTF_8))
-            }
-
-            if (connection.responseCode == 200) {
-                val responseText = connection.inputStream.bufferedReader().use { it.readText() }
-
-                val jsonObject = JSONObject(responseText)
-                val contentText = if (isGemini) {
-                    jsonObject.getJSONArray("candidates")
-                        .getJSONObject(0)
-                        .getJSONObject("content")
-                        .getJSONArray("parts")
-                        .getJSONObject(0)
-                        .getString("text")
-                } else {
-                    jsonObject.getJSONArray("choices")
-                        .getJSONObject(0)
-                        .getJSONObject("message")
-                        .getString("content")
-                }
-
-                val cleanedJsonText = contentText
-                    .replace("```json", "")
-                    .replace("```", "")
-                    .trim()
-
-                val parsedJson = JSONObject(cleanedJsonText)
-                return CleanedMetadata(
-                    cleanTitle = parsedJson.optString("title"),
-                    artist = parsedJson.optString("artist").takeIf { it.isNotBlank() },
-                    producer = parsedJson.optString("producer").takeIf { it.isNotBlank() },
-                    featuredArtist = parsedJson.optString("featuredArtist").takeIf { it.isNotBlank() }
-                )
-            } else {
-                Log.w(TAG, "Online AI response code: ${connection.responseCode}")
-                return null
-            }
-        } finally {
-            // Immediately close and discard HTTP connection to guarantee zero idle memory footprint
-            connection.disconnect()
-        }
-    }
 }

@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -48,6 +49,13 @@ class PlayerViewModel(
     val isResolving: StateFlow<Boolean> = mediaControllerManager.isResolving
     val playbackSpeed: StateFlow<Float> = mediaControllerManager.playbackSpeed
 
+    /** Non-null when a song couldn't be resolved to a playable stream -- see [MediaControllerManager.playbackError]. */
+    val playbackError: StateFlow<String?> = mediaControllerManager.playbackError
+
+    fun clearPlaybackError() {
+        mediaControllerManager.clearPlaybackError()
+    }
+
     fun setPlaybackSpeed(speed: Float) {
         mediaControllerManager.setPlaybackSpeed(speed)
     }
@@ -75,16 +83,62 @@ class PlayerViewModel(
     )
     val remainingSleepTimeMs: StateFlow<Long?> = sleepTimerManager.remainingMs
 
+    /**
+     * Crossfade: not a true overlapping crossfade (that needs two simultaneous ExoPlayer
+     * instances) -- instead the outgoing track fades to silent right as it ends and the incoming
+     * one fades in from silent, so there's never a jarring hard cut even though the two never
+     * actually play at once. [AppPreferences.crossfadeDurationSecFlow] controls how long each half
+     * of that fade is.
+     */
+    val crossfadeEnabled: StateFlow<Boolean> = appPreferences?.crossfadeEnabledFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    val crossfadeDurationSec: StateFlow<Int> = appPreferences?.crossfadeDurationSecFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppPreferences.DEFAULT_CROSSFADE_DURATION_SEC)
+        ?: MutableStateFlow(AppPreferences.DEFAULT_CROSSFADE_DURATION_SEC).asStateFlow()
+
+    fun setCrossfadeEnabled(enabled: Boolean) {
+        viewModelScope.launch { appPreferences?.setCrossfadeEnabled(enabled) }
+    }
+
+    fun setCrossfadeDurationSec(seconds: Int) {
+        viewModelScope.launch { appPreferences?.setCrossfadeDurationSec(seconds) }
+    }
+
     init {
-        // Gentle fade-out: once the sleep timer enters its last SLEEP_FADE_WINDOW_MS, linearly
-        // ramp the player's volume down to 0 instead of playback cutting off at full volume.
-        // Restores to full volume as soon as the timer is cancelled or expires (see above).
+        // Combined volume fade: the sleep timer's fade-to-silent near the countdown's end, and
+        // (if crossfade is enabled) the fade-out/fade-in described above. Both effects multiply
+        // into a single effective volume instead of each independently calling setVolume, so they
+        // can't fight over Player.volume if they ever happen to overlap (e.g. the sleep timer
+        // expires right as a track is also fading out).
+        var lastAppliedVolume = 1f
         viewModelScope.launch {
-            remainingSleepTimeMs.collect { remaining ->
-                if (remaining != null && remaining <= SLEEP_FADE_WINDOW_MS) {
-                    mediaControllerManager.setVolume(remaining.toFloat() / SLEEP_FADE_WINDOW_MS)
-                } else if (remaining == null) {
-                    mediaControllerManager.setVolume(1f)
+            combine(
+                remainingSleepTimeMs,
+                currentPositionMs,
+                durationMs,
+                crossfadeEnabled,
+                crossfadeDurationSec
+            ) { remaining, positionMs, totalMs, fadeEnabled, fadeSec ->
+                val sleepFactor = if (remaining != null && remaining <= SLEEP_FADE_WINDOW_MS) {
+                    (remaining.toFloat() / SLEEP_FADE_WINDOW_MS).coerceIn(0f, 1f)
+                } else {
+                    1f
+                }
+                val fadeMs = fadeSec * 1000L
+                val crossfadeFactor = if (fadeEnabled && fadeMs > 0 && totalMs > 0) {
+                    val fadeInFactor = (positionMs.toFloat() / fadeMs).coerceIn(0f, 1f)
+                    val fadeOutFactor = ((totalMs - positionMs).toFloat() / fadeMs).coerceIn(0f, 1f)
+                    minOf(fadeInFactor, fadeOutFactor)
+                } else {
+                    1f
+                }
+                sleepFactor * crossfadeFactor
+            }.collect { volume ->
+                if (kotlin.math.abs(volume - lastAppliedVolume) > 0.001f) {
+                    mediaControllerManager.setVolume(volume)
+                    lastAppliedVolume = volume
                 }
             }
         }
@@ -159,6 +213,65 @@ class PlayerViewModel(
     }
 
     /**
+     * Whether ExoPlayer auto-trims dead silence at the start/end of tracks. The actual player
+     * toggle lives in [com.example.tgmusicai.playback.PlaybackService], which observes this same
+     * DataStore flow directly -- this is just the UI-facing read/write surface for the Settings
+     * screen switch.
+     */
+    val skipSilenceEnabled: StateFlow<Boolean> = appPreferences?.skipSilenceEnabledFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    fun setSkipSilenceEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            appPreferences?.setSkipSilenceEnabled(enabled)
+        }
+    }
+
+    /**
+     * The active color theme name (e.g. "YT_DARK"), read here (not just threaded through as a
+     * plain composable parameter from `MainActivity`) so [com.example.tgmusicai.ui.screens.SettingsScreen]'s
+     * theme picker reflects a change immediately. `SettingsScreen` is rendered through a
+     * `NavDisplay`/`NavEntry` (androidx.navigation3) which only re-invokes an entry's content on
+     * navigation events, not on unrelated ambient state changes -- a `currentTheme: String`
+     * parameter threaded through that boundary went stale (the app's actual applied colors updated
+     * instantly since `MainActivity`'s `TGMusicAITheme` isn't behind that boundary, but the picker's
+     * checkmark didn't move until the screen was re-entered). Collecting the DataStore flow directly
+     * inside `SettingsScreen` via this `StateFlow` sidesteps that entirely.
+     */
+    val selectedTheme: StateFlow<String> = appPreferences?.selectedThemeFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "YT_DARK")
+        ?: MutableStateFlow("YT_DARK").asStateFlow()
+
+    fun setSelectedTheme(themeName: String) {
+        viewModelScope.launch {
+            appPreferences?.setSelectedTheme(themeName)
+        }
+    }
+
+    /** Light/dark preference name; see `ThemeMode`. */
+    val themeMode: StateFlow<String> = appPreferences?.themeModeFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "DARK")
+        ?: MutableStateFlow("DARK").asStateFlow()
+
+    fun setThemeMode(modeName: String) {
+        viewModelScope.launch {
+            appPreferences?.setThemeMode(modeName)
+        }
+    }
+
+    /** Whether Material You wallpaper colors override the selected palette (Android 12+). */
+    val dynamicColorEnabled: StateFlow<Boolean> = appPreferences?.dynamicColorFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    fun setDynamicColorEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            appPreferences?.setDynamicColor(enabled)
+        }
+    }
+
+    /**
      * A song streamed directly (not downloaded or added to a playlist first) is a transient
      * `id == 0L` object never inserted into Room -- saving fetched lyrics against that id would
      * silently affect zero rows, so the fetch would appear to work (the UI shows the lyrics right
@@ -195,11 +308,11 @@ class PlayerViewModel(
     }
 
     /**
-     * Transcribes the current song's downloaded audio via OpenAI Whisper when no lyrics could be
-     * found any other way, reusing the same user-configured AI API key that [com.example.tgmusicai.data.local.AiMetadataCleaner]
-     * already uses for optional online metadata cleaning -- no separate key-management UI needed.
-     * A no-op (with a clear status message) if there's no key, the key isn't OpenAI-format, or
-     * the song isn't downloaded yet, since Whisper needs the actual local audio file.
+     * Transcribes the current song's downloaded audio via a bundled on-device Whisper-tiny.en
+     * model when no lyrics could be found any other way -- see
+     * [com.example.tgmusicai.ai.WhisperTranscriptionEngine]. No API key needed. A no-op (with a
+     * clear status message) if the song isn't downloaded yet, since the model needs the actual
+     * local audio file.
      */
     fun transcribeLyricsWithAi(song: Song? = currentSong.value) {
         val target = song ?: return
@@ -209,11 +322,6 @@ class PlayerViewModel(
             return
         }
         viewModelScope.launch {
-            val apiKey = appPreferences?.aiApiKeyFlow?.first()
-            if (apiKey.isNullOrBlank() || !apiKey.startsWith("sk-")) {
-                _transcribeError.value = "Add an OpenAI API key in Settings to use AI Transcribe Lyrics."
-                return@launch
-            }
             if (!target.isDownloaded) {
                 _transcribeError.value = "Download this song first to transcribe its lyrics with AI."
                 return@launch
@@ -221,7 +329,7 @@ class PlayerViewModel(
             _isTranscribing.value = true
             try {
                 val persistedTarget = ensurePersistedTarget(target)
-                val transcribed = repo.transcribeWithWhisper(persistedTarget, apiKey)
+                val transcribed = repo.transcribeWithWhisper(persistedTarget)
                 if (transcribed != null) {
                     repository?.updateSongLyrics(persistedTarget.id, transcribed)
                     _lyrics.value = sanitizeLyrics(transcribed)
@@ -230,6 +338,88 @@ class PlayerViewModel(
                 }
             } finally {
                 _isTranscribing.value = false
+            }
+        }
+    }
+
+    private val _translatedLyrics = MutableStateFlow<List<String>?>(null)
+    /** Non-null while an active translation is showing, aligned 1:1 with [parsedLyrics] by index. */
+    val translatedLyrics: StateFlow<List<String>?> = _translatedLyrics.asStateFlow()
+
+    private val _isTranslatingLyrics = MutableStateFlow(false)
+    val isTranslatingLyrics: StateFlow<Boolean> = _isTranslatingLyrics.asStateFlow()
+
+    private val _translationError = MutableStateFlow<String?>(null)
+    val translationError: StateFlow<String?> = _translationError.asStateFlow()
+
+    fun clearTranslationError() {
+        _translationError.value = null
+    }
+
+    val translationLanguage: StateFlow<String> = appPreferences?.lyricsTranslationLanguageFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppPreferences.DEFAULT_TRANSLATION_LANGUAGE)
+        ?: MutableStateFlow(AppPreferences.DEFAULT_TRANSLATION_LANGUAGE).asStateFlow()
+
+    /**
+     * Persists [language] as the picked translation target and, if a translation is already
+     * showing, immediately re-translates into it -- passing [language] straight into
+     * [translateInto] rather than reading it back off [translationLanguage] avoids a race where
+     * that StateFlow hasn't picked up the just-persisted DataStore write yet.
+     */
+    fun setTranslationLanguage(language: String) {
+        viewModelScope.launch { appPreferences?.setLyricsTranslationLanguage(language) }
+        if (_translatedLyrics.value != null) {
+            translateInto(language)
+        }
+    }
+
+    /**
+     * Toggles translated lyrics for the currently showing song, translating [parsedLyrics] into
+     * [translationLanguage] via the same AI key used for metadata cleaning and AI transcription.
+     * Calling this again while a translation is already showing just turns it back off.
+     */
+    fun toggleLyricsTranslation() {
+        if (_translatedLyrics.value != null) {
+            _translatedLyrics.value = null
+        } else {
+            translateInto(translationLanguage.value)
+        }
+    }
+
+    private fun translateInto(language: String) {
+        val repo = lyricsRepository ?: run {
+            _translationError.value = "Lyrics translation isn't available right now."
+            return
+        }
+        val lines = parsedLyrics.value
+        if (lines.isEmpty()) return
+        viewModelScope.launch {
+            _isTranslatingLyrics.value = true
+            try {
+                // Runs on-device via ML Kit -- no API key, and no network at all once the language
+                // model has been downloaded once. The first use of a given language does need a
+                // connection to fetch that model, which is what the error below usually means.
+                val translated = repo.translateLyrics(lines.map { it.text }, language)
+                if (translated != null) {
+                    _translatedLyrics.value = translated
+                } else {
+                    _translationError.value =
+                        "Couldn't translate into $language. The language pack may still need to download."
+                }
+            } finally {
+                _isTranslatingLyrics.value = false
+            }
+        }
+    }
+
+    init {
+        // A translation is only ever valid for the song it was requested for -- clear it the
+        // instant the song changes so a stale translated line never lines up against the wrong
+        // song's lyrics/timestamps while the new song's own lyrics are still loading.
+        viewModelScope.launch {
+            currentSong.collect {
+                _translatedLyrics.value = null
+                _translationError.value = null
             }
         }
     }
@@ -308,6 +498,12 @@ class PlayerViewModel(
         mediaControllerManager.playQueue(queue, startIndex, onStarted = { expandNowPlaying() })
     }
 
+    /** Appends [song] to the end of the live "Up Next" queue (e.g. from a swipe-right gesture). */
+    fun addToQueue(song: Song) {
+        mediaControllerManager.addToQueue(song)
+        _statusMessage.value = "Added \"${song.title}\" to queue"
+    }
+
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
@@ -349,6 +545,10 @@ class PlayerViewModel(
 
     fun moveQueueItem(from: Int, to: Int) {
         mediaControllerManager.moveQueueItem(from, to)
+    }
+
+    fun removeQueueItems(indices: List<Int>) {
+        mediaControllerManager.removeQueueItems(indices)
     }
 
     private var lastRestartOrPreviousClickAtMs = 0L

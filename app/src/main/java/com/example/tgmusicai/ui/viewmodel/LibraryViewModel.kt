@@ -8,11 +8,16 @@ import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricsRepository
+import com.example.tgmusicai.data.local.AppPreferences
+import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.example.tgmusicai.data.youtube.YouTubeSearchResult
 import com.example.tgmusicai.data.repository.MusicRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -27,7 +32,9 @@ class LibraryViewModel(
     private val repository: MusicRepository,
     private val lyricsRepository: LyricsRepository? = null,
     private val coverArtScraper: CoverArtScraper? = null,
-    private val aiFeatureManager: AiFeatureManager? = null
+    private val aiFeatureManager: AiFeatureManager? = null,
+    private val appPreferences: AppPreferences? = null,
+    private val youtubeExtractor: YouTubeExtractor? = null
 ) : ViewModel() {
 
     // User search query for filtering songs
@@ -50,15 +57,32 @@ class LibraryViewModel(
             initialValue = emptyList()
         )
 
-    // Filtered song list based on search query
+    /**
+     * When on, the library hides cloud-only tracks and never searches YouTube -- everything shown
+     * is playable without a network. Replaces the toggle that used to live on Home and only
+     * filtered three of that screen's sections; it belongs next to the library it filters.
+     */
+    val downloadedOnly: StateFlow<Boolean> = appPreferences?.downloadedOnlyFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    fun setDownloadedOnly(enabled: Boolean) {
+        viewModelScope.launch {
+            appPreferences?.setDownloadedOnly(enabled)
+        }
+    }
+
+    // Filtered song list based on search query and the downloaded-only toggle.
     val filteredSongs: StateFlow<List<Song>> = combine(
         repository.allSongs,
-        _searchQuery
-    ) { songsList, query ->
+        _searchQuery,
+        downloadedOnly
+    ) { songsList, query, localOnly ->
+        val base = if (localOnly) songsList.filter { it.isDownloaded } else songsList
         if (query.isBlank()) {
-            songsList
+            base
         } else {
-            songsList.filter { song ->
+            base.filter { song ->
                 song.title.contains(query, ignoreCase = true) ||
                 song.artist.contains(query, ignoreCase = true) ||
                 song.album.contains(query, ignoreCase = true) ||
@@ -71,8 +95,43 @@ class LibraryViewModel(
         initialValue = emptyList()
     )
 
+    // --- Cloud (YouTube) search, folded in from the old separate Explore tab ---
+
+    private val _cloudResults = MutableStateFlow<List<YouTubeSearchResult>>(emptyList())
+    val cloudResults: StateFlow<List<YouTubeSearchResult>> = _cloudResults.asStateFlow()
+
+    private val _isSearchingCloud = MutableStateFlow(false)
+    val isSearchingCloud: StateFlow<Boolean> = _isSearchingCloud.asStateFlow()
+
+    private var cloudSearchJob: Job? = null
+
+    /**
+     * Debounced so typing doesn't fire a network request per keystroke, and skipped entirely in
+     * downloaded-only mode. Local filtering above is synchronous and unaffected by this.
+     */
+    private fun scheduleCloudSearch(query: String) {
+        cloudSearchJob?.cancel()
+        if (youtubeExtractor == null || query.length < 2 || downloadedOnly.value) {
+            _cloudResults.value = emptyList()
+            _isSearchingCloud.value = false
+            return
+        }
+        cloudSearchJob = viewModelScope.launch {
+            delay(500)
+            _isSearchingCloud.value = true
+            try {
+                _cloudResults.value = youtubeExtractor.search(query)
+            } catch (e: Exception) {
+                _cloudResults.value = emptyList()
+            } finally {
+                _isSearchingCloud.value = false
+            }
+        }
+    }
+
     fun onSearchQueryChanged(newQuery: String) {
         _searchQuery.value = newQuery
+        scheduleCloudSearch(newQuery)
     }
 
     fun openAddToPlaylistDialog(song: Song) {
@@ -114,6 +173,14 @@ class LibraryViewModel(
 
     fun clearStatusMessage() {
         _statusMessage.value = null
+    }
+
+    /** Toggles [song]'s liked state (e.g. from a swipe-left gesture on its row). */
+    fun toggleLikeSong(song: Song) {
+        viewModelScope.launch {
+            val nowLiked = repository.toggleLikeSong(song.id)
+            _statusMessage.value = if (nowLiked) "Liked \"${song.title}\"" else "Removed \"${song.title}\" from Liked Music"
+        }
     }
 
     /**
@@ -171,11 +238,16 @@ class LibraryViewModel(
     }
 
     // Grid vs. list layout toggle for the song list.
-    private val _isGridView = MutableStateFlow(false)
-    val isGridView: StateFlow<Boolean> = _isGridView.asStateFlow()
+    // Persisted rather than in-memory: this used to reset to list view on every app restart.
+    // Grid is the default -- it shows several times more of a library per screen.
+    val isGridView: StateFlow<Boolean> = appPreferences?.libraryGridViewFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+        ?: MutableStateFlow(true).asStateFlow()
 
     fun toggleGridView() {
-        _isGridView.value = !_isGridView.value
+        viewModelScope.launch {
+            appPreferences?.setLibraryGridView(!isGridView.value)
+        }
     }
 
     // Multi-select: a non-empty set means selection mode is active. Long-pressing a song starts
@@ -254,7 +326,9 @@ class LibraryViewModel(
         private val repository: MusicRepository,
         private val lyricsRepository: LyricsRepository? = null,
         private val coverArtScraper: CoverArtScraper? = null,
-        private val aiFeatureManager: AiFeatureManager? = null
+        private val aiFeatureManager: AiFeatureManager? = null,
+        private val appPreferences: AppPreferences? = null,
+        private val youtubeExtractor: YouTubeExtractor? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -262,7 +336,9 @@ class LibraryViewModel(
                 repository = repository,
                 lyricsRepository = lyricsRepository,
                 coverArtScraper = coverArtScraper,
-                aiFeatureManager = aiFeatureManager
+                aiFeatureManager = aiFeatureManager,
+                appPreferences = appPreferences,
+                youtubeExtractor = youtubeExtractor
             ) as T
         }
     }

@@ -44,7 +44,7 @@ data class Playlist(
 
     /**
      * The source YouTube playlist ID this playlist is synced from (e.g. a user's own playlist ID,
-     * or the special "LL" Liked Videos playlist), or null for a regular local/smart playlist.
+     * or the special "LM" Liked Music playlist), or null for a regular local/smart playlist.
      */
     @ColumnInfo(name = "youtube_playlist_id")
     val youtubePlaylistId: String? = null,

@@ -25,6 +25,12 @@
 * 💾 **Portable Backup & Restore:** Export and import `.tgmusic` ZIP backups containing database manifests and local audio files, equipped with Zip Slip security verification.
 * 🚗 **Android Auto Support:** Full in-car library browsing via `MediaLibraryService`.
 * 🎨 **4 Soft Color Themes:** Includes `YT_DARK`, `PASTEL_MIDNIGHT`, `WARM_AMBER`, and `NORDIC_SLATE` themes with DataStore persistence.
+* 🧭 **5-Tab Bottom Navigation:** Home, Explore, Library, Playlists, and Alarms in the bottom bar; Stats lives in the navigation drawer alongside YouTube import/downloads shortcuts.
+* 🌈 **Dynamic Ambient Artwork Backdrop:** The Now Playing screen samples dominant/muted colors from the current track's artwork via the Android Palette API and renders an animated, crossfading radial gradient behind the hero cover art.
+* 👉 **Swipe Gestures on Track Rows:** Swipe a song row right in the Library to instantly append it to the Up Next queue; swipe left to toggle Like.
+* 📡 **Zero-Wasted-Data Stream Caching:** YouTube audio streams are written through a 500MB LRU disk cache (`AudioCacheManager`), so replaying a recently heard cloud track costs 0MB of data and works offline.
+* 🔊 **Loudness Normalization:** An Android `LoudnessEnhancer` is attached to the live ExoPlayer audio session, balancing volume across quiet local files and loud YouTube streams.
+* ⚙️ **Centralized Settings Screen:** Theme selection, AI API key configuration, Backup/Restore, and Alarm sound settings are consolidated into one Settings screen reachable from a single gear icon on Home.
 
 ---
 

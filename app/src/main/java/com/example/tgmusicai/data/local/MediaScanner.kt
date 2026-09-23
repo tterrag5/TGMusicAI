@@ -25,8 +25,6 @@ object MediaScanner {
      * passes raw titles through [AiMetadataCleaner], and inserts or updates them in Room database.
      */
     suspend fun scanMediaStore(context: Context, songDao: SongDao) = withContext(Dispatchers.IO) {
-        val apiKey = AppPreferences(context).aiApiKeyFlow.firstOrNull()
-
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.DISPLAY_NAME,
@@ -84,35 +82,35 @@ object MediaScanner {
                     }
                 }
 
-                // Raw MediaStore titles are often messy ("Artist - Song (Official Audio)"); run
-                // them through the cleaner to strip noise and split out artist/producer when possible.
-                val cleaned = AiMetadataCleaner.clean(
-                    rawTitle = title,
-                    rawArtist = if (artist != "Unknown Artist") artist else null,
-                    apiKey = apiKey
-                )
-
-                // Create the song
-                val song = Song(
-                    title = cleaned.cleanTitle,
-                    artist = cleaned.artist ?: artist,
-                    album = album,
-                    durationMs = finalDuration,
-                    mediaUri = uri.toString(),
-                    producer = cleaned.producer
-                )
-
                 try {
-                    // Media scans can run repeatedly (app restarts, manual rescans); dedupe by
-                    // mediaUri so re-running the scan never creates duplicate rows for the same file.
+                    // Media scans run repeatedly (every app start, plus after each cloud download),
+                    // so check whether this file is already known BEFORE doing any cleaning work.
+                    // The check used to come after, which meant every song in the library was
+                    // re-cleaned on every scan and the result thrown away for all but new files.
                     val existing = songDao.getSongByUri(uri.toString())
                     if (existing == null) {
-                        songDao.insertSong(song)
+                        // Raw MediaStore titles are often messy ("Artist - Song (Official Audio)");
+                        // run them through the cleaner to strip noise and split out
+                        // artist/producer when possible.
+                        val cleaned = AiMetadataCleaner.clean(
+                            rawTitle = title,
+                            rawArtist = if (artist != "Unknown Artist") artist else null
+                        )
+
+                        songDao.insertSong(
+                            Song(
+                                title = cleaned.cleanTitle,
+                                artist = cleaned.artist ?: artist,
+                                album = album,
+                                durationMs = finalDuration,
+                                mediaUri = uri.toString(),
+                                producer = cleaned.producer
+                            )
+                        )
                         Log.d(TAG, "Added song: $title")
-                    } else {
-                        // Song already known: intentionally left as a no-op. Re-cleaning/overwriting
-                        // here would clobber any user edits (pinned, lyrics, artwork) made since.
                     }
+                    // Song already known: intentionally a no-op. Re-cleaning and overwriting here
+                    // would clobber any user edits (pinned, lyrics, artwork) made since.
                 } catch (e: Exception) {
                     Log.e(TAG, "Error inserting song $title", e)
                 }

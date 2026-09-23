@@ -6,10 +6,13 @@ import android.net.Uri
 import android.util.Log
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.TranslatorOptions
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -292,116 +295,112 @@ class LyricsRepository(
         return null
     }
 
-    // Whisper transcription can take a while (uploading a multi-MB audio file, then real
-    // model inference server-side) -- a dedicated client with much longer timeouts than the
-    // 10s used for quick lyrics-API lookups, so a slow-but-working transcription isn't cut off.
-    private val whisperClient by lazy {
-        okHttpClient.newBuilder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(120, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
-            .build()
-    }
+    /**
+     * On-device Whisper-tiny.en engine used by [transcribeWithWhisper] -- see
+     * [com.example.tgmusicai.ai.WhisperTranscriptionEngine]'s doc comment for why this replaced an
+     * OpenAI Whisper API call: no API key, no per-call cost, works fully offline. Lazily
+     * constructed since most sessions never trigger a transcription.
+     */
+    private val whisperEngine by lazy { com.example.tgmusicai.ai.WhisperTranscriptionEngine(context) }
 
     /**
-     * Resolves [mediaUri] to raw audio bytes for a downloaded local song, or null if it isn't
-     * one this can read directly (an un-downloaded cloud song's `mediaUri` is a remote URL/watch
-     * page, not something Whisper transcription -- which needs the actual file -- can use).
+     * Transcribes [song]'s downloaded audio on-device via a bundled, quantized Whisper-tiny.en
+     * model and returns the result as an LRC-formatted string, or null on any failure (song not
+     * downloaded, audio couldn't be decoded, or the model produced no text at all). English-only
+     * model -- unlike the old cloud OpenAI Whisper path this replaced, it won't transcribe
+     * non-English singing into its native script; that trade-off is what buys running fully
+     * offline with no API key and no per-call cost.
      */
-    private fun readLocalAudioBytes(mediaUri: String): ByteArray? {
-        return try {
-            when {
-                mediaUri.startsWith("content://") -> {
-                    context.contentResolver.openInputStream(Uri.parse(mediaUri))?.use { it.readBytes() }
-                }
-                mediaUri.startsWith("file://") -> {
-                    val path = Uri.parse(mediaUri).path ?: return null
-                    java.io.File(path).takeIf { it.exists() && it.isFile }?.readBytes()
-                }
-                mediaUri.startsWith("/") -> {
-                    java.io.File(mediaUri).takeIf { it.exists() && it.isFile }?.readBytes()
-                }
-                else -> null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read local audio bytes for Whisper transcription", e)
-            null
-        }
-    }
-
-    /**
-     * Transcribes [song]'s downloaded audio via OpenAI's Whisper API and returns the result as an
-     * LRC-formatted string, or null on any failure (no API key, song not downloaded, network/API
-     * error). [apiKey] must be an OpenAI-format key (`sk-...`) -- Gemini keys can't call this
-     * endpoint. The `language` parameter is deliberately omitted from the request so Whisper
-     * auto-detects the spoken/sung language instead of assuming English, letting it transcribe
-     * Japanese, Korean, Spanish, etc. into their native script instead of forcing a bad
-     * English-phonetic guess at non-English lyrics.
-     */
-    suspend fun transcribeWithWhisper(song: Song, apiKey: String): String? = withContext(Dispatchers.IO) {
-        if (!apiKey.startsWith("sk-")) {
-            Log.w(TAG, "Whisper transcription requires an OpenAI-format API key (sk-...); the configured key is not one")
-            return@withContext null
-        }
-        val audioBytes = readLocalAudioBytes(song.mediaUri)
-        if (audioBytes == null || audioBytes.isEmpty()) {
+    suspend fun transcribeWithWhisper(song: Song): String? = withContext(Dispatchers.IO) {
+        val mediaUri = song.mediaUri
+        val isLocal = mediaUri.startsWith("content://") || mediaUri.startsWith("file://") || mediaUri.startsWith("/")
+        if (!isLocal) {
             Log.w(TAG, "No local audio file available to transcribe for '${song.title}' (song must be downloaded first)")
             return@withContext null
         }
+        when (val result = whisperEngine.transcribeFile(mediaUri)) {
+            is com.example.tgmusicai.ai.AiModelResult.Success -> result.value.ifBlank { null }
+            is com.example.tgmusicai.ai.AiModelResult.Unavailable -> {
+                Log.w(TAG, "On-device transcription unavailable for '${song.title}': ${result.reason}")
+                null
+            }
+            is com.example.tgmusicai.ai.AiModelResult.Error -> {
+                Log.e(TAG, "On-device transcription failed for '${song.title}'", result.throwable)
+                null
+            }
+        }
+    }
 
-        val fileName = Uri.parse(song.mediaUri).lastPathSegment ?: "audio.m4a"
-        val mediaType = when {
-            fileName.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
-            fileName.endsWith(".wav", ignoreCase = true) -> "audio/wav"
-            fileName.endsWith(".ogg", ignoreCase = true) -> "audio/ogg"
-            else -> "audio/mp4"
-        }.toMediaTypeOrNull()
+    /**
+     * Translates [lines] into [targetLanguage] entirely on the device using ML Kit's translation
+     * models, preserving line count and order so each translated string still lines up with its
+     * original [LyricLine]'s timestamp for tap-to-seek.
+     *
+     * This replaced a Gemini/OpenAI implementation that required the user to supply their own API
+     * key. ML Kit needs no key and no account: it downloads a small language model once (over any
+     * connection, Wi-Fi not required) and then translates offline forever after. Translating line
+     * by line makes the old "the model merged or dropped lines" failure mode structurally
+     * impossible, so the alignment guard that used to discard mismatched responses is no longer
+     * needed -- the result always has exactly as many entries as the input.
+     *
+     * Returns null if the language isn't supported or the model can't be downloaded.
+     */
+    suspend fun translateLyrics(lines: List<String>, targetLanguage: String): List<String>? = withContext(Dispatchers.IO) {
+        if (lines.isEmpty()) return@withContext null
 
-        val requestBody = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("file", fileName, audioBytes.toRequestBody(mediaType))
-            .addFormDataPart("model", "whisper-1")
-            .addFormDataPart("response_format", "verbose_json")
-            .addFormDataPart("timestamp_granularities[]", "segment")
-            // No "language" field: omitting it (rather than forcing "en") is what enables
-            // Whisper's automatic language detection for non-English singing.
+        val targetCode = TranslateLanguage.fromLanguageTag(languageTagFor(targetLanguage))
+        if (targetCode == null) {
+            Log.w(TAG, "ML Kit has no on-device model for '$targetLanguage'")
+            return@withContext null
+        }
+
+        val options = TranslatorOptions.Builder()
+            .setSourceLanguage(TranslateLanguage.ENGLISH)
+            .setTargetLanguage(targetCode)
             .build()
 
-        val request = Request.Builder()
-            .url("https://api.openai.com/v1/audio/transcriptions")
-            .header("Authorization", "Bearer $apiKey")
-            .post(requestBody)
-            .build()
-
+        val translator = Translation.getClient(options)
         try {
-            whisperClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Whisper transcription failed for '${song.title}': HTTP ${response.code} ${response.message}")
-                    return@withContext null
-                }
-                val body = response.body?.string() ?: return@withContext null
-                val json = JSONObject(body)
-                val segments = json.optJSONArray("segments") ?: return@withContext null
-                val detectedLanguage = json.stringOrEmpty("language")
-                Log.d(TAG, "Whisper transcribed '${song.title}' as language: $detectedLanguage, ${segments.length()} segment(s)")
-
-                val builder = StringBuilder()
-                for (i in 0 until segments.length()) {
-                    val segment = segments.getJSONObject(i)
-                    val text = segment.stringOrEmpty("text").trim()
-                    if (text.isBlank()) continue
-                    val startMs = (segment.optDouble("start", 0.0) * 1000).toLong()
-                    val minutes = startMs / 60000
-                    val seconds = (startMs % 60000) / 1000
-                    val centis = (startMs % 1000) / 10
-                    builder.append(String.format(Locale.US, "[%02d:%02d.%02d] %s\n", minutes, seconds, centis, text))
-                }
-                builder.toString().ifBlank { null }
+            // No DownloadConditions restrictions: the models are a few MB, and silently refusing to
+            // translate on mobile data would look identical to the feature being broken.
+            translator.downloadModelIfNeeded().await()
+            lines.map { line ->
+                // Blank lines are separators in lyrics; translating them wastes work and ML Kit
+                // returns them unchanged anyway.
+                if (line.isBlank()) line else translator.translate(line).await()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Whisper transcription request failed for '${song.title}'", e)
+            Log.e(TAG, "On-device lyrics translation failed", e)
             null
+        } finally {
+            // Frees the loaded model; a Translator holds native resources until closed.
+            translator.close()
         }
+    }
+
+    /**
+     * Maps the human-readable language names the UI offers onto the BCP-47 tags ML Kit expects.
+     * Anything unrecognised is passed through lowercased, which still resolves for callers that
+     * already hand over a tag like "es".
+     */
+    private fun languageTagFor(language: String): String = when (language.trim().lowercase()) {
+        "spanish" -> "es"
+        "french" -> "fr"
+        "german" -> "de"
+        "italian" -> "it"
+        "portuguese" -> "pt"
+        "dutch" -> "nl"
+        "russian" -> "ru"
+        "japanese" -> "ja"
+        "korean" -> "ko"
+        "chinese" -> "zh"
+        "arabic" -> "ar"
+        "hindi" -> "hi"
+        "polish" -> "pl"
+        "turkish" -> "tr"
+        "swedish" -> "sv"
+        "english" -> "en"
+        else -> language.trim().lowercase()
     }
 
     /**

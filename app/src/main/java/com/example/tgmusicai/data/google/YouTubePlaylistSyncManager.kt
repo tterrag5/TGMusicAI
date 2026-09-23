@@ -8,17 +8,24 @@ import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.PlaylistSongCrossRef
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.youtube.GoogleYouTubePlaylist
+import com.example.tgmusicai.data.youtube.GoogleYouTubePlaylistVideo
+import com.example.tgmusicai.data.youtube.LIKED_MUSIC_PLAYLIST_ID
+import com.example.tgmusicai.data.youtube.YouTubeInnerTubeClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Imports a signed-in Google account's YouTube playlists (including Liked Videos) as local,
+ * Imports a signed-in YouTube Music account's playlists (including Liked Music) as local,
  * YouTube-synced [Playlist]s, and keeps them up to date: re-running a sync adds songs newly
  * present in the source playlist and removes ones no longer there, without touching the
  * underlying [Song] rows (which may also be downloaded or belong to other, non-synced playlists).
  *
- * Imported videos are stored as cloud/streamable songs (`isDownloaded = false`, `mediaUri` an
- * unresolved YouTube watch URL) -- the same convention [com.example.tgmusicai.ui.viewmodel.YouTubeViewModel.addCloudTrackToPlaylist]
+ * Talks to [YouTubeInnerTubeClient] (YouTube Music's own internal API, authenticated via a
+ * captured web session) rather than the old OAuth-gated YouTube Data API v3 -- see
+ * [YouTubeInnerTubeClient]'s doc comment for why. Imported videos are stored as cloud/streamable
+ * songs (`isDownloaded = false`, `mediaUri` an unresolved YouTube watch URL) -- the same
+ * convention [com.example.tgmusicai.ui.viewmodel.YouTubeViewModel.addCloudTrackToPlaylist]
  * already uses, which [com.example.tgmusicai.playback.MediaControllerManager] knows how to
  * resolve to a real stream URL at play time.
  */
@@ -26,7 +33,7 @@ class YouTubePlaylistSyncManager(
     private val songDao: SongDao,
     private val playlistDao: PlaylistDao,
     private val musicRepository: MusicRepository,
-    private val apiClient: YouTubeDataApiClient = YouTubeDataApiClient()
+    private val innerTubeClient: YouTubeInnerTubeClient
 ) {
     private val TAG = "YouTubePlaylistSync"
 
@@ -34,29 +41,28 @@ class YouTubePlaylistSyncManager(
      * Imports [googlePlaylist] as a new local playlist (or returns the existing one's ID if
      * already imported), then performs an initial sync of its contents.
      */
-    suspend fun importPlaylist(accessToken: String, googlePlaylist: GoogleYouTubePlaylist): Long = withContext(Dispatchers.IO) {
+    suspend fun importPlaylist(googlePlaylist: GoogleYouTubePlaylist): Long = withContext(Dispatchers.IO) {
         val playlistId = getOrCreateSyncedPlaylist(googlePlaylist.playlistId, googlePlaylist.title)
-        syncPlaylistById(accessToken, playlistId, googlePlaylist.playlistId)
+        syncPlaylistById(playlistId, googlePlaylist.playlistId)
         playlistId
     }
 
     /**
-     * Resolves and imports the signed-in account's Liked Videos as a local playlist named
-     * "Liked Videos (YouTube)". If [mergeIntoLikedMusic] is true, every imported song is also
+     * Imports the signed-in account's YouTube Music "Liked Music" as a local playlist named
+     * "Liked Music (YouTube)". If [mergeIntoLikedMusic] is true, every imported song is also
      * added to the app's own immutable "Liked Music" playlist, so the two stay in sync instead
      * of the YouTube import sitting as a disconnected duplicate.
      */
-    suspend fun importLikedVideos(accessToken: String, mergeIntoLikedMusic: Boolean = false): Long = withContext(Dispatchers.IO) {
-        val likedPlaylistId = apiClient.resolveLikedVideosPlaylistId(accessToken)
-        val playlistId = getOrCreateSyncedPlaylist(likedPlaylistId, "Liked Videos (YouTube)")
-        val importedSongIds = syncPlaylistById(accessToken, playlistId, likedPlaylistId)
+    suspend fun importLikedMusic(mergeIntoLikedMusic: Boolean = false): Long = withContext(Dispatchers.IO) {
+        val playlistId = getOrCreateSyncedPlaylist(LIKED_MUSIC_PLAYLIST_ID, "Liked Music (YouTube)")
+        val importedSongIds = syncPlaylistById(playlistId, LIKED_MUSIC_PLAYLIST_ID)
 
         if (mergeIntoLikedMusic) {
             val appLikedPlaylistId = musicRepository.getOrCreateLikedMusicPlaylistId()
             for (songId in importedSongIds) {
                 playlistDao.insertPlaylistSongCrossRef(PlaylistSongCrossRef(appLikedPlaylistId, songId))
             }
-            Log.d(TAG, "Merged ${importedSongIds.size} imported Liked Video(s) into the app's Liked Music playlist")
+            Log.d(TAG, "Merged ${importedSongIds.size} imported Liked Music song(s) into the app's Liked Music playlist")
         }
 
         playlistId
@@ -64,15 +70,15 @@ class YouTubePlaylistSyncManager(
 
     /**
      * Re-syncs every already-imported YouTube-synced playlist against its current source content.
-     * Intended to be called on app startup (if a valid access token is available) and from a
-     * manual pull-to-refresh.
+     * Intended to be called on app startup (if a valid session is available) and from a manual
+     * pull-to-refresh.
      */
-    suspend fun syncAll(accessToken: String) = withContext(Dispatchers.IO) {
+    suspend fun syncAll() = withContext(Dispatchers.IO) {
         val syncedPlaylists = playlistDao.getYoutubeSyncedPlaylistsList()
         for (playlist in syncedPlaylists) {
             val youtubePlaylistId = playlist.youtubePlaylistId ?: continue
             try {
-                syncPlaylistById(accessToken, playlist.playlistId, youtubePlaylistId)
+                syncPlaylistById(playlist.playlistId, youtubePlaylistId)
             } catch (e: Exception) {
                 Log.e(TAG, "Sync failed for playlist '${playlist.name}' ($youtubePlaylistId): ${e.message}", e)
             }
@@ -89,25 +95,24 @@ class YouTubePlaylistSyncManager(
         return playlistDao.insertPlaylist(
             Playlist(
                 name = title,
-                description = "Synced from your YouTube account",
+                description = "Synced from your YouTube Music account",
                 youtubePlaylistId = youtubePlaylistId
             )
         )
     }
 
     /**
-     * Fetches [youtubePlaylistId]'s current videos and durations from the API, upserts each as
-     * a local [Song] with a cross-ref into [localPlaylistId], then drops the cross-ref for any
-     * song that was in the local playlist before but is no longer present remotely (the
-     * underlying [Song] row itself is left untouched). Returns the resulting set of song IDs.
+     * Fetches [youtubePlaylistId]'s current tracks from InnerTube, upserts each as a local
+     * [Song] with a cross-ref into [localPlaylistId], then drops the cross-ref for any song that
+     * was in the local playlist before but is no longer present remotely (the underlying [Song]
+     * row itself is left untouched). Returns the resulting set of song IDs.
      */
-    private suspend fun syncPlaylistById(accessToken: String, localPlaylistId: Long, youtubePlaylistId: String): Set<Long> {
-        val remoteVideos = apiClient.fetchPlaylistVideos(accessToken, youtubePlaylistId)
-        val durations = apiClient.fetchVideoDurations(accessToken, remoteVideos.map { it.videoId })
+    private suspend fun syncPlaylistById(localPlaylistId: Long, youtubePlaylistId: String): Set<Long> {
+        val remoteVideos = innerTubeClient.fetchPlaylistTracks(youtubePlaylistId)
 
         val remoteSongIds = mutableSetOf<Long>()
         for (video in remoteVideos) {
-            val songId = ensurePersistedCloudSong(video, durations[video.videoId] ?: 0L)
+            val songId = ensurePersistedCloudSong(video)
             remoteSongIds.add(songId)
             playlistDao.insertPlaylistSongCrossRef(PlaylistSongCrossRef(localPlaylistId, songId))
         }
@@ -122,7 +127,7 @@ class YouTubePlaylistSyncManager(
         }
 
         playlistDao.updateLastSyncedAt(localPlaylistId, System.currentTimeMillis())
-        Log.d(TAG, "Synced playlist $youtubePlaylistId -> local #$localPlaylistId: ${remoteVideos.size} video(s)")
+        Log.d(TAG, "Synced playlist $youtubePlaylistId -> local #$localPlaylistId: ${remoteVideos.size} track(s)")
         return remoteSongIds
     }
 
@@ -132,7 +137,7 @@ class YouTubePlaylistSyncManager(
      * auto-generated Topic-channel uploads of the same track resolve to one row instead of
      * duplicating on every sync.
      */
-    private suspend fun ensurePersistedCloudSong(video: GoogleYouTubePlaylistVideo, durationSeconds: Long): Long {
+    private suspend fun ensurePersistedCloudSong(video: GoogleYouTubePlaylistVideo): Long {
         val existing = songDao.getSongByYoutubeId(video.videoId)
         if (existing != null) return existing.id
 
@@ -156,7 +161,7 @@ class YouTubePlaylistSyncManager(
             title = cleaned.cleanTitle,
             artist = artist,
             album = "YouTube Cloud",
-            durationMs = durationSeconds * 1000L,
+            durationMs = video.durationSeconds * 1000L,
             mediaUri = "https://www.youtube.com/watch?v=${video.videoId}",
             producer = cleaned.producer,
             youtubeId = video.videoId,

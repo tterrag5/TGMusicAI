@@ -1,10 +1,12 @@
 package com.example.tgmusicai.ui.viewmodel
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.tgmusicai.data.network.NetworkObserver
+import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.repository.MusicRepository
 import com.example.tgmusicai.data.repository.SongWithStats
 import com.example.tgmusicai.data.local.entity.Playlist
@@ -25,13 +27,19 @@ import java.io.InputStream
  */
 class HomeViewModel(
     private val repository: MusicRepository,
-    private val networkObserver: NetworkObserver
+    private val networkObserver: NetworkObserver,
+    private val appPreferences: AppPreferences? = null
 ) : ViewModel() {
 
     val isOnline: StateFlow<Boolean> = networkObserver.isOnline
 
-    private val _isDownloadedOnly = MutableStateFlow(false)
-    val isDownloadedOnly: StateFlow<Boolean> = _isDownloadedOnly.asStateFlow()
+    // Reads the same persisted preference the Library's toggle writes, so the two screens agree
+    // and the choice survives a restart. The toggle control itself now lives on the Library, next
+    // to the list it filters.
+    private val _isDownloadedOnly: StateFlow<Boolean> = appPreferences?.downloadedOnlyFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+    val isDownloadedOnly: StateFlow<Boolean> = _isDownloadedOnly
 
     private val _backupStatus = MutableStateFlow<String?>(null)
     val backupStatus: StateFlow<String?> = _backupStatus.asStateFlow()
@@ -89,7 +97,9 @@ class HomeViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun setDownloadedOnly(enabled: Boolean) {
-        _isDownloadedOnly.value = enabled
+        viewModelScope.launch {
+            appPreferences?.setDownloadedOnly(enabled)
+        }
     }
 
     fun togglePinSong(song: Song) {
@@ -110,12 +120,24 @@ class HomeViewModel(
         }
     }
 
-    fun exportBackup(context: Context) {
+    /**
+     * Writes a backup into [destination], a document URI the user picked via the system file
+     * picker. Going through the picker is what makes export work at all -- writing to a
+     * self-chosen path in public Downloads needs a storage permission this app doesn't hold.
+     */
+    fun exportBackup(context: Context, destination: Uri) {
         viewModelScope.launch {
             _isBackupLoading.value = true
             try {
-                val file = repository.exportBackup(context)
-                _backupStatus.value = "Backup saved: ${file.name}"
+                val wrote = context.contentResolver.openOutputStream(destination)?.use { out ->
+                    repository.exportBackup(out)
+                    true
+                } ?: false
+                _backupStatus.value = if (wrote) {
+                    "Backup saved"
+                } else {
+                    "Backup failed: couldn't open the chosen location for writing"
+                }
             } catch (e: Exception) {
                 _backupStatus.value = "Backup failed: ${e.message}"
             } finally {
@@ -148,11 +170,12 @@ class HomeViewModel(
 
     class Factory(
         private val repository: MusicRepository,
-        private val networkObserver: NetworkObserver
+        private val networkObserver: NetworkObserver,
+        private val appPreferences: AppPreferences? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return HomeViewModel(repository, networkObserver) as T
+            return HomeViewModel(repository, networkObserver, appPreferences) as T
         }
     }
 }

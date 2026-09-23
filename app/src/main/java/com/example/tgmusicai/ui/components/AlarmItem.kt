@@ -109,8 +109,11 @@ fun AlarmItem(
                 Spacer(modifier = Modifier.height(4.dp))
 
                 val repeatSummary = formatRepeatDaysSummary(alarm.repeatDays)
+                // snoozeMinutes == 0 means the user turned snooze off for this alarm.
+                val snoozeSummary =
+                    if (alarm.snoozeMinutes > 0) "Snooze: ${alarm.snoozeMinutes}m" else "Snooze off"
                 Text(
-                    text = "$repeatSummary • Snooze: ${alarm.snoozeMinutes}m",
+                    text = "$repeatSummary • $snoozeSummary",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                 )

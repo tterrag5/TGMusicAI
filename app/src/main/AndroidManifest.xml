@@ -77,8 +77,45 @@
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaLibraryService" />
                 <action android:name="android.media.browse.MediaBrowserService" />
+                <!--
+                    Lets androidx.media3.session.MediaButtonReceiver (below) resolve this service
+                    as the target for a MEDIA_BUTTON broadcast: it looks up which service in this
+                    package declares this action, then forwards the button event to it. Without
+                    this, a media-button press with the app process dead (Bluetooth/car button,
+                    or Android Auto's resume tile) silently does nothing.
+                -->
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </service>
+
+        <!--
+            Routes a MEDIA_BUTTON broadcast (Bluetooth/car play button, or Android Auto's "resume"
+            tile) to PlaybackService even when its process is dead, so playback can be controlled
+            from a fully cold start and not only while the app is already running.
+        -->
+        <receiver
+            android:name="androidx.media3.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            Lets Android Auto (Gearhead) and Assistant/Gemini read locally-scraped cover art:
+            Song.artworkUri for scraped covers is a file:// path into this app's private external
+            storage, which other processes cannot open directly. PlaybackService mints a
+            content:// URI through this provider and grants it read access per request instead.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

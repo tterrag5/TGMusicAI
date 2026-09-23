@@ -104,7 +104,7 @@ fun MiniPlayer(
                         )
                     }
                     .clickable(onClick = onExpandPlayer),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF212121)),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
                 shape = RoundedCornerShape(0.dp)
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
@@ -117,7 +117,7 @@ fun MiniPlayer(
                             .height(2.dp)
                             .align(Alignment.TopCenter),
                         color = MaterialTheme.colorScheme.primary,
-                        trackColor = Color.White.copy(alpha = 0.2f)
+                        trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
                     )
 
                     Row(
@@ -130,7 +130,7 @@ fun MiniPlayer(
                             modifier = Modifier
                                 .size(48.dp)
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(Color(0xFF282828)),
+                                .background(MaterialTheme.colorScheme.surfaceVariant),
                             contentAlignment = Alignment.Center
                         ) {
                             if (!song.artworkUri.isNullOrBlank()) {
@@ -144,7 +144,7 @@ fun MiniPlayer(
                                 Icon(
                                     imageVector = Icons.Rounded.MusicNote,
                                     contentDescription = null,
-                                    tint = Color.White,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -161,7 +161,7 @@ fun MiniPlayer(
                                 style = MaterialTheme.typography.bodyMedium.copy(
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color.White
+                                    color = MaterialTheme.colorScheme.onSurface
                                 ),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -171,7 +171,7 @@ fun MiniPlayer(
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Normal,
-                                    color = Color.LightGray
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 ),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -196,7 +196,7 @@ fun MiniPlayer(
                                 Icon(
                                     imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                     contentDescription = if (isPlaying) "Pause" else "Play",
-                                    tint = Color.White,
+                                    tint = MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier.size(28.dp)
                                 )
                             }
@@ -206,7 +206,7 @@ fun MiniPlayer(
                             Icon(
                                 imageVector = Icons.Rounded.SkipNext,
                                 contentDescription = "Skip Next",
-                                tint = Color.White,
+                                tint = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.size(24.dp)
                             )
                         }

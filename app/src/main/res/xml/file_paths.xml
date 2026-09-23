@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Exposes the scraped-cover-art directory (getExternalFilesDir("Covers"), written by
+    CoverArtScraper) through the app's FileProvider so external processes, namely Android Auto's
+    Gearhead app and the Assistant/Gemini app, can read album art over IPC. Raw file:// URIs
+    into this app's private external storage are not readable by other apps; content:// URIs
+    minted from this path, with a per-request grantUriPermission, are.
+-->
+<paths>
+    <external-files-path name="covers" path="Covers/" />
+</paths>

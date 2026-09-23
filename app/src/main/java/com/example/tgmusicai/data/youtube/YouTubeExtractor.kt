@@ -91,10 +91,11 @@ class NewPipeOkHttpDownloader(private val client: OkHttpClient) : Downloader() {
  *    stream *extraction/scraping*. It never talks to Google's official API or needs the user to
  *    sign in; it pulls playable audio URLs by querying NewPipeExtractor / Piped / Invidious, and
  *    is used for actual playback and downloading of audio.
- * 2. `data.google` (`GoogleAuthManager`, `YouTubeDataApiClient`, `YouTubePlaylistSyncManager`) --
- *    the OFFICIAL, OAuth-authenticated YouTube Data API v3. It requires the user to sign into
- *    their real Google account and is used ONLY to read/import the user's own playlists (e.g.
- *    Liked Videos) into this app's local database -- it is never used to fetch a playable stream.
+ * 2. `YouTubeInnerTubeClient`/`InnerTubeCookieManager` (this package) + `data.google`'s
+ *    `YouTubePlaylistSyncManager` -- reads/imports the *signed-in* user's own YouTube Music
+ *    playlists (e.g. Liked Music) into this app's local database, authenticated via a real
+ *    music.youtube.com web session captured from a WebView login rather than Google OAuth. It is
+ *    never used to fetch a playable stream for arbitrary audio -- that's always this class.
  * These two paths do not call each other and can fail/succeed independently.
  *
  * **Search** tries NewPipeExtractor first (talks to YouTube directly; confirmed reliable — 19/19
@@ -305,7 +306,13 @@ class YouTubeExtractor {
     }
 
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+        // Connect timeout is deliberately much shorter than the read timeout. Resolution walks a
+        // list of public instances, most of which are dead at any given moment, and a dead host
+        // burns the full connect timeout before the next one is tried -- at 15s each that added up
+        // to well over a minute of apparently-nothing before the user saw any result. Reaching a
+        // host that is actually up takes a fraction of this; only dead ones pay it. The read
+        // timeout stays long because that one covers real transfers.
+        .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .followRedirects(true)
         .addInterceptor { chain ->

@@ -28,19 +28,11 @@ fun OnboardingScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val appPreferences = remember { AppPreferences(context) }
 
     var hasMediaPermission by remember { mutableStateOf(checkMediaPermission(context)) }
     var hasNotificationPermission by remember { mutableStateOf(checkNotificationPermission(context)) }
     var isBatteryOptimized by remember { mutableStateOf(checkBatteryOptimization(context)) }
-    var apiKeyInput by remember { mutableStateOf("") }
-    
     val allGranted = hasMediaPermission && hasNotificationPermission && !isBatteryOptimized
-
-    LaunchedEffect(Unit) {
-        apiKeyInput = appPreferences.aiApiKeyFlow.firstOrNull() ?: ""
-    }
 
     LaunchedEffect(allGranted) {
         if (allGranted) {
@@ -129,48 +121,10 @@ fun OnboardingScreen(
             }
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // AI API Key Card (Optional)
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "AI Metadata Key (Optional)",
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Enter Gemini or OpenAI API Key for online metadata cleaning. If omitted, built-in offline engine is used.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = apiKeyInput,
-                    onValueChange = { newKey ->
-                        apiKeyInput = newKey
-                        scope.launch {
-                            appPreferences.setAiApiKey(newKey)
-                        }
-                    },
-                    label = { Text("API Key") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        }
-        
         Spacer(modifier = Modifier.height(24.dp))
-        
+
         Button(
-            onClick = {
-                scope.launch {
-                    appPreferences.setAiApiKey(apiKeyInput)
-                    onPermissionsGranted()
-                }
-            },
+            onClick = onPermissionsGranted,
             enabled = allGranted,
             modifier = Modifier.fillMaxWidth()
         ) {
