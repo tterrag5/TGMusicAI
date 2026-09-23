@@ -27,7 +27,13 @@ import java.util.concurrent.TimeUnit
  */
 data class LyricLine(
     val timestampMs: Long,
-    val text: String
+    val text: String,
+    /**
+     * True for a filler line standing in for a stretch of music with no words (see
+     * [LyricsRepository.withInstrumentalMarkers]). These are display-only: they are never saved
+     * back to the song's stored lyrics, and they are not worth translating.
+     */
+    val isInstrumental: Boolean = false
 )
 
 /**
@@ -124,6 +130,151 @@ class LyricsRepository(
 
             val timestamped = parsedLines.filter { it.timestampMs >= 0 }.sortedBy { it.timestampMs }
             return timestamped.ifEmpty { parsedLines }
+        }
+
+        /**
+         * A stretch with no words has to run this long before it counts as instrumental.
+         *
+         * Deliberately well past the length of a held note or a drawn-out delivery: those leave a
+         * gap of a few seconds between LRC timestamps despite the singer never stopping, and
+         * marking them as "music only" is wrong.
+         */
+        const val INSTRUMENTAL_GAP_MS = 10_000L
+
+        /** Roughly how far apart markers sit inside a gap long enough to earn more than one. */
+        const val INSTRUMENTAL_MARKER_SPACING_MS = 5_000L
+
+        /**
+         * Splits happen at these: a comma or semicolon, or a dash used as a pause. A lyric line
+         * transcribed as one run of text ("make me sweat, make me hotter") is really two phrases,
+         * and showing it as one long line means the highlight sits still while both are sung.
+         */
+        private val LINE_SPLIT_REGEX = Regex("""(?<=[,;])\s+|\s+[-\u2013\u2014]{1,2}\s+""")
+
+        /** A fragment shorter than this is joined back onto the phrase before it, not left alone. */
+        private const val MIN_SPLIT_PART_CHARS = 6
+
+        /**
+         * The longest stretch split phrases are spread over. Without a cap, a line followed by a
+         * long instrumental would smear its phrases across the whole break.
+         */
+        private const val MAX_SPLIT_SPAN_MS = 8_000L
+
+        /**
+         * Returns [lines] with each multi-phrase line broken into one line per phrase, timed by
+         * splitting the original line's span in proportion to each phrase's length.
+         *
+         * LRC files give one timestamp per line, so a line holding two phrases leaves the
+         * highlight parked on it through both. Proportional timing is an estimate -- nothing in
+         * the file says when the second phrase starts -- but it tracks singing far better than
+         * holding one line for its whole duration.
+         *
+         * [totalDurationMs] is the track length, used only to bound the final line's span; pass 0
+         * when it isn't known.
+         */
+        fun splitDenseLines(lines: List<LyricLine>, totalDurationMs: Long = 0L): List<LyricLine> {
+            if (lines.none { it.timestampMs >= 0 }) return lines
+
+            val result = mutableListOf<LyricLine>()
+            lines.forEachIndexed { index, line ->
+                val parts = if (line.timestampMs < 0 || line.isInstrumental) {
+                    listOf(line.text)
+                } else {
+                    splitIntoPhrases(line.text)
+                }
+                if (parts.size < 2) {
+                    result.add(line)
+                    return@forEachIndexed
+                }
+
+                val nextMs = lines.drop(index + 1).firstOrNull { it.timestampMs >= 0 }?.timestampMs
+                    ?: totalDurationMs.takeIf { it > line.timestampMs }
+                    ?: (line.timestampMs + MAX_SPLIT_SPAN_MS)
+                val span = (nextMs - line.timestampMs).coerceAtMost(MAX_SPLIT_SPAN_MS)
+                val totalChars = parts.sumOf { it.length }.coerceAtLeast(1)
+
+                var consumedChars = 0
+                for (part in parts) {
+                    result.add(
+                        line.copy(
+                            timestampMs = line.timestampMs + span * consumedChars / totalChars,
+                            text = part,
+                        )
+                    )
+                    consumedChars += part.length
+                }
+            }
+            return result
+        }
+
+        /** Breaks [text] at its phrase boundaries, or returns it whole if it has none worth using. */
+        private fun splitIntoPhrases(text: String): List<String> {
+            val parts = LINE_SPLIT_REGEX.split(text)
+                .map { it.trim().trimEnd(',', ';') }
+                .filter { it.isNotEmpty() }
+            if (parts.size < 2) return listOf(text)
+
+            val merged = mutableListOf<String>()
+            for (part in parts) {
+                if (part.length < MIN_SPLIT_PART_CHARS && merged.isNotEmpty()) {
+                    merged[merged.lastIndex] = merged.last() + " " + part
+                } else {
+                    merged.add(part)
+                }
+            }
+            return if (merged.size < 2) listOf(text) else merged
+        }
+
+        /** Stands in for singing during an intro, instrumental break, or outro. */
+        const val MUSIC_MARKER = "\u266a"
+
+        /**
+         * Returns [lines] with [MUSIC_MARKER] lines filling every stretch of [INSTRUMENTAL_GAP_MS]
+         * or longer that has no words -- the intro before the first line, each gap between two
+         * lines, and the outro after the last one.
+         *
+         * Without these, a long instrumental break leaves the highlight parked on the last line
+         * sung, which reads as the lyrics having frozen or drifted out of sync. Markers are spread
+         * evenly across the gap they fill, roughly one every [INSTRUMENTAL_MARKER_SPACING_MS], so the
+         * highlight keeps moving at a steady pace instead of sitting still and then jumping.
+         *
+         * A no-op for unsynced lyrics (every timestamp is the `-1` sentinel), which have no gaps to
+         * measure. [totalDurationMs] is the track length, used only for the outro; pass 0 when it
+         * isn't known and the outro is skipped.
+         */
+        fun withInstrumentalMarkers(lines: List<LyricLine>, totalDurationMs: Long = 0L): List<LyricLine> {
+            if (lines.isEmpty() || lines.none { it.timestampMs >= 0 }) return lines
+
+            val result = mutableListOf<LyricLine>()
+
+            fun fillGap(fromMs: Long, toMs: Long) {
+                val gap = toMs - fromMs
+                if (gap < INSTRUMENTAL_GAP_MS) return
+                // Aim for one marker per INSTRUMENTAL_MARKER_SPACING_MS, then space that many evenly across
+                // the gap so the first and last never land on the words at either end.
+                val count = ((gap / INSTRUMENTAL_MARKER_SPACING_MS).toInt() - 1).coerceAtLeast(1)
+                for (k in 1..count) {
+                    result.add(
+                        LyricLine(
+                            timestampMs = fromMs + (gap * k) / (count + 1),
+                            text = MUSIC_MARKER,
+                            isInstrumental = true,
+                        )
+                    )
+                }
+            }
+
+            fillGap(0L, lines.first().timestampMs)
+
+            lines.forEachIndexed { index, line ->
+                result.add(line)
+                val next = lines.getOrNull(index + 1) ?: return@forEachIndexed
+                fillGap(line.timestampMs, next.timestampMs)
+            }
+
+            if (totalDurationMs > 0L) fillGap(lines.last().timestampMs, totalDurationMs)
+
+            return result
         }
     }
 

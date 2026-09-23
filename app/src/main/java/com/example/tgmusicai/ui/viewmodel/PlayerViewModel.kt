@@ -163,8 +163,21 @@ class PlayerViewModel(
     private val _isCurrentSongLiked = MutableStateFlow(false)
     val isCurrentSongLiked: StateFlow<Boolean> = _isCurrentSongLiked.asStateFlow()
 
-    val parsedLyrics: StateFlow<List<LyricLine>> = _lyrics.map { raw ->
-        LyricsRepository.parseLyrics(raw)
+    /**
+     * The showing song's lyrics, parsed, broken into one line per phrase, then padded with music
+     * markers across every long wordless stretch.
+     *
+     * Splitting runs before the markers on purpose: a split line's phrases reach further into the
+     * gap that follows it, so a drawn-out delivery no longer looks like a stretch of pure music to
+     * [LyricsRepository.withInstrumentalMarkers]. The track duration feeds both -- it bounds the
+     * last line's span and gives the outro its markers.
+     */
+    val parsedLyrics: StateFlow<List<LyricLine>> = combine(_lyrics, durationMs) { raw, duration ->
+        val parsed = LyricsRepository.parseLyrics(raw)
+        LyricsRepository.withInstrumentalMarkers(
+            LyricsRepository.splitDenseLines(parsed, duration),
+            duration,
+        )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),

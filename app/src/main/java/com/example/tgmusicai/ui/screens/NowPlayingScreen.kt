@@ -2,6 +2,7 @@ package com.example.tgmusicai.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -11,6 +12,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -108,6 +110,26 @@ import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
 
 /** How long playback-driven lyric auto-scroll stays paused after the user scrolls the lyrics. */
 private const val LYRICS_MANUAL_SCROLL_GRACE_MS = 4000L
+
+/**
+ * How long the lyrics take to glide from one line to the next. Long enough to read as movement
+ * rather than a jump, short enough that the line is in place while it is still being sung -- at
+ * 650ms the highlight visibly trailed the music.
+ */
+private const val LYRICS_SCROLL_DURATION_MS = 420
+
+/**
+ * How far ahead of playback a line is treated as active.
+ *
+ * The glide takes [LYRICS_SCROLL_DURATION_MS] to finish, and LRC timestamps generally mark where a
+ * line sits in the file rather than the exact instant the vocal starts, so activating a line
+ * exactly on its timestamp lands it late twice over. Leading by roughly the glide duration puts
+ * the line in place as it begins.
+ */
+private const val LYRICS_SYNC_LEAD_MS = 400L
+
+/** Where the active lyric line comes to rest, as a fraction down the lyrics viewport. */
+private const val LYRICS_ACTIVE_LINE_ANCHOR = 0.4f
 
 /**
  * Full-screen Now Playing view: YouTube-Music-style hero artwork, pill action bar (Like/Dislike,
@@ -545,11 +567,12 @@ fun NowPlayingScreen(
                             }
                         } else {
                             val activeIndex = remember(currentPositionMs, parsedLyrics) {
+                                val cursorMs = currentPositionMs + LYRICS_SYNC_LEAD_MS
                                 var idx = -1
                                 for (i in parsedLyrics.indices) {
-                                    if (parsedLyrics[i].timestampMs >= 0 && parsedLyrics[i].timestampMs <= currentPositionMs) {
+                                    if (parsedLyrics[i].timestampMs >= 0 && parsedLyrics[i].timestampMs <= cursorMs) {
                                         idx = i
-                                    } else if (parsedLyrics[i].timestampMs > currentPositionMs) {
+                                    } else if (parsedLyrics[i].timestampMs > cursorMs) {
                                         break
                                     }
                                 }
@@ -576,11 +599,32 @@ fun NowPlayingScreen(
                                     !listState.isScrollInProgress &&
                                     sinceManualScroll > LYRICS_MANUAL_SCROLL_GRACE_MS
                                 ) {
-                                    // Keep the active line around a third of the way down rather
-                                    // than pinned near the top, so the next few lines stay visible
-                                    // -- the way YouTube Music positions them.
-                                    val target = (activeIndex - 3).coerceAtLeast(0)
-                                    listState.animateScrollToItem(target)
+                                    // Glide by an exact pixel distance rather than calling
+                                    // animateScrollToItem, which lands on an item boundary using a
+                                    // spec this code cannot choose -- with lines of unequal height
+                                    // that produced the jerk between lines. Measuring where the
+                                    // active line actually sits and easing that exact delta gives
+                                    // one continuous movement instead.
+                                    val info = listState.layoutInfo
+                                    val active = info.visibleItemsInfo.firstOrNull { it.index == activeIndex }
+                                    if (active != null) {
+                                        // Rest the active line a little above centre so the lines
+                                        // coming next stay on screen, the way YouTube Music does.
+                                        val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
+                                        val restingPoint = info.viewportStartOffset + viewportHeight * LYRICS_ACTIVE_LINE_ANCHOR
+                                        val delta = (active.offset + active.size / 2f) - restingPoint
+                                        listState.animateScrollBy(
+                                            delta,
+                                            animationSpec = tween(
+                                                durationMillis = LYRICS_SCROLL_DURATION_MS,
+                                                easing = FastOutSlowInEasing,
+                                            ),
+                                        )
+                                    } else {
+                                        // Off screen entirely (a seek, or returning to the tab),
+                                        // so there is no distance to ease -- just get there.
+                                        listState.animateScrollToItem((activeIndex - 2).coerceAtLeast(0))
+                                    }
                                 }
                             }
 
@@ -625,13 +669,21 @@ fun NowPlayingScreen(
                                     ) {
                                         Text(
                                             text = line.text,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-                                            color = animatedColor,
+                                            // A music marker is a symbol standing in for singing,
+                                            // not a lyric: sized up so it reads as one, and never
+                                            // bolded, so real words still stand out when active.
+                                            style = if (line.isInstrumental) {
+                                                MaterialTheme.typography.titleMedium
+                                            } else {
+                                                MaterialTheme.typography.bodyMedium
+                                            },
+                                            fontWeight = if (isActive && !line.isInstrumental) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (line.isInstrumental) animatedColor.copy(alpha = 0.7f) else animatedColor,
                                             modifier = Modifier.fillMaxWidth(),
                                             textAlign = TextAlign.Center
                                         )
-                                        translatedLyrics?.getOrNull(index)?.let { translatedText ->
+                                        // Markers hold no words, so there is nothing to translate.
+                                        translatedLyrics?.takeIf { !line.isInstrumental }?.getOrNull(index)?.let { translatedText ->
                                             Text(
                                                 text = translatedText,
                                                 style = MaterialTheme.typography.bodySmall,
