@@ -257,6 +257,36 @@ class PlayerViewModel(
     }
 
     /**
+     * Whether playback skips the crowd-sourced non-music segments of a YouTube track. Off by
+     * default; see [AppPreferences.sponsorBlockEnabledFlow] for why it is opt-in.
+     */
+    val sponsorBlockEnabled: StateFlow<Boolean> = appPreferences?.sponsorBlockEnabledFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    /** Which kinds of segment to skip. */
+    val sponsorBlockCategories: StateFlow<Set<String>> = appPreferences?.sponsorBlockCategoriesFlow
+        ?.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            AppPreferences.DEFAULT_SPONSORBLOCK_CATEGORIES
+        )
+        ?: MutableStateFlow(AppPreferences.DEFAULT_SPONSORBLOCK_CATEGORIES).asStateFlow()
+
+    fun setSponsorBlockEnabled(enabled: Boolean) {
+        viewModelScope.launch { appPreferences?.setSponsorBlockEnabled(enabled) }
+    }
+
+    /** Adds or removes one category, leaving the rest of the selection alone. */
+    fun toggleSponsorBlockCategory(category: String, enabled: Boolean) {
+        viewModelScope.launch {
+            val current = sponsorBlockCategories.value
+            val updated = if (enabled) current + category else current - category
+            appPreferences?.setSponsorBlockCategories(updated)
+        }
+    }
+
+    /**
      * The active color theme name (e.g. "YT_DARK"), read here (not just threaded through as a
      * plain composable parameter from `MainActivity`) so [com.example.tgmusicai.ui.screens.SettingsScreen]'s
      * theme picker reflects a change immediately. `SettingsScreen` is rendered through a

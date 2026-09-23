@@ -26,6 +26,16 @@ class AppPreferences(private val context: Context) {
     companion object {
         const val DEFAULT_CROSSFADE_DURATION_SEC = 3
         const val DEFAULT_TRANSLATION_LANGUAGE = "Spanish"
+
+        /**
+         * Categories skipped when SponsorBlock is switched on and the user has not narrowed them.
+         * Mirrors [com.example.tgmusicai.data.sponsorblock.SponsorBlockManager.DEFAULT_CATEGORIES],
+         * duplicated rather than referenced so this preferences class stays free of dependencies on
+         * network code.
+         */
+        val DEFAULT_SPONSORBLOCK_CATEGORIES = setOf(
+            "music_offtopic", "sponsor", "selfpromo", "intro", "outro", "interaction"
+        )
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
         val SELECTED_THEME = stringPreferencesKey("selected_theme")
         // Light/dark selection and Material You opt-in, kept separate from SELECTED_THEME so
@@ -65,6 +75,40 @@ class AppPreferences(private val context: Context) {
         val CROSSFADE_DURATION_SEC = intPreferencesKey("crossfade_duration_sec")
         val LYRICS_TRANSLATION_LANGUAGE = stringPreferencesKey("lyrics_translation_language")
         val VOLUME_NORMALIZATION_ENABLED = booleanPreferencesKey("volume_normalization_enabled")
+        val SPONSORBLOCK_ENABLED = booleanPreferencesKey("sponsorblock_enabled")
+        val SPONSORBLOCK_CATEGORIES = stringPreferencesKey("sponsorblock_categories")
+    }
+
+    /**
+     * Whether playback skips the non-music parts of a YouTube track, using the crowd-sourced
+     * SponsorBlock database.
+     *
+     * Defaults off. It is the one playback feature here that sends a request to a third party per
+     * track -- anonymised, but still a network call the user did not ask for -- so it is opt-in
+     * rather than something that quietly starts happening after an update.
+     */
+    val sponsorBlockEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[SPONSORBLOCK_ENABLED] ?: false }
+
+    suspend fun setSponsorBlockEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[SPONSORBLOCK_ENABLED] = enabled }
+    }
+
+    /** Which SponsorBlock categories to skip, stored comma-separated since DataStore has no set-of-string ordering guarantee worth relying on. */
+    val sponsorBlockCategoriesFlow: Flow<Set<String>> = context.dataStore.data
+        .map { preferences ->
+            preferences[SPONSORBLOCK_CATEGORIES]
+                ?.split(",")
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() }
+                ?.toSet()
+                ?: DEFAULT_SPONSORBLOCK_CATEGORIES
+        }
+
+    suspend fun setSponsorBlockCategories(categories: Set<String>) {
+        context.dataStore.edit { preferences ->
+            preferences[SPONSORBLOCK_CATEGORIES] = categories.joinToString(",")
+        }
     }
 
     /**

@@ -31,6 +31,7 @@ import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.ListeningHistory
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.sponsorblock.SponsorBlockManager
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
 import com.example.tgmusicai.widget.NowPlayingWidgetState
 import com.example.tgmusicai.widget.refreshNowPlayingWidgets
@@ -42,6 +43,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.future
 import kotlinx.coroutines.isActive
@@ -65,6 +67,18 @@ class PlaybackService : MediaLibraryService() {
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private val replayGainProcessor = ReplayGainAudioProcessor()
     private lateinit var loudnessNormalization: LoudnessNormalizationManager
+    private val sponsorBlock by lazy { SponsorBlockManager() }
+
+    /**
+     * SponsorBlock settings, mirrored into fields for the same reason
+     * [volumeNormalizationEnabled] is: they are consulted on a media item transition and on the
+     * playback ticker, neither of which can afford to suspend on a DataStore read.
+     */
+    @Volatile
+    private var sponsorBlockEnabled: Boolean = false
+
+    @Volatile
+    private var sponsorBlockCategories: Set<String> = AppPreferences.DEFAULT_SPONSORBLOCK_CATEGORIES
 
     /**
      * Whether per-track volume normalization is on. Mirrored into a field because it is read on
@@ -283,6 +297,7 @@ class PlaybackService : MediaLibraryService() {
                         maybeExtendQueueForAutoplay(this@apply)
                         resetListenTracking(mediaItem)
                         applyReplayGain(mediaItem)
+                        loadSponsorSegments(mediaItem)
                         publishWidgetState(mediaItem, isPlaying)
                         updateCustomLayout()
                     }
@@ -312,6 +327,19 @@ class PlaybackService : MediaLibraryService() {
                 applyReplayGain(player.currentMediaItem)
                 attachLoudnessEnhancer(player.audioSessionId)
             }
+        }
+
+        // SponsorBlock settings. Switching the feature on mid-track fetches segments for what is
+        // already playing rather than waiting for the next one.
+        serviceScope.launch(Dispatchers.Main) {
+            val preferences = AppPreferences(applicationContext)
+            preferences.sponsorBlockEnabledFlow
+                .combine(preferences.sponsorBlockCategoriesFlow) { enabled, categories -> enabled to categories }
+                .collect { (enabled, categories) ->
+                    sponsorBlockEnabled = enabled
+                    sponsorBlockCategories = categories
+                    loadSponsorSegments(player.currentMediaItem)
+                }
         }
 
         // Work through the library's unmeasured tracks in the background, so normalization applies
@@ -358,6 +386,12 @@ class PlaybackService : MediaLibraryService() {
         private const val LISTEN_TIME_FLUSH_INTERVAL_MS = 10_000L
         /** Idle gap between loudness-measurement batches, so the pass never competes with playback. */
         private const val LOUDNESS_BACKFILL_PAUSE_MS = 5_000L
+        /**
+         * A segment ending within this much of the track's end is treated as running to the end,
+         * so skipping it advances to the next track instead of seeking to a position that would
+         * immediately end playback anyway.
+         */
+        private const val SPONSOR_END_GUARD_MS = 1_000L
         private const val YOUTUBE_FALLBACK_SEARCH_CANDIDATES = 6
         private const val YOUTUBE_FALLBACK_RESOLVE_TARGET = 3
 
@@ -529,6 +563,7 @@ class PlaybackService : MediaLibraryService() {
             while (isActive) {
                 val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
                 val dur = exoPlayer.duration.let { if (it > 0) it else 0L }
+                maybeSkipSponsorSegment(pos)
                 val delta = (pos - lastTickPositionMs).coerceIn(0L, 2000L)
                 lastTickPositionMs = pos
                 if (delta > 0) {
@@ -586,6 +621,77 @@ class PlaybackService : MediaLibraryService() {
             trackedSongId = songId
             database.songStatsDao().addListenTime(songId, ms)
             database.listeningHistoryDao().insert(ListeningHistory(songId = songId, durationMs = ms))
+        }
+    }
+
+    // SponsorBlock state for the track currently playing. Both are replaced wholesale on every
+    // media item transition rather than accumulated, so segments from a previous track can never
+    // be applied to this one.
+    private var sponsorSegments: List<SponsorBlockManager.Segment> = emptyList()
+    private val skippedSegmentIds = mutableSetOf<String>()
+    private var sponsorFetchJob: Job? = null
+
+    /**
+     * Loads the non-music segments for [mediaItem], if it is a YouTube track and the feature is on.
+     *
+     * Only cloud tracks have segments: the database is keyed by YouTube video id, and a local file
+     * has none. Fetching is fire-and-forget -- playback starts immediately and segments apply from
+     * whenever they arrive, which is within a second or so and long before most of them matter.
+     */
+    private fun loadSponsorSegments(mediaItem: MediaItem?) {
+        sponsorFetchJob?.cancel()
+        sponsorSegments = emptyList()
+        skippedSegmentIds.clear()
+
+        if (!sponsorBlockEnabled) return
+        val videoId = SongMediaExtras.youtubeId(mediaItem?.mediaMetadata?.extras)
+            ?.takeIf { it.isNotBlank() } ?: return
+
+        sponsorFetchJob = serviceScope.launch {
+            val segments = sponsorBlock.fetchSegments(videoId, sponsorBlockCategories)
+            val stillCurrent = withContext(Dispatchers.Main) {
+                player.currentMediaItem?.mediaId == mediaItem?.mediaId
+            }
+            if (stillCurrent) {
+                sponsorSegments = segments
+                if (segments.isNotEmpty()) {
+                    android.util.Log.d("PlaybackService", "SponsorBlock: ${segments.size} segment(s) for $videoId")
+                }
+            }
+        }
+    }
+
+    /**
+     * Seeks past any segment [positionMs] has entered.
+     *
+     * Called from the existing telemetry ticker rather than a second timer of its own, so segment
+     * checking costs nothing beyond a list scan on a tick that already happens.
+     *
+     * A segment is skipped at most once per track. Without that, seeking back into a skipped
+     * section to hear it deliberately would be undone instantly, leaving the user unable to reach
+     * part of their own audio.
+     */
+    private fun maybeSkipSponsorSegment(positionMs: Long) {
+        if (sponsorSegments.isEmpty()) return
+        val segment = sponsorSegments.firstOrNull { candidate ->
+            positionMs >= candidate.startMs &&
+                positionMs < candidate.endMs &&
+                candidate.id !in skippedSegmentIds
+        } ?: return
+
+        skippedSegmentIds.add(segment.id)
+        serviceScope.launch(Dispatchers.Main) {
+            val duration = player.duration
+            // Landing past the end of the track would end playback rather than skip within it.
+            if (duration > 0 && segment.endMs >= duration - SPONSOR_END_GUARD_MS) {
+                if (player.hasNextMediaItem()) player.seekToNextMediaItem()
+                return@launch
+            }
+            player.seekTo(segment.endMs)
+            android.util.Log.d(
+                "PlaybackService",
+                "SponsorBlock: skipped ${segment.displayName} (${segment.startMs}-${segment.endMs}ms)"
+            )
         }
     }
 

@@ -65,6 +65,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.tgmusicai.data.sponsorblock.SponsorBlockManager
 import com.example.tgmusicai.ui.theme.AppTheme
 import com.example.tgmusicai.ui.theme.ThemeMode
 import com.example.tgmusicai.ui.viewmodel.HomeViewModel
@@ -97,6 +98,8 @@ fun SettingsScreen(
     val dynamicColorEnabled by playerViewModel.dynamicColorEnabled.collectAsState()
     val skipSilenceEnabled by playerViewModel.skipSilenceEnabled.collectAsState()
     val volumeNormalizationEnabled by playerViewModel.volumeNormalizationEnabled.collectAsState()
+    val sponsorBlockEnabled by playerViewModel.sponsorBlockEnabled.collectAsState()
+    val sponsorBlockCategories by playerViewModel.sponsorBlockCategories.collectAsState()
     val crossfadeEnabled by playerViewModel.crossfadeEnabled.collectAsState()
     val crossfadeDurationSec by playerViewModel.crossfadeDurationSec.collectAsState()
     var draggedCrossfadeDurationSec by remember(crossfadeDurationSec) { mutableStateOf(crossfadeDurationSec.toFloat()) }
@@ -113,7 +116,8 @@ fun SettingsScreen(
     val playbackSummary = listOfNotNull(
         "Normalize volume".takeIf { volumeNormalizationEnabled },
         "Skip silence".takeIf { skipSilenceEnabled },
-        "Crossfade".takeIf { crossfadeEnabled }
+        "Crossfade".takeIf { crossfadeEnabled },
+        "Skip non-music".takeIf { sponsorBlockEnabled }
     ).joinToString(", ").ifEmpty { "Default playback behavior" }
 
     // CreateDocument gives the user a real "save as" dialog and hands back a writable URI, so
@@ -249,6 +253,45 @@ fun SettingsScreen(
                                     valueRange = 1f..12f,
                                     steps = 10
                                 )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            SettingsToggleContent(
+                                title = "Skip non-music sections",
+                                subtitle = "Use the community SponsorBlock database to jump past intros, sponsor reads and talking in YouTube tracks. Sends an anonymised lookup per track.",
+                                checked = sponsorBlockEnabled,
+                                onCheckedChange = playerViewModel::setSponsorBlockEnabled
+                            )
+                            if (sponsorBlockEnabled) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    "What to skip",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                SponsorBlockManager.CATEGORY_LABELS.forEach { (category, label) ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Switch(
+                                            checked = category in sponsorBlockCategories,
+                                            onCheckedChange = { playerViewModel.toggleSponsorBlockCategory(category, it) }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
