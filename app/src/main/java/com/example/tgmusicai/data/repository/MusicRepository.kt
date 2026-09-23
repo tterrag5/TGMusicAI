@@ -61,7 +61,8 @@ class MusicRepository(
     private val playlistDao: PlaylistDao,
     private val songStatsDao: SongStatsDao,
     private val alarmDao: AlarmDao,
-    private val listeningHistoryDao: ListeningHistoryDao? = null
+    private val listeningHistoryDao: ListeningHistoryDao? = null,
+    private val database: com.example.tgmusicai.data.local.AppDatabase? = null
 ) {
     private val TAG = "MusicRepository"
 
@@ -103,7 +104,7 @@ class MusicRepository(
     val allAlarms: Flow<List<Alarm>> = alarmDao.getAllAlarms()
 
     /** Handles export/import of the full library (songs, playlists, stats, alarms) to/from a backup file. */
-    val backupManager = BackupManager(songDao, playlistDao, songStatsDao, alarmDao)
+    val backupManager = BackupManager(songDao, playlistDao, songStatsDao, alarmDao, database)
 
     /**
      * Raw cross-ref-backed lookup of a playlist and its songs by ID. Only correct for normal
@@ -613,9 +614,9 @@ class MusicRepository(
         songDao.updateSongArtwork(songId, artworkUri)
     }
 
-    /** Delegates to [BackupManager] to export the full library to a backup file. */
-    suspend fun exportBackup(context: Context): File {
-        return backupManager.exportBackup(context)
+    /** Delegates to [BackupManager] to write a full library backup into [outputStream]. */
+    suspend fun exportBackup(outputStream: java.io.OutputStream) {
+        backupManager.exportBackup(outputStream)
     }
 
     /** Delegates to [BackupManager] to restore the library from a backup file stream. */

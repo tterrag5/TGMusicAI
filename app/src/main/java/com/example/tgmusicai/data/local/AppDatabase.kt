@@ -32,6 +32,8 @@ import com.example.tgmusicai.data.local.entity.SongStats
  * bug in on-device AI tagging/embedding code can never touch the core schema.
  * Version = 10 added song_stats.totalListenTimeMs and the listening_history table, powering the
  * Stats screen's total-listening-time hero metric and weekly listening trend chart.
+ * Version = 11 added alarms.forceMaxVolume/volumeRampUp -- these used to be one global setting
+ * pair in AppPreferences applied to every alarm; now each alarm picks its own.
  */
 @Database(
     entities = [
@@ -44,7 +46,7 @@ import com.example.tgmusicai.data.local.entity.SongStats
         AiSongTags::class,
         ListeningHistory::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -142,6 +144,20 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Adds the per-alarm forceMaxVolume/volumeRampUp columns, defaulting existing alarms to
+         * both off. There's no way to seed these from the old global AppPreferences toggle they
+         * replace -- a Room [Migration] only has access to the raw SQLite database, not DataStore
+         * -- so an upgrading user's existing alarms start from the same default as brand new ones
+         * and just need the toggle re-applied per alarm if they want it back.
+         */
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE alarms ADD COLUMN forceMaxVolume INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE alarms ADD COLUMN volumeRampUp INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
          * Returns the app-wide singleton [AppDatabase], creating it on first call.
          * Double-checked locking (`synchronized` + null check twice) avoids building the
          * database twice if two threads race to call this before [INSTANCE] is set.
@@ -157,7 +173,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "tgmusicai_database"
                 )
-                .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+                .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                 .fallbackToDestructiveMigration()
                 .build()
                 .also { INSTANCE = it }

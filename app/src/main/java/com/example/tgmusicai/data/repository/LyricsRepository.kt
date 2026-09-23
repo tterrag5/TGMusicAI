@@ -6,10 +6,13 @@ import android.net.Uri
 import android.util.Log
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.TranslatorOptions
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -24,7 +27,13 @@ import java.util.concurrent.TimeUnit
  */
 data class LyricLine(
     val timestampMs: Long,
-    val text: String
+    val text: String,
+    /**
+     * True for a filler line standing in for a stretch of music with no words (see
+     * [LyricsRepository.withInstrumentalMarkers]). These are display-only: they are never saved
+     * back to the song's stored lyrics, and they are not worth translating.
+     */
+    val isInstrumental: Boolean = false
 )
 
 /**
@@ -41,8 +50,8 @@ class LyricsRepository(
 
     /**
      * Shared HTTP client for quick lookups (LrcLib get/search, YouTube caption fetches). 10s
-     * timeouts are short on purpose -- these are lightweight text/JSON requests, not the large
-     * file uploads [whisperClient] handles, so a hung request should fail fast and let
+     * timeouts are short on purpose -- these are lightweight text/JSON requests, not the whole-
+     * track audio [audioFetchClient] pulls down, so a hung request should fail fast and let
      * [fetchAndSaveLyrics] move on to the next fallback source rather than stall.
      */
     private val okHttpClient = OkHttpClient.Builder()
@@ -50,6 +59,20 @@ class LyricsRepository(
         .readTimeout(10, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
+
+    /**
+     * Separate client for pulling a cloud track's whole audio stream down before transcription.
+     * A full track is megabytes over a possibly slow link, so [okHttpClient]'s deliberately short
+     * 10s read timeout would abort it; this one is patient instead, and is never used for the
+     * lyric lookups that depend on failing fast.
+     */
+    private val audioFetchClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .build()
+    }
 
     companion object {
         // Matches [mm:ss.fff], [mm:ss:fff] (colon-separated centiseconds, common from some LRC
@@ -107,6 +130,151 @@ class LyricsRepository(
 
             val timestamped = parsedLines.filter { it.timestampMs >= 0 }.sortedBy { it.timestampMs }
             return timestamped.ifEmpty { parsedLines }
+        }
+
+        /**
+         * A stretch with no words has to run this long before it counts as instrumental.
+         *
+         * Deliberately well past the length of a held note or a drawn-out delivery: those leave a
+         * gap of a few seconds between LRC timestamps despite the singer never stopping, and
+         * marking them as "music only" is wrong.
+         */
+        const val INSTRUMENTAL_GAP_MS = 10_000L
+
+        /** Roughly how far apart markers sit inside a gap long enough to earn more than one. */
+        const val INSTRUMENTAL_MARKER_SPACING_MS = 5_000L
+
+        /**
+         * Splits happen at these: a comma or semicolon, or a dash used as a pause. A lyric line
+         * transcribed as one run of text ("make me sweat, make me hotter") is really two phrases,
+         * and showing it as one long line means the highlight sits still while both are sung.
+         */
+        private val LINE_SPLIT_REGEX = Regex("""(?<=[,;])\s+|\s+[-\u2013\u2014]{1,2}\s+""")
+
+        /** A fragment shorter than this is joined back onto the phrase before it, not left alone. */
+        private const val MIN_SPLIT_PART_CHARS = 6
+
+        /**
+         * The longest stretch split phrases are spread over. Without a cap, a line followed by a
+         * long instrumental would smear its phrases across the whole break.
+         */
+        private const val MAX_SPLIT_SPAN_MS = 8_000L
+
+        /**
+         * Returns [lines] with each multi-phrase line broken into one line per phrase, timed by
+         * splitting the original line's span in proportion to each phrase's length.
+         *
+         * LRC files give one timestamp per line, so a line holding two phrases leaves the
+         * highlight parked on it through both. Proportional timing is an estimate -- nothing in
+         * the file says when the second phrase starts -- but it tracks singing far better than
+         * holding one line for its whole duration.
+         *
+         * [totalDurationMs] is the track length, used only to bound the final line's span; pass 0
+         * when it isn't known.
+         */
+        fun splitDenseLines(lines: List<LyricLine>, totalDurationMs: Long = 0L): List<LyricLine> {
+            if (lines.none { it.timestampMs >= 0 }) return lines
+
+            val result = mutableListOf<LyricLine>()
+            lines.forEachIndexed { index, line ->
+                val parts = if (line.timestampMs < 0 || line.isInstrumental) {
+                    listOf(line.text)
+                } else {
+                    splitIntoPhrases(line.text)
+                }
+                if (parts.size < 2) {
+                    result.add(line)
+                    return@forEachIndexed
+                }
+
+                val nextMs = lines.drop(index + 1).firstOrNull { it.timestampMs >= 0 }?.timestampMs
+                    ?: totalDurationMs.takeIf { it > line.timestampMs }
+                    ?: (line.timestampMs + MAX_SPLIT_SPAN_MS)
+                val span = (nextMs - line.timestampMs).coerceAtMost(MAX_SPLIT_SPAN_MS)
+                val totalChars = parts.sumOf { it.length }.coerceAtLeast(1)
+
+                var consumedChars = 0
+                for (part in parts) {
+                    result.add(
+                        line.copy(
+                            timestampMs = line.timestampMs + span * consumedChars / totalChars,
+                            text = part,
+                        )
+                    )
+                    consumedChars += part.length
+                }
+            }
+            return result
+        }
+
+        /** Breaks [text] at its phrase boundaries, or returns it whole if it has none worth using. */
+        private fun splitIntoPhrases(text: String): List<String> {
+            val parts = LINE_SPLIT_REGEX.split(text)
+                .map { it.trim().trimEnd(',', ';') }
+                .filter { it.isNotEmpty() }
+            if (parts.size < 2) return listOf(text)
+
+            val merged = mutableListOf<String>()
+            for (part in parts) {
+                if (part.length < MIN_SPLIT_PART_CHARS && merged.isNotEmpty()) {
+                    merged[merged.lastIndex] = merged.last() + " " + part
+                } else {
+                    merged.add(part)
+                }
+            }
+            return if (merged.size < 2) listOf(text) else merged
+        }
+
+        /** Stands in for singing during an intro, instrumental break, or outro. */
+        const val MUSIC_MARKER = "\u266a"
+
+        /**
+         * Returns [lines] with [MUSIC_MARKER] lines filling every stretch of [INSTRUMENTAL_GAP_MS]
+         * or longer that has no words -- the intro before the first line, each gap between two
+         * lines, and the outro after the last one.
+         *
+         * Without these, a long instrumental break leaves the highlight parked on the last line
+         * sung, which reads as the lyrics having frozen or drifted out of sync. Markers are spread
+         * evenly across the gap they fill, roughly one every [INSTRUMENTAL_MARKER_SPACING_MS], so the
+         * highlight keeps moving at a steady pace instead of sitting still and then jumping.
+         *
+         * A no-op for unsynced lyrics (every timestamp is the `-1` sentinel), which have no gaps to
+         * measure. [totalDurationMs] is the track length, used only for the outro; pass 0 when it
+         * isn't known and the outro is skipped.
+         */
+        fun withInstrumentalMarkers(lines: List<LyricLine>, totalDurationMs: Long = 0L): List<LyricLine> {
+            if (lines.isEmpty() || lines.none { it.timestampMs >= 0 }) return lines
+
+            val result = mutableListOf<LyricLine>()
+
+            fun fillGap(fromMs: Long, toMs: Long) {
+                val gap = toMs - fromMs
+                if (gap < INSTRUMENTAL_GAP_MS) return
+                // Aim for one marker per INSTRUMENTAL_MARKER_SPACING_MS, then space that many evenly across
+                // the gap so the first and last never land on the words at either end.
+                val count = ((gap / INSTRUMENTAL_MARKER_SPACING_MS).toInt() - 1).coerceAtLeast(1)
+                for (k in 1..count) {
+                    result.add(
+                        LyricLine(
+                            timestampMs = fromMs + (gap * k) / (count + 1),
+                            text = MUSIC_MARKER,
+                            isInstrumental = true,
+                        )
+                    )
+                }
+            }
+
+            fillGap(0L, lines.first().timestampMs)
+
+            lines.forEachIndexed { index, line ->
+                result.add(line)
+                val next = lines.getOrNull(index + 1) ?: return@forEachIndexed
+                fillGap(line.timestampMs, next.timestampMs)
+            }
+
+            if (totalDurationMs > 0L) fillGap(lines.last().timestampMs, totalDurationMs)
+
+            return result
         }
     }
 
@@ -292,116 +460,190 @@ class LyricsRepository(
         return null
     }
 
-    // Whisper transcription can take a while (uploading a multi-MB audio file, then real
-    // model inference server-side) -- a dedicated client with much longer timeouts than the
-    // 10s used for quick lyrics-API lookups, so a slow-but-working transcription isn't cut off.
-    private val whisperClient by lazy {
-        okHttpClient.newBuilder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(120, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
-            .build()
-    }
+    /**
+     * On-device Whisper-tiny.en engine used by [transcribeWithWhisper] -- see
+     * [com.example.tgmusicai.ai.WhisperTranscriptionEngine]'s doc comment for why this replaced an
+     * OpenAI Whisper API call: no API key, no per-call cost, works fully offline. Lazily
+     * constructed since most sessions never trigger a transcription.
+     */
+    private val whisperEngine by lazy { com.example.tgmusicai.ai.WhisperTranscriptionEngine(context) }
 
     /**
-     * Resolves [mediaUri] to raw audio bytes for a downloaded local song, or null if it isn't
-     * one this can read directly (an un-downloaded cloud song's `mediaUri` is a remote URL/watch
-     * page, not something Whisper transcription -- which needs the actual file -- can use).
+     * Transcribes [song]'s downloaded audio on-device via a bundled, quantized Whisper-tiny.en
+     * model and returns the result as an LRC-formatted string, or null on any failure (song not
+     * downloaded, audio couldn't be decoded, or the model produced no text at all). English-only
+     * model -- unlike the old cloud OpenAI Whisper path this replaced, it won't transcribe
+     * non-English singing into its native script; that trade-off is what buys running fully
+     * offline with no API key and no per-call cost.
      */
-    private fun readLocalAudioBytes(mediaUri: String): ByteArray? {
-        return try {
-            when {
-                mediaUri.startsWith("content://") -> {
-                    context.contentResolver.openInputStream(Uri.parse(mediaUri))?.use { it.readBytes() }
-                }
-                mediaUri.startsWith("file://") -> {
-                    val path = Uri.parse(mediaUri).path ?: return null
-                    java.io.File(path).takeIf { it.exists() && it.isFile }?.readBytes()
-                }
-                mediaUri.startsWith("/") -> {
-                    java.io.File(mediaUri).takeIf { it.exists() && it.isFile }?.readBytes()
-                }
-                else -> null
+    suspend fun transcribeWithWhisper(song: Song): String? = withContext(Dispatchers.IO) {
+        val mediaUri = song.mediaUri
+        val isLocal = mediaUri.startsWith("content://") || mediaUri.startsWith("file://") || mediaUri.startsWith("/")
+
+        // A cloud track has no local file, so fetch its audio to a temporary one and transcribe
+        // that. Downloading rather than decoding the URL in place is deliberate: MediaExtractor
+        // would have to re-range-request a signed googlevideo URL repeatedly through a whole-track
+        // decode, and those URLs expire and throttle mid-use.
+        var scratchFile: java.io.File? = null
+        val audioPath = if (isLocal) {
+            mediaUri
+        } else {
+            val videoId = song.youtubeId?.takeIf { it.isNotBlank() }
+            if (videoId == null) {
+                Log.w(TAG, "No audio available to transcribe for '${song.title}'")
+                return@withContext null
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read local audio bytes for Whisper transcription", e)
-            null
+            scratchFile = downloadStreamToScratchFile(videoId)
+            if (scratchFile == null) {
+                Log.w(TAG, "Could not fetch cloud audio to transcribe for '${song.title}'")
+                return@withContext null
+            }
+            scratchFile.absolutePath
         }
-    }
-
-    /**
-     * Transcribes [song]'s downloaded audio via OpenAI's Whisper API and returns the result as an
-     * LRC-formatted string, or null on any failure (no API key, song not downloaded, network/API
-     * error). [apiKey] must be an OpenAI-format key (`sk-...`) -- Gemini keys can't call this
-     * endpoint. The `language` parameter is deliberately omitted from the request so Whisper
-     * auto-detects the spoken/sung language instead of assuming English, letting it transcribe
-     * Japanese, Korean, Spanish, etc. into their native script instead of forcing a bad
-     * English-phonetic guess at non-English lyrics.
-     */
-    suspend fun transcribeWithWhisper(song: Song, apiKey: String): String? = withContext(Dispatchers.IO) {
-        if (!apiKey.startsWith("sk-")) {
-            Log.w(TAG, "Whisper transcription requires an OpenAI-format API key (sk-...); the configured key is not one")
-            return@withContext null
-        }
-        val audioBytes = readLocalAudioBytes(song.mediaUri)
-        if (audioBytes == null || audioBytes.isEmpty()) {
-            Log.w(TAG, "No local audio file available to transcribe for '${song.title}' (song must be downloaded first)")
-            return@withContext null
-        }
-
-        val fileName = Uri.parse(song.mediaUri).lastPathSegment ?: "audio.m4a"
-        val mediaType = when {
-            fileName.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
-            fileName.endsWith(".wav", ignoreCase = true) -> "audio/wav"
-            fileName.endsWith(".ogg", ignoreCase = true) -> "audio/ogg"
-            else -> "audio/mp4"
-        }.toMediaTypeOrNull()
-
-        val requestBody = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("file", fileName, audioBytes.toRequestBody(mediaType))
-            .addFormDataPart("model", "whisper-1")
-            .addFormDataPart("response_format", "verbose_json")
-            .addFormDataPart("timestamp_granularities[]", "segment")
-            // No "language" field: omitting it (rather than forcing "en") is what enables
-            // Whisper's automatic language detection for non-English singing.
-            .build()
-
-        val request = Request.Builder()
-            .url("https://api.openai.com/v1/audio/transcriptions")
-            .header("Authorization", "Bearer $apiKey")
-            .post(requestBody)
-            .build()
 
         try {
-            whisperClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Whisper transcription failed for '${song.title}': HTTP ${response.code} ${response.message}")
-                    return@withContext null
-                }
-                val body = response.body?.string() ?: return@withContext null
-                val json = JSONObject(body)
-                val segments = json.optJSONArray("segments") ?: return@withContext null
-                val detectedLanguage = json.stringOrEmpty("language")
-                Log.d(TAG, "Whisper transcribed '${song.title}' as language: $detectedLanguage, ${segments.length()} segment(s)")
+            transcribeDecodedAudio(song, audioPath)
+        } finally {
+            scratchFile?.let { file ->
+                if (!file.delete()) Log.w(TAG, "Could not delete transcription scratch file ${file.name}")
+            }
+        }
+    }
 
-                val builder = StringBuilder()
-                for (i in 0 until segments.length()) {
-                    val segment = segments.getJSONObject(i)
-                    val text = segment.stringOrEmpty("text").trim()
-                    if (text.isBlank()) continue
-                    val startMs = (segment.optDouble("start", 0.0) * 1000).toLong()
-                    val minutes = startMs / 60000
-                    val seconds = (startMs % 60000) / 1000
-                    val centis = (startMs % 1000) / 10
-                    builder.append(String.format(Locale.US, "[%02d:%02d.%02d] %s\n", minutes, seconds, centis, text))
+    /**
+     * Resolves [videoId] to an audio stream and writes it to a file in the cache directory,
+     * returning that file or null on any failure. The caller owns the file and must delete it.
+     *
+     * The request carries [YouTubeExtractor.REALISTIC_USER_AGENT] for the same reason playback
+     * does: signed `googlevideo` URLs answer 403 to a default agent.
+     */
+    private suspend fun downloadStreamToScratchFile(videoId: String): java.io.File? {
+        return try {
+            val stream = youtubeExtractor.extractAudioStream(videoId)
+            if (stream == null || stream.url.isBlank()) {
+                Log.w(TAG, "No audio stream resolved for transcription of $videoId")
+                return null
+            }
+
+            val request = Request.Builder()
+                .url(stream.url)
+                .header("User-Agent", YouTubeExtractor.REALISTIC_USER_AGENT)
+                .build()
+
+            val target = java.io.File.createTempFile("transcribe_", ".${stream.format}", context.cacheDir)
+            audioFetchClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Transcription audio fetch for $videoId returned HTTP ${response.code}")
+                    target.delete()
+                    return null
                 }
-                builder.toString().ifBlank { null }
+                val body = response.body ?: run {
+                    target.delete()
+                    return null
+                }
+                body.byteStream().use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+
+            if (target.length() == 0L) {
+                target.delete()
+                Log.w(TAG, "Transcription audio fetch for $videoId produced an empty file")
+                null
+            } else {
+                target
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Whisper transcription request failed for '${song.title}'", e)
+            Log.e(TAG, "Could not fetch cloud audio for transcription of $videoId", e)
             null
         }
+    }
+
+    /** Runs the on-device model over [audioPath] and maps its result to lyrics text or null. */
+    private fun transcribeDecodedAudio(song: Song, audioPath: String): String? {
+        return when (val result = whisperEngine.transcribeFile(audioPath)) {
+            is com.example.tgmusicai.ai.AiModelResult.Success -> result.value.ifBlank { null }
+            is com.example.tgmusicai.ai.AiModelResult.Unavailable -> {
+                Log.w(TAG, "On-device transcription unavailable for '${song.title}': ${result.reason}")
+                null
+            }
+            is com.example.tgmusicai.ai.AiModelResult.Error -> {
+                Log.e(TAG, "On-device transcription failed for '${song.title}'", result.throwable)
+                null
+            }
+        }
+    }
+
+    /**
+     * Translates [lines] into [targetLanguage] entirely on the device using ML Kit's translation
+     * models, preserving line count and order so each translated string still lines up with its
+     * original [LyricLine]'s timestamp for tap-to-seek.
+     *
+     * This replaced a Gemini/OpenAI implementation that required the user to supply their own API
+     * key. ML Kit needs no key and no account: it downloads a small language model once (over any
+     * connection, Wi-Fi not required) and then translates offline forever after. Translating line
+     * by line makes the old "the model merged or dropped lines" failure mode structurally
+     * impossible, so the alignment guard that used to discard mismatched responses is no longer
+     * needed -- the result always has exactly as many entries as the input.
+     *
+     * Returns null if the language isn't supported or the model can't be downloaded.
+     */
+    suspend fun translateLyrics(lines: List<String>, targetLanguage: String): List<String>? = withContext(Dispatchers.IO) {
+        if (lines.isEmpty()) return@withContext null
+
+        val targetCode = TranslateLanguage.fromLanguageTag(languageTagFor(targetLanguage))
+        if (targetCode == null) {
+            Log.w(TAG, "ML Kit has no on-device model for '$targetLanguage'")
+            return@withContext null
+        }
+
+        val options = TranslatorOptions.Builder()
+            .setSourceLanguage(TranslateLanguage.ENGLISH)
+            .setTargetLanguage(targetCode)
+            .build()
+
+        val translator = Translation.getClient(options)
+        try {
+            // No DownloadConditions restrictions: the models are a few MB, and silently refusing to
+            // translate on mobile data would look identical to the feature being broken.
+            translator.downloadModelIfNeeded().await()
+            lines.map { line ->
+                // Blank lines are separators in lyrics; translating them wastes work and ML Kit
+                // returns them unchanged anyway.
+                if (line.isBlank()) line else translator.translate(line).await()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "On-device lyrics translation failed", e)
+            null
+        } finally {
+            // Frees the loaded model; a Translator holds native resources until closed.
+            translator.close()
+        }
+    }
+
+    /**
+     * Maps the human-readable language names the UI offers onto the BCP-47 tags ML Kit expects.
+     * Anything unrecognised is passed through lowercased, which still resolves for callers that
+     * already hand over a tag like "es".
+     */
+    private fun languageTagFor(language: String): String = when (language.trim().lowercase()) {
+        "spanish" -> "es"
+        "french" -> "fr"
+        "german" -> "de"
+        "italian" -> "it"
+        "portuguese" -> "pt"
+        "dutch" -> "nl"
+        "russian" -> "ru"
+        "japanese" -> "ja"
+        "korean" -> "ko"
+        "chinese" -> "zh"
+        "arabic" -> "ar"
+        "hindi" -> "hi"
+        "polish" -> "pl"
+        "turkish" -> "tr"
+        "swedish" -> "sv"
+        "english" -> "en"
+        else -> language.trim().lowercase()
     }
 
     /**

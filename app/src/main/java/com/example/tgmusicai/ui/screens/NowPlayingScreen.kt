@@ -1,8 +1,18 @@
 package com.example.tgmusicai.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,6 +47,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.RepeatOne
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.SkipNext
@@ -44,6 +55,7 @@ import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.ThumbDownOffAlt
 import androidx.compose.material.icons.rounded.ThumbUp
 import androidx.compose.material.icons.rounded.ThumbUpOffAlt
+import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -53,6 +65,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -75,8 +88,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -87,7 +104,32 @@ import coil.compose.AsyncImage
 import com.example.tgmusicai.ui.components.AddToPlaylistDialog
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
 import com.example.tgmusicai.ui.util.FormatUtils
+import com.example.tgmusicai.ui.util.rememberArtworkColors
+import com.example.tgmusicai.ui.util.ShareUtils
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
+
+/** How long playback-driven lyric auto-scroll stays paused after the user scrolls the lyrics. */
+private const val LYRICS_MANUAL_SCROLL_GRACE_MS = 4000L
+
+/**
+ * How long the lyrics take to glide from one line to the next. Long enough to read as movement
+ * rather than a jump, short enough that the line is in place while it is still being sung -- at
+ * 650ms the highlight visibly trailed the music.
+ */
+private const val LYRICS_SCROLL_DURATION_MS = 420
+
+/**
+ * How far ahead of playback a line is treated as active.
+ *
+ * The glide takes [LYRICS_SCROLL_DURATION_MS] to finish, and LRC timestamps generally mark where a
+ * line sits in the file rather than the exact instant the vocal starts, so activating a line
+ * exactly on its timestamp lands it late twice over. Leading by roughly the glide duration puts
+ * the line in place as it begins.
+ */
+private const val LYRICS_SYNC_LEAD_MS = 400L
+
+/** Where the active lyric line comes to rest, as a fraction down the lyrics viewport. */
+private const val LYRICS_ACTIVE_LINE_ANCHOR = 0.4f
 
 /**
  * Full-screen Now Playing view: YouTube-Music-style hero artwork, pill action bar (Like/Dislike,
@@ -117,11 +159,16 @@ fun NowPlayingScreen(
     val isScraping by playerViewModel.isScraping.collectAsState()
     val isTranscribing by playerViewModel.isTranscribing.collectAsState()
     val transcribeError by playerViewModel.transcribeError.collectAsState()
+    val translatedLyrics by playerViewModel.translatedLyrics.collectAsState()
+    val isTranslatingLyrics by playerViewModel.isTranslatingLyrics.collectAsState()
+    val translationLanguage by playerViewModel.translationLanguage.collectAsState()
+    val translationError by playerViewModel.translationError.collectAsState()
     val remainingSleepTimeMs by playerViewModel.remainingSleepTimeMs.collectAsState()
     val isLiked by playerViewModel.isCurrentSongLiked.collectAsState()
     val playbackSpeed by playerViewModel.playbackSpeed.collectAsState()
     val equalizerEnabled by equalizerViewModel.enabled.collectAsState()
     val playlists by playerViewModel.playlists.collectAsState()
+    val context = LocalContext.current
 
     var showLyricsTab by remember { mutableStateOf(false) }
     var showSleepTimerDialog by remember { mutableStateOf(false) }
@@ -130,7 +177,30 @@ fun NowPlayingScreen(
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showInfoDialog by remember { mutableStateOf(false) }
     var showSaveDialog by remember { mutableStateOf(false) }
+    var showTranslateMenu by remember { mutableStateOf(false) }
     var isDisliked by remember(currentSong?.mediaUri) { mutableStateOf(false) }
+
+    LaunchedEffect(translationError) {
+        translationError?.let {
+            android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_LONG).show()
+            playerViewModel.clearTranslationError()
+        }
+    }
+
+    // Dominant/muted colors sampled from the current track's artwork, crossfading between tracks;
+    // drive a slow breathing pulse on top so the ambient backdrop reads as alive, not a static tint.
+    val artworkColors = rememberArtworkColors(currentSong?.artworkUri)
+    val ambientPrimary by artworkColors.first
+    val ambientSecondary by artworkColors.second
+    val ambientPulse by rememberInfiniteTransition(label = "ambientPulse").animateFloat(
+        initialValue = 0.7f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 4000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "ambientPulseFraction"
+    )
 
     // Priority 1 of the back-navigation architecture: while this screen is composed (i.e. the
     // player is expanded), back must collapse it back to the MiniPlayer rather than falling
@@ -280,6 +350,14 @@ fun NowPlayingScreen(
                                 onClick = { showOverflowMenu = false; showInfoDialog = true }
                             )
                             DropdownMenuItem(
+                                text = { Text("Share") },
+                                leadingIcon = { Icon(Icons.Rounded.Share, contentDescription = null) },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    currentSong?.let { ShareUtils.shareSong(context, it) }
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Start Radio") },
                                 leadingIcon = { Icon(Icons.Rounded.AutoAwesome, contentDescription = null) },
                                 onClick = {
@@ -378,6 +456,52 @@ fun NowPlayingScreen(
                     elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
                 ) {
                     Box(modifier = Modifier.fillMaxSize()) {
+                        if (parsedLyrics.isNotEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(8.dp)
+                            ) {
+                                IconButton(onClick = { showTranslateMenu = true }) {
+                                    if (isTranslatingLyrics) {
+                                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Translate,
+                                            contentDescription = "Translate lyrics",
+                                            tint = if (translatedLyrics != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                DropdownMenu(expanded = showTranslateMenu, onDismissRequest = { showTranslateMenu = false }) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (translatedLyrics != null) "Hide translation" else "Translate to $translationLanguage") },
+                                        onClick = {
+                                            showTranslateMenu = false
+                                            playerViewModel.toggleLyricsTranslation()
+                                        }
+                                    )
+                                    HorizontalDivider()
+                                    listOf("Spanish", "French", "German", "Portuguese", "Italian", "Japanese", "Korean", "Chinese (Simplified)", "Arabic", "Hindi").forEach { language ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = language,
+                                                    fontWeight = if (language == translationLanguage) FontWeight.Bold else FontWeight.Normal,
+                                                    color = if (language == translationLanguage) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                )
+                                            },
+                                            onClick = {
+                                                showTranslateMenu = false
+                                                // Persists the pick and, if a translation is already showing,
+                                                // re-translates into it immediately (see PlayerViewModel).
+                                                playerViewModel.setTranslationLanguage(language)
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         if (parsedLyrics.isEmpty()) {
                             Column(
                                 modifier = Modifier
@@ -396,7 +520,7 @@ fun NowPlayingScreen(
                                 Text(
                                     text = when {
                                         isScraping -> "Fetching transcript/lyrics..."
-                                        isTranscribing -> "Transcribing audio with OpenAI Whisper..."
+                                        isTranscribing -> "Transcribing audio on-device..."
                                         else -> "No lyrics available for this song"
                                     },
                                     style = MaterialTheme.typography.bodyLarge,
@@ -443,11 +567,12 @@ fun NowPlayingScreen(
                             }
                         } else {
                             val activeIndex = remember(currentPositionMs, parsedLyrics) {
+                                val cursorMs = currentPositionMs + LYRICS_SYNC_LEAD_MS
                                 var idx = -1
                                 for (i in parsedLyrics.indices) {
-                                    if (parsedLyrics[i].timestampMs >= 0 && parsedLyrics[i].timestampMs <= currentPositionMs) {
+                                    if (parsedLyrics[i].timestampMs >= 0 && parsedLyrics[i].timestampMs <= cursorMs) {
                                         idx = i
-                                    } else if (parsedLyrics[i].timestampMs > currentPositionMs) {
+                                    } else if (parsedLyrics[i].timestampMs > cursorMs) {
                                         break
                                     }
                                 }
@@ -456,13 +581,50 @@ fun NowPlayingScreen(
 
                             val listState = rememberLazyListState()
 
+                            // Tracks when the user last dragged the lyrics themselves. Checking
+                            // isScrollInProgress alone only paused auto-scroll during the drag
+                            // itself, so letting go snapped the view straight back to the active
+                            // line -- you could never actually read ahead. Auto-scroll now stays
+                            // out of the way for a few seconds after a manual scroll.
+                            var lastManualScrollMs by remember { mutableStateOf(0L) }
+                            LaunchedEffect(listState.isScrollInProgress) {
+                                if (listState.isScrollInProgress) {
+                                    lastManualScrollMs = System.currentTimeMillis()
+                                }
+                            }
+
                             LaunchedEffect(activeIndex) {
-                                // Don't fight a manual scroll: if the user is actively dragging
-                                // through the lyrics to read ahead, forcing the view back to the
-                                // playback-driven active line on every timestamp update made it
-                                // impossible to read anything but the current line.
-                                if (activeIndex >= 0 && !listState.isScrollInProgress) {
-                                    listState.animateScrollToItem((activeIndex - 2).coerceAtLeast(0))
+                                val sinceManualScroll = System.currentTimeMillis() - lastManualScrollMs
+                                if (activeIndex >= 0 &&
+                                    !listState.isScrollInProgress &&
+                                    sinceManualScroll > LYRICS_MANUAL_SCROLL_GRACE_MS
+                                ) {
+                                    // Glide by an exact pixel distance rather than calling
+                                    // animateScrollToItem, which lands on an item boundary using a
+                                    // spec this code cannot choose -- with lines of unequal height
+                                    // that produced the jerk between lines. Measuring where the
+                                    // active line actually sits and easing that exact delta gives
+                                    // one continuous movement instead.
+                                    val info = listState.layoutInfo
+                                    val active = info.visibleItemsInfo.firstOrNull { it.index == activeIndex }
+                                    if (active != null) {
+                                        // Rest the active line a little above centre so the lines
+                                        // coming next stay on screen, the way YouTube Music does.
+                                        val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
+                                        val restingPoint = info.viewportStartOffset + viewportHeight * LYRICS_ACTIVE_LINE_ANCHOR
+                                        val delta = (active.offset + active.size / 2f) - restingPoint
+                                        listState.animateScrollBy(
+                                            delta,
+                                            animationSpec = tween(
+                                                durationMillis = LYRICS_SCROLL_DURATION_MS,
+                                                easing = FastOutSlowInEasing,
+                                            ),
+                                        )
+                                    } else {
+                                        // Off screen entirely (a seek, or returning to the tab),
+                                        // so there is no distance to ease -- just get there.
+                                        listState.animateScrollToItem((activeIndex - 2).coerceAtLeast(0))
+                                    }
                                 }
                             }
 
@@ -474,22 +636,63 @@ fun NowPlayingScreen(
                             ) {
                                 itemsIndexed(parsedLyrics) { index, line ->
                                     val isActive = index == activeIndex
-                                    Text(
-                                        text = line.text,
-                                        style = if (isActive) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyMedium,
-                                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    // Color/scale animate smoothly; the text's own style/size never
+                                    // changes. Sizing the active line up via titleMedium used to
+                                    // reflow this item's height the instant it activated -- while
+                                    // the list was also mid-animateScrollToItem -- which is what
+                                    // read as choppy/stuttery scrolling rather than a clean
+                                    // line-by-line highlight.
+                                    val animatedColor by animateColorAsState(
+                                        targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        animationSpec = tween(250),
+                                        label = "lyricLineColor"
+                                    )
+                                    val animatedScale by animateFloatAsState(
+                                        targetValue = if (isActive) 1.08f else 1f,
+                                        animationSpec = tween(250),
+                                        label = "lyricLineScale"
+                                    )
+                                    Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
+                                            .graphicsLayer {
+                                                scaleX = animatedScale
+                                                scaleY = animatedScale
+                                            }
                                             .clip(RoundedCornerShape(8.dp))
                                             .clickable {
                                                 if (line.timestampMs >= 0) {
                                                     playerViewModel.seekTo(line.timestampMs)
                                                 }
                                             }
-                                            .padding(vertical = 8.dp, horizontal = 12.dp),
-                                        textAlign = TextAlign.Center
-                                    )
+                                            .padding(vertical = 8.dp, horizontal = 12.dp)
+                                    ) {
+                                        Text(
+                                            text = line.text,
+                                            // A music marker is a symbol standing in for singing,
+                                            // not a lyric: sized up so it reads as one, and never
+                                            // bolded, so real words still stand out when active.
+                                            style = if (line.isInstrumental) {
+                                                MaterialTheme.typography.titleMedium
+                                            } else {
+                                                MaterialTheme.typography.bodyMedium
+                                            },
+                                            fontWeight = if (isActive && !line.isInstrumental) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (line.isInstrumental) animatedColor.copy(alpha = 0.7f) else animatedColor,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            textAlign = TextAlign.Center
+                                        )
+                                        // Markers hold no words, so there is nothing to translate.
+                                        translatedLyrics?.takeIf { !line.isInstrumental }?.getOrNull(index)?.let { translatedText ->
+                                            Text(
+                                                text = translatedText,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = animatedColor.copy(alpha = 0.75f),
+                                                modifier = Modifier.fillMaxWidth(),
+                                                textAlign = TextAlign.Center
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -499,7 +702,16 @@ fun NowPlayingScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .weight(1f),
+                        .weight(1f)
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    ambientPrimary.copy(alpha = 0.45f * ambientPulse),
+                                    ambientSecondary.copy(alpha = 0.25f * ambientPulse),
+                                    Color.Transparent
+                                )
+                            )
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Card(

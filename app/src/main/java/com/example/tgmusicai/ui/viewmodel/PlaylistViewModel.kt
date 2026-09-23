@@ -1,10 +1,15 @@
 package com.example.tgmusicai.ui.viewmodel
 
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.tgmusicai.data.local.AppPreferences
+import com.example.tgmusicai.data.local.PlaylistImportExportManager
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.PlaylistWithSongs
+import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.MusicRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,7 +27,9 @@ import kotlinx.coroutines.launch
  * ViewModel managing playlists list, smart playlists dynamic resolution, playlist creation/deletion, and selection.
  */
 class PlaylistViewModel(
-    private val repository: MusicRepository
+    private val repository: MusicRepository,
+    private val importExportManager: PlaylistImportExportManager? = null,
+    private val appPreferences: AppPreferences? = null
 ) : ViewModel() {
 
     private val _showCreateDialog = MutableStateFlow(false)
@@ -98,6 +105,54 @@ class PlaylistViewModel(
         }
     }
 
+    // --- Playlists screen: grid/list mode and playlist-level multi-select ---
+
+    /** Grid vs list on the Playlists screen, persisted so it survives a restart. */
+    val isGridView: StateFlow<Boolean> = appPreferences?.playlistsGridViewFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+        ?: MutableStateFlow(true).asStateFlow()
+
+    fun toggleGridView() {
+        viewModelScope.launch {
+            appPreferences?.setPlaylistsGridView(!isGridView.value)
+        }
+    }
+
+    // Deliberately separate from [_selectedSongIds] below: that one selects songs *inside* a
+    // playlist for PlaylistDetailScreen, this one selects whole playlists on the Playlists grid.
+    // Sharing one field would make a selection on either screen leak into the other.
+    private val _selectedPlaylistIds = MutableStateFlow<Set<Long>>(emptySet())
+    val selectedPlaylistIds: StateFlow<Set<Long>> = _selectedPlaylistIds.asStateFlow()
+
+    fun startPlaylistSelection(playlistId: Long) {
+        _selectedPlaylistIds.value = setOf(playlistId)
+    }
+
+    fun togglePlaylistSelected(playlistId: Long) {
+        _selectedPlaylistIds.update { current ->
+            if (playlistId in current) current - playlistId else current + playlistId
+        }
+    }
+
+    fun clearPlaylistSelection() {
+        _selectedPlaylistIds.value = emptySet()
+    }
+
+    /**
+     * Deletes every selected playlist. The repository already refuses to delete the protected
+     * smart playlists, and the UI additionally prevents selecting them, so the number the user is
+     * shown always matches the number actually removed.
+     */
+    fun deleteSelectedPlaylists() {
+        viewModelScope.launch {
+            val ids = _selectedPlaylistIds.value
+            playlists.value
+                .filter { it.playlistId in ids && !MusicRepository.isProtectedSmartPlaylist(it) }
+                .forEach { repository.deletePlaylist(it) }
+            clearPlaylistSelection()
+        }
+    }
+
     fun togglePinPlaylist(playlist: Playlist) {
         viewModelScope.launch {
             repository.togglePinPlaylist(playlist.playlistId, !playlist.isPinned)
@@ -165,10 +220,84 @@ class PlaylistViewModel(
         }
     }
 
-    class Factory(private val repository: MusicRepository) : ViewModelProvider.Factory {
+    // --- Playlist import/export (CSV) ---
+
+    private val _exportStatusMessage = MutableStateFlow<String?>(null)
+    val exportStatusMessage: StateFlow<String?> = _exportStatusMessage.asStateFlow()
+
+    private val _importProgress = MutableStateFlow<Pair<Int, Int>?>(null)
+    val importProgress: StateFlow<Pair<Int, Int>?> = _importProgress.asStateFlow()
+
+    private val _importResultMessage = MutableStateFlow<String?>(null)
+    val importResultMessage: StateFlow<String?> = _importResultMessage.asStateFlow()
+
+    fun clearExportStatus() {
+        _exportStatusMessage.value = null
+    }
+
+    fun clearImportResult() {
+        _importResultMessage.value = null
+    }
+
+    /** The file name to pre-fill in the system save dialog for a playlist CSV export. */
+    fun suggestedExportFileName(playlistName: String): String =
+        importExportManager?.suggestedFileName(playlistName) ?: "Playlist.csv"
+
+    /**
+     * Exports [songs] (a playlist's tracks) as CSV into [destination] -- a document URI the user
+     * chose via the system file picker -- importable by this app or any spreadsheet tool.
+     */
+    fun exportPlaylist(context: Context, destination: Uri, playlistName: String, songs: List<Song>) {
+        val manager = importExportManager ?: return
+        viewModelScope.launch {
+            _exportStatusMessage.value = try {
+                val wrote = context.contentResolver.openOutputStream(destination)?.use { out ->
+                    manager.exportPlaylistToStream(out, playlistName, songs)
+                    true
+                } ?: false
+                if (wrote) "Playlist exported" else "Export failed: couldn't write to that location"
+            } catch (e: Exception) {
+                "Export failed: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * Imports [csvText] (e.g. a Spotify playlist exported via a tool like Exportify, or this
+     * app's own export) as a new playlist named [playlistName]. Rows already in the library are
+     * matched directly; everything else falls back to a YouTube search, so this can take a while
+     * for a long playlist -- [importProgress] reports `(rowsProcessed, totalRows)` as it works.
+     */
+    fun importPlaylistFromCsv(context: Context, csvText: String, playlistName: String) {
+        val manager = importExportManager ?: return
+        if (playlistName.isBlank()) return
+        viewModelScope.launch {
+            _importProgress.value = 0 to 0
+            try {
+                val result = manager.importPlaylistFromCsv(csvText, playlistName) { processed, total ->
+                    _importProgress.value = processed to total
+                }
+                _importResultMessage.value = buildString {
+                    append("Imported ${result.totalImported} track(s) into \"$playlistName\"")
+                    if (result.matchedViaYoutubeSearch > 0) append(" (${result.matchedViaYoutubeSearch} matched via YouTube search)")
+                    if (result.notFound > 0) append(", ${result.notFound} not found")
+                }
+            } catch (e: Exception) {
+                _importResultMessage.value = "Import failed: ${e.message}"
+            } finally {
+                _importProgress.value = null
+            }
+        }
+    }
+
+    class Factory(
+        private val repository: MusicRepository,
+        private val importExportManager: PlaylistImportExportManager? = null,
+        private val appPreferences: AppPreferences? = null
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return PlaylistViewModel(repository) as T
+            return PlaylistViewModel(repository, importExportManager, appPreferences) as T
         }
     }
 }

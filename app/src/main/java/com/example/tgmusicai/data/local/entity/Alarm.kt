@@ -28,6 +28,8 @@ enum class AlarmToneType {
  * @property toneUriOrId The song media URI or playlist ID string depending on [toneType].
  * @property snoozeMinutes Duration in minutes for snooze function (defaults to 10 minutes).
  * @property label Optional custom label/description for the alarm (e.g., "Morning Wakeup").
+ * @property forceMaxVolume Sets the phone's alarm volume to maximum when this alarm rings.
+ * @property volumeRampUp Starts this alarm quiet and gradually increases to full volume over about a minute, instead of playing at full volume immediately.
  */
 @Entity(tableName = "alarms")
 data class Alarm(
@@ -39,5 +41,7 @@ data class Alarm(
     val toneType: AlarmToneType = AlarmToneType.RANDOM_LIKED,
     val toneUriOrId: String = "",
     val snoozeMinutes: Int = 10,
-    val label: String = "Alarm"
+    val label: String = "Alarm",
+    val forceMaxVolume: Boolean = false,
+    val volumeRampUp: Boolean = false
 )

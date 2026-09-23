@@ -12,6 +12,7 @@ import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
+import org.schabi.newpipe.extractor.stream.StreamInfo
 import org.schabi.newpipe.extractor.stream.StreamInfoItem
 import java.io.IOException
 import java.net.URLEncoder
@@ -91,38 +92,39 @@ class NewPipeOkHttpDownloader(private val client: OkHttpClient) : Downloader() {
  *    stream *extraction/scraping*. It never talks to Google's official API or needs the user to
  *    sign in; it pulls playable audio URLs by querying NewPipeExtractor / Piped / Invidious, and
  *    is used for actual playback and downloading of audio.
- * 2. `data.google` (`GoogleAuthManager`, `YouTubeDataApiClient`, `YouTubePlaylistSyncManager`) --
- *    the OFFICIAL, OAuth-authenticated YouTube Data API v3. It requires the user to sign into
- *    their real Google account and is used ONLY to read/import the user's own playlists (e.g.
- *    Liked Videos) into this app's local database -- it is never used to fetch a playable stream.
+ * 2. `YouTubeInnerTubeClient`/`InnerTubeCookieManager` (this package) + `data.google`'s
+ *    `YouTubePlaylistSyncManager` -- reads/imports the *signed-in* user's own YouTube Music
+ *    playlists (e.g. Liked Music) into this app's local database, authenticated via a real
+ *    music.youtube.com web session captured from a WebView login rather than Google OAuth. It is
+ *    never used to fetch a playable stream for arbitrary audio -- that's always this class.
  * These two paths do not call each other and can fail/succeed independently.
  *
- * **Search** tries NewPipeExtractor first (talks to YouTube directly; confirmed reliable — 19/19
- * real results in live testing) and falls back to the Piped/Invidious API cluster if it returns
- * nothing.
+ * **Search** tries NewPipeExtractor first (talks to YouTube directly) and falls back to the
+ * Piped/Invidious API cluster if it returns nothing.
  *
- * **Stream extraction does NOT use NewPipeExtractor.** It was tried and removed: YouTube's WEB
- * client player endpoint (which NewPipeExtractor's `StreamInfo.getInfo` uses) is currently behind
- * an anti-bot wall requiring a PoToken NewPipeExtractor can't produce without a JS-challenge
- * solver. This was confirmed with `ContentNotAvailableException: The page needs to be reloaded`
- * on every video tried, across two different NewPipeExtractor versions AND two different real
- * networks (a cloud dev sandbox and a physical Android device on its own network) — i.e. this
- * isn't an environment quirk, it's a real, current limitation of client-side extraction. Instead,
- * stream extraction goes straight to:
- * 1. Piped API cluster ([PIPED_ENDPOINTS] plus a live-fetched instance list from Piped's own
- *    `piped-instances.kavin.rocks` directory, filtered to `up_to_date` instances) — resolves the
- *    stream server-side, sidestepping the client-side bot check entirely. This is what's actually
- *    verified working end-to-end (real search → real stream URL → real HTTP 206 audio bytes, on a
- *    physical device). The live directory couldn't be reached from this sandbox (outbound TCP to
- *    it times out here, same as several Invidious hosts below), so its exact response shape is
- *    parsed defensively and never throws -- re-verify the parsing against a real response if a
- *    fallback-related bug report shows the live-fetched hosts aren't being picked up.
- * 2. Invidious API cluster ([INVIDIOUS_ENDPOINTS] plus a live-fetched instance list from
- *    `api.invidious.io/instances.json`, since Invidious, unlike Piped, publishes a working public
- *    instance directory — this makes the Invidious tier self-healing as instances rotate).
+ * **Stream resolution** runs in tiers, and the order matters:
+ * 0. NewPipeExtractor, talking to YouTube directly ([tryNewPipeStreamExtractions]). This is the
+ *    tier that actually works and resolves in a few seconds. No Proof-of-Origin token is involved
+ *    -- current NewPipeExtractor uses InnerTube clients that need none.
+ * 1. Piped ([PIPED_ENDPOINTS]).
+ * 2. Invidious ([INVIDIOUS_ENDPOINTS], plus a live instance list from
+ *    `api.invidious.io/instances.json`, which makes this tier self-healing as instances rotate).
  *
- * Public Piped/Invidious instances rotate and die frequently and most candidates checked while
- * building this were already dead — re-verify periodically with e.g.
+ * Tiers 1 and 2 are kept only as insurance, and were measured dead: the Piped host answers HTTP
+ * 500 for `/streams`, and every hardcoded Invidious host answers 401 or 403. They cost nothing
+ * while tier 0 works, since they are only reached when it fails. Do not assume they work.
+ *
+ * An earlier design had *only* those two tiers, which is why cloud playback was completely broken
+ * -- public instances rot continuously and no list of them stays working. If tier 0 ever breaks,
+ * the durable fix is to update NewPipeExtractor, not to hunt for new mirrors.
+ *
+ * Piped's `/search` endpoint does still work even though its `/streams` endpoint does not, which
+ * is why the Piped search fallback is retained while Piped stream resolution is not relied upon.
+ * Piped's own instance directory (`piped-instances.kavin.rocks`) was removed: the host no longer
+ * resolves at all, so that tier could never self-heal, and consulting it cost a multi-second
+ * timeout on every resolution that reached it.
+ *
+ * Re-verify host liveness periodically with e.g.
  * `curl -o /dev/null -w '%{http_code}' https://<host>/streams/<videoId>`.
  */
 class YouTubeExtractor {
@@ -305,7 +307,13 @@ class YouTubeExtractor {
     }
 
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+        // Connect timeout is deliberately much shorter than the read timeout. Resolution walks a
+        // list of public instances, most of which are dead at any given moment, and a dead host
+        // burns the full connect timeout before the next one is tried -- at 15s each that added up
+        // to well over a minute of apparently-nothing before the user saw any result. Reaching a
+        // host that is actually up takes a fraction of this; only dead ones pay it. The read
+        // timeout stays long because that one covers real transfers.
+        .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .followRedirects(true)
         .addInterceptor { chain ->
@@ -320,13 +328,11 @@ class YouTubeExtractor {
         }
         .build()
 
-    // Directory-lookup calls (live Piped/Invidious instance lists) are a best-effort self-heal,
-    // not a critical-path fetch -- they must never hang for the full 15s connect/read timeout
-    // used for real stream requests. On a network where the directory host is unreachable
-    // (observed: piped-instances.kavin.rocks times out entirely from some networks/ISPs), a 15s
-    // stall per song made "Play All" on a cloud playlist look completely broken, since every
-    // song whose primary endpoint failed paid that cost serially before falling through to the
-    // next tier.
+    // The Invidious directory lookup is a best-effort self-heal, not a critical-path fetch, so it
+    // must never hang for the full 15s connect/read timeout used for real stream requests. An
+    // unreachable directory host used to cost a 15s stall per song, which made "Play All" on a
+    // cloud playlist look completely broken: every song whose primary endpoint failed paid that
+    // cost serially before falling through to the next tier.
     private val directoryLookupClient = okHttpClient.newBuilder()
         .connectTimeout(4, TimeUnit.SECONDS)
         .readTimeout(4, TimeUnit.SECONDS)
@@ -373,8 +379,6 @@ class YouTubeExtractor {
     private var liveInvidiousInstancesAttempted = false
 
     // Same idea for Piped's own public instance directory.
-    private var livePipedInstancesCache: List<String>? = null
-    private var livePipedInstancesAttempted = false
 
     // Registers this class's OkHttp-backed Downloader as NewPipeExtractor's global HTTP client;
     // must happen before any NewPipe.* call (e.g. search()) is made.
@@ -385,6 +389,55 @@ class YouTubeExtractor {
             Log.e(TAG, "Error initializing NewPipeExtractor", e)
         }
     }
+
+    /**
+     * Resolves audio streams by talking to YouTube directly through NewPipeExtractor.
+     *
+     * This is the primary resolution path, and the reason cloud playback works at all: the
+     * Piped/Invidious tiers that used to be the only path depend on public instances that rot
+     * continuously, and every one of them was measured dead or blocking. This path depends on
+     * nothing but YouTube itself.
+     *
+     * No Proof-of-Origin token is involved. Current NewPipeExtractor resolves through InnerTube
+     * clients that do not require one -- in practice the visionOS client, visible as `c=VISIONOS`
+     * in the resulting stream URLs -- and its own `YoutubeStreamExtractor.setPoTokenProvider` is
+     * documented as a no-op "until SABR support is added to the extractor". An earlier revision of
+     * this work included a full BotGuard/WebView poToken generator; it was removed once it was
+     * shown to never be consulted. If YouTube forces poTokens again, recover it from git history
+     * rather than rewriting it.
+     *
+     * Returns an empty list rather than throwing, so callers can simply fall through to the
+     * remaining tiers.
+     */
+    private suspend fun tryNewPipeStreamExtractions(videoId: String): List<YouTubeAudioStream> =
+        withContext(Dispatchers.IO) {
+            try {
+                val info = StreamInfo.getInfo(
+                    ServiceList.YouTube,
+                    "https://www.youtube.com/watch?v=$videoId",
+                )
+                info.audioStreams
+                    // Highest bitrate wins regardless of container. Android Auto is unaffected by
+                    // the choice: it renders this app's browse tree while audio plays through the
+                    // app's own ExoPlayer, so the container never reaches the head unit.
+                    .sortedByDescending { it.averageBitrate }
+                    .mapNotNull { stream ->
+                        val url = stream.content ?: return@mapNotNull null
+                        if (url.isBlank()) return@mapNotNull null
+                        YouTubeAudioStream(
+                            url = url,
+                            format = normalizeAudioFormat(
+                                stream.format?.mimeType.orEmpty(),
+                                stream.format?.suffix.orEmpty(),
+                            ),
+                            bitrate = stream.averageBitrate,
+                        )
+                    }
+            } catch (e: Exception) {
+                Log.e("TGMusicCloud", "Tier 0 NewPipe extraction failed for $videoId: ${e.message}", e)
+                emptyList()
+            }
+        }
 
     /**
      * Fetches the current list of public HTTPS Invidious instances from the official
@@ -426,53 +479,6 @@ class YouTubeExtractor {
             }
         } catch (e: Exception) {
             Log.e("TGMusicCloud", "Failed to fetch live Invidious instance list: ${e.message}", e)
-            emptyList()
-        }
-    }
-
-    /**
-     * Fetches the current list of public, up-to-date Piped API instances from Piped's own
-     * official directory (`piped-instances.kavin.rocks`), the same one the Piped frontend itself
-     * uses to auto-pick a backend. Makes the Piped tier self-healing the same way
-     * [fetchLiveInvidiousInstances] does for Invidious, addressing "video ID wasn't working" cases
-     * where the single hardcoded [PIPED_ENDPOINTS] mirror is down or rate-limiting. Only instances
-     * marked `up_to_date` are kept, since a stale instance is prone to the exact playability
-     * failures this is meant to fix. Cached in-memory after the first attempt -- success or
-     * failure -- so a network that can't reach this host (observed: connect times out entirely
-     * on some networks) only pays that cost once per process, not once per song. Uses
-     * [directoryLookupClient]'s short timeout since this is a best-effort self-heal, not a
-     * critical-path fetch. Returns empty (never throws) on any failure so callers just fall
-     * through to the hardcoded list.
-     */
-    private suspend fun fetchLivePipedInstances(): List<String> = withContext(Dispatchers.IO) {
-        livePipedInstancesCache?.let { return@withContext it }
-        if (livePipedInstancesAttempted) return@withContext emptyList()
-        livePipedInstancesAttempted = true
-        try {
-            val request = okhttp3.Request.Builder()
-                .url("https://piped-instances.kavin.rocks/")
-                .get()
-                .build()
-            directoryLookupClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext emptyList()
-                val bodyStr = response.body?.string() ?: return@withContext emptyList()
-                val array = JSONArray(bodyStr)
-                val hosts = mutableListOf<String>()
-                for (i in 0 until array.length()) {
-                    val entry = array.optJSONObject(i) ?: continue
-                    val apiUrl = entry.optString("api_url", "")
-                    val upToDate = entry.optBoolean("up_to_date", true)
-                    if (apiUrl.isNotBlank() && upToDate) {
-                        hosts.add(apiUrl.trimEnd('/'))
-                    }
-                }
-                val limited = hosts.take(8)
-                livePipedInstancesCache = limited
-                Log.d("TGMusicCloud", "Fetched ${limited.size} live Piped instance(s) from piped-instances.kavin.rocks")
-                limited
-            }
-        } catch (e: Exception) {
-            Log.e("TGMusicCloud", "Failed to fetch live Piped instance list: ${e.message}", e)
             emptyList()
         }
     }
@@ -545,8 +551,7 @@ class YouTubeExtractor {
             query
         }
 
-        val pipedHosts = (PIPED_ENDPOINTS + fetchLivePipedInstances()).distinct()
-        for (base in pipedHosts) {
+        for (base in PIPED_ENDPOINTS) {
             try {
                 val url = "$base/search?q=$encodedQuery&filter=music_songs"
                 val request = okhttp3.Request.Builder().url(url).build()
@@ -654,6 +659,16 @@ class YouTubeExtractor {
         val cleanId = extractVideoId(videoId) ?: videoId
         val candidateStreams = mutableListOf<YouTubeAudioStream>()
 
+        // Tier 0 first, so downloads try the direct YouTube streams before the public-instance
+        // fallbacks. CloudDownloadManager attempts candidates in order and names the file from the
+        // chosen stream's format, so order here decides both which source is used and the on-disk
+        // extension.
+        try {
+            candidateStreams.addAll(tryNewPipeStreamExtractions(cleanId))
+        } catch (e: Exception) {
+            Log.e("TGMusicCloud", "Tier 0 NewPipe extractions failed for $cleanId: ${e.message}", e)
+        }
+
         try {
             candidateStreams.addAll(tryPipedStreamExtractions(cleanId))
         } catch (e: Exception) {
@@ -676,6 +691,19 @@ class YouTubeExtractor {
      * fast answer (e.g. direct playback). Tries each tier in order and returns as soon as a
      * candidate passes the [verifyStreamUrl] pre-flight check.
      */
+    /**
+     * Forgets any cached stream URL for [videoId], so the next [extractAudioStream] resolves anew.
+     *
+     * Needed because a resolved URL can stop working before this cache would expire it: YouTube's
+     * signed URLs carry their own lifetime and are throttled per address, so one can start
+     * answering HTTP 403 while still looking fresh here. Without this, a track that failed once
+     * would keep failing for as long as the stale entry survived.
+     */
+    fun invalidateCachedStream(videoId: String) {
+        val cleanId = extractVideoId(videoId) ?: videoId
+        streamCache.remove(cleanId)
+    }
+
     suspend fun extractAudioStream(videoId: String): YouTubeAudioStream? = withContext(Dispatchers.IO) {
         val cleanId = extractVideoId(videoId) ?: videoId
 
@@ -685,6 +713,19 @@ class YouTubeExtractor {
                 return@withContext cached.stream
             }
             streamCache.remove(cleanId)
+        }
+
+        try {
+            val newPipeStreams = tryNewPipeStreamExtractions(cleanId)
+            for (candidate in newPipeStreams) {
+                if (verifyStreamUrl(candidate.url)) {
+                    Log.d("TGMusicCloud", "Tier 0 NewPipe resolved verified stream for $cleanId: ${candidate.url}")
+                    streamCache[cleanId] = CachedStream(candidate, expiryFromStreamUrl(candidate.url))
+                    return@withContext candidate
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("TGMusicCloud", "Tier 0 NewPipe extraction failed for $cleanId: ${e.message}", e)
         }
 
         try {
@@ -755,15 +796,7 @@ class YouTubeExtractor {
     private suspend fun tryPipedStreamExtractions(videoId: String): List<YouTubeAudioStream> = withContext(Dispatchers.IO) {
         val streams = mutableListOf<YouTubeAudioStream>()
         // Try the hardcoded, known-good host(s) first without paying for a live-directory fetch
-        // on every single stream resolution -- only reach out to the live directory (an extra
-        // network round-trip) if the hardcoded host(s) didn't yield anything, since that's the
-        // rare case. Doing this eagerly on every call was making ordinary cloud playback slower
-        // than it needs to be for the common case where the hardcoded host just works.
         addPipedStreamsFromHosts(PIPED_ENDPOINTS, videoId, streams)
-        if (streams.isEmpty()) {
-            val liveHosts = fetchLivePipedInstances().filterNot { it in PIPED_ENDPOINTS }
-            addPipedStreamsFromHosts(liveHosts, videoId, streams)
-        }
         return@withContext streams
     }
 

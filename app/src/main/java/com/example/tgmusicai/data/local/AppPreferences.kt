@@ -16,17 +16,29 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
- * Typed wrapper around Jetpack DataStore for every simple app setting: onboarding state, AI API
- * key, theme choice, one-shot migration/backfill flags, alarm volume behavior, and equalizer state.
+ * Typed wrapper around Jetpack DataStore for every simple app setting: onboarding state, theme
+ * choice, one-shot migration/backfill flags, view-mode choices, and equalizer state.
  * Each setting is exposed as a `Flow` for reactive reads and a `suspend fun set...` for writes.
  * Prefer this over touching `context.dataStore` directly so key names stay centralized here.
  */
 class AppPreferences(private val context: Context) {
 
     companion object {
+        const val DEFAULT_CROSSFADE_DURATION_SEC = 3
+        const val DEFAULT_TRANSLATION_LANGUAGE = "Spanish"
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
-        val AI_API_KEY = stringPreferencesKey("ai_api_key")
         val SELECTED_THEME = stringPreferencesKey("selected_theme")
+        // Light/dark selection and Material You opt-in, kept separate from SELECTED_THEME so
+        // switching palette doesn't reset the user's light/dark choice or vice versa.
+        val THEME_MODE = stringPreferencesKey("theme_mode")
+        val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
+        // Grid-vs-list choice for the Library and Playlists screens. Persisted because it used to
+        // live only in a ViewModel StateFlow and silently reverted on every app restart.
+        val LIBRARY_GRID_VIEW = booleanPreferencesKey("library_grid_view")
+        val PLAYLISTS_GRID_VIEW = booleanPreferencesKey("playlists_grid_view")
+        // Restrict the library to tracks that are actually on the device. Persisted because it
+        // used to be a ViewModel-only flag that reset on every launch.
+        val DOWNLOADED_ONLY = booleanPreferencesKey("downloaded_only")
         // HAS_DEDUPLICATED_LIBRARY_V1..V6: one-shot "ran already" flags for successive library
         // deduplication passes. Each new dedup algorithm/bugfix gets its own V-numbered flag rather
         // than reusing one, so fixing a bad dedup pass can re-run cleanup on every device without
@@ -37,14 +49,21 @@ class AppPreferences(private val context: Context) {
         val HAS_DEDUPLICATED_LIBRARY_V4 = booleanPreferencesKey("has_deduplicated_library_v4")
         val HAS_DEDUPLICATED_LIBRARY_V5 = booleanPreferencesKey("has_deduplicated_library_v5")
         val HAS_DEDUPLICATED_LIBRARY_V6 = booleanPreferencesKey("has_deduplicated_library_v6")
-        val ALARM_FORCE_MAX_VOLUME = booleanPreferencesKey("alarm_force_max_volume")
-        val ALARM_VOLUME_RAMP_UP = booleanPreferencesKey("alarm_volume_ramp_up")
         val EQUALIZER_ENABLED = booleanPreferencesKey("equalizer_enabled")
         // Comma-separated 5 band levels in millibels, e.g. "0,0,0,0,0".
         val EQUALIZER_BAND_LEVELS = stringPreferencesKey("equalizer_band_levels")
         val EQUALIZER_PRESET_NAME = stringPreferencesKey("equalizer_preset_name")
         val BASS_BOOST_STRENGTH = intPreferencesKey("bass_boost_strength")
         val HAS_BACKFILLED_AI_TAGS_V1 = booleanPreferencesKey("has_backfilled_ai_tags_v1")
+        // YouTube Music InnerTube session, captured from the WebView sign-in flow (see
+        // InnerTubeCookieManager) -- replaces the old OAuth access token, which was never
+        // persisted since Play Services re-issued one silently on every launch.
+        val YOUTUBE_MUSIC_COOKIE_HEADER = stringPreferencesKey("youtube_music_cookie_header")
+        val YOUTUBE_MUSIC_SAPISID = stringPreferencesKey("youtube_music_sapisid")
+        val SKIP_SILENCE_ENABLED = booleanPreferencesKey("skip_silence_enabled")
+        val CROSSFADE_ENABLED = booleanPreferencesKey("crossfade_enabled")
+        val CROSSFADE_DURATION_SEC = intPreferencesKey("crossfade_duration_sec")
+        val LYRICS_TRANSLATION_LANGUAGE = stringPreferencesKey("lyrics_translation_language")
     }
 
     /** True once the user has completed (or skipped) the first-run onboarding flow. */
@@ -53,16 +72,43 @@ class AppPreferences(private val context: Context) {
             preferences[ONBOARDING_COMPLETED] ?: false
         }
 
-    /** User-supplied API key for AI-powered features (song tagging / metadata cleaning); null if never set. */
-    val aiApiKeyFlow: Flow<String?> = context.dataStore.data
-        .map { preferences ->
-            preferences[AI_API_KEY]
-        }
-
     /** Selected UI theme identifier; defaults to the YouTube Music-style dark theme. */
     val selectedThemeFlow: Flow<String> = context.dataStore.data
         .map { preferences ->
             preferences[SELECTED_THEME] ?: "YT_DARK"
+        }
+
+    /**
+     * Light/dark preference name (see `ThemeMode`). Defaults to DARK rather than SYSTEM so
+     * existing installs -- which only ever had dark palettes -- don't suddenly flip to light.
+     */
+    val themeModeFlow: Flow<String> = context.dataStore.data
+        .map { preferences ->
+            preferences[THEME_MODE] ?: "DARK"
+        }
+
+    /** Whether to derive colors from the device wallpaper (Material You, Android 12+). */
+    val dynamicColorFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences ->
+            preferences[DYNAMIC_COLOR] ?: false
+        }
+
+    /** Library grid vs list; defaults to grid, which shows far more of a music library at once. */
+    val libraryGridViewFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences ->
+            preferences[LIBRARY_GRID_VIEW] ?: true
+        }
+
+    /** Playlists grid vs list; defaults to grid to match the Library. */
+    val playlistsGridViewFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences ->
+            preferences[PLAYLISTS_GRID_VIEW] ?: true
+        }
+
+    /** When true, hide cloud-only tracks and don't search YouTube. */
+    val downloadedOnlyFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences ->
+            preferences[DOWNLOADED_ONLY] ?: false
         }
 
     // hasDeduplicatedLibraryV1..V6Flow: read by app startup logic to decide whether the
@@ -96,28 +142,6 @@ class AppPreferences(private val context: Context) {
         .map { preferences ->
             preferences[HAS_DEDUPLICATED_LIBRARY_V6] ?: false
         }
-
-    /** When enabled, an alarm firing forces the device's alarm-stream volume to its maximum instead of just an audible floor. */
-    val alarmForceMaxVolumeFlow: Flow<Boolean> = context.dataStore.data
-        .map { preferences -> preferences[ALARM_FORCE_MAX_VOLUME] ?: false }
-
-    /** When enabled, an alarm's volume gradually ramps up from quiet to full instead of starting at full volume immediately. */
-    val alarmVolumeRampUpFlow: Flow<Boolean> = context.dataStore.data
-        .map { preferences -> preferences[ALARM_VOLUME_RAMP_UP] ?: false }
-
-    /** Persists the "force max volume on alarm" setting. */
-    suspend fun setAlarmForceMaxVolume(enabled: Boolean) {
-        context.dataStore.edit { preferences ->
-            preferences[ALARM_FORCE_MAX_VOLUME] = enabled
-        }
-    }
-
-    /** Persists the "ramp up alarm volume gradually" setting. */
-    suspend fun setAlarmVolumeRampUp(enabled: Boolean) {
-        context.dataStore.edit { preferences ->
-            preferences[ALARM_VOLUME_RAMP_UP] = enabled
-        }
-    }
 
     /** Whether the parametric equalizer is currently applied to playback. */
     val equalizerEnabledFlow: Flow<Boolean> = context.dataStore.data
@@ -163,6 +187,47 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { preferences -> preferences[BASS_BOOST_STRENGTH] = strength }
     }
 
+    /**
+     * Whether ExoPlayer should auto-trim dead silence at the start/end of tracks (common on
+     * YouTube-sourced audio). Backed by ExoPlayer's own [androidx.media3.exoplayer.ExoPlayer.setSkipSilenceEnabled].
+     */
+    val skipSilenceEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[SKIP_SILENCE_ENABLED] ?: false }
+
+    /** Toggles skip-silence on/off. */
+    suspend fun setSkipSilenceEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[SKIP_SILENCE_ENABLED] = enabled }
+    }
+
+    /**
+     * Whether consecutive tracks fade out/in into each other instead of cutting directly from one
+     * to the next. Implemented as a sequential fade-to-silent-then-fade-in (not a true overlapping
+     * crossfade, which would need two simultaneous ExoPlayer instances) -- see
+     * [com.example.tgmusicai.ui.viewmodel.PlayerViewModel]'s combined volume-fade logic.
+     */
+    val crossfadeEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[CROSSFADE_ENABLED] ?: false }
+
+    /** Fade duration in seconds, applied at both the end of the outgoing track and the start of the incoming one. */
+    val crossfadeDurationSecFlow: Flow<Int> = context.dataStore.data
+        .map { preferences -> preferences[CROSSFADE_DURATION_SEC] ?: DEFAULT_CROSSFADE_DURATION_SEC }
+
+    suspend fun setCrossfadeEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[CROSSFADE_ENABLED] = enabled }
+    }
+
+    suspend fun setCrossfadeDurationSec(seconds: Int) {
+        context.dataStore.edit { preferences -> preferences[CROSSFADE_DURATION_SEC] = seconds }
+    }
+
+    /** Last-picked lyrics translation target language, remembered across songs/sessions. */
+    val lyricsTranslationLanguageFlow: Flow<String> = context.dataStore.data
+        .map { preferences -> preferences[LYRICS_TRANSLATION_LANGUAGE] ?: DEFAULT_TRANSLATION_LANGUAGE }
+
+    suspend fun setLyricsTranslationLanguage(language: String) {
+        context.dataStore.edit { preferences -> preferences[LYRICS_TRANSLATION_LANGUAGE] = language }
+    }
+
     /** True once the one-time AI-tag backfill (tagging pre-existing songs added before the AI feature existed) has run. */
     val hasBackfilledAiTagsV1Flow: Flow<Boolean> = context.dataStore.data
         .map { preferences -> preferences[HAS_BACKFILLED_AI_TAGS_V1] ?: false }
@@ -179,21 +244,45 @@ class AppPreferences(private val context: Context) {
         }
     }
 
-    /** Saves the AI API key, trimmed; a blank key clears the setting entirely instead of storing an empty string. */
-    suspend fun setAiApiKey(apiKey: String) {
-        context.dataStore.edit { preferences ->
-            if (apiKey.isBlank()) {
-                preferences.remove(AI_API_KEY)
-            } else {
-                preferences[AI_API_KEY] = apiKey.trim()
-            }
-        }
-    }
-
     /** Persists the selected theme identifier. */
     suspend fun setSelectedTheme(themeName: String) {
         context.dataStore.edit { preferences ->
             preferences[SELECTED_THEME] = themeName
+        }
+    }
+
+    /** Persists the light/dark preference (a `ThemeMode` name). */
+    suspend fun setThemeMode(modeName: String) {
+        context.dataStore.edit { preferences ->
+            preferences[THEME_MODE] = modeName
+        }
+    }
+
+    /** Persists the Material You dynamic-color opt-in. */
+    suspend fun setDynamicColor(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[DYNAMIC_COLOR] = enabled
+        }
+    }
+
+    /** Persists the Library's grid-vs-list choice. */
+    suspend fun setLibraryGridView(gridView: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[LIBRARY_GRID_VIEW] = gridView
+        }
+    }
+
+    /** Persists the downloaded-only library filter. */
+    suspend fun setDownloadedOnly(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[DOWNLOADED_ONLY] = enabled
+        }
+    }
+
+    /** Persists the Playlists screen's grid-vs-list choice. */
+    suspend fun setPlaylistsGridView(gridView: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[PLAYLISTS_GRID_VIEW] = gridView
         }
     }
 
@@ -231,6 +320,30 @@ class AppPreferences(private val context: Context) {
     suspend fun setHasDeduplicatedLibraryV6(done: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[HAS_DEDUPLICATED_LIBRARY_V6] = done
+        }
+    }
+
+    /** Full `Cookie` header string for authenticated music.youtube.com InnerTube calls; null if never signed in. */
+    val youtubeMusicCookieHeaderFlow: Flow<String?> = context.dataStore.data
+        .map { preferences -> preferences[YOUTUBE_MUSIC_COOKIE_HEADER] }
+
+    /** The session's SAPISID (or `__Secure-3PAPISID`) value used to compute a `SAPISIDHASH` per request. */
+    val youtubeMusicSapisidFlow: Flow<String?> = context.dataStore.data
+        .map { preferences -> preferences[YOUTUBE_MUSIC_SAPISID] }
+
+    /** Persists a freshly-captured YouTube Music web session. */
+    suspend fun setYouTubeMusicSession(cookieHeader: String, sapisid: String) {
+        context.dataStore.edit { preferences ->
+            preferences[YOUTUBE_MUSIC_COOKIE_HEADER] = cookieHeader
+            preferences[YOUTUBE_MUSIC_SAPISID] = sapisid
+        }
+    }
+
+    /** Forgets the persisted YouTube Music web session (sign-out). */
+    suspend fun clearYouTubeMusicSession() {
+        context.dataStore.edit { preferences ->
+            preferences.remove(YOUTUBE_MUSIC_COOKIE_HEADER)
+            preferences.remove(YOUTUBE_MUSIC_SAPISID)
         }
     }
 }

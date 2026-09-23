@@ -486,11 +486,9 @@ class CloudDownloadManager(
 
                     val localUri = Uri.fromFile(outputFile).toString()
 
-                    val apiKey = AppPreferences(context).aiApiKeyFlow.firstOrNull()
                     val cleaned = AiMetadataCleaner.clean(
                         rawTitle = title,
-                        rawArtist = if (uploader != "Unknown Artist") uploader else null,
-                        apiKey = apiKey
+                        rawArtist = if (uploader != "Unknown Artist") uploader else null
                     )
 
                     // Step 5: Index into Room DB. Update an existing row in place (by local URI,

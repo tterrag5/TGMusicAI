@@ -1,9 +1,5 @@
 package com.example.tgmusicai.ui.screens
 
-import android.net.Uri
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -34,14 +30,11 @@ import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
-import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.OfflineBolt
-import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PushPin
-import androidx.compose.material.icons.rounded.Restore
-import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.ThumbUp
 import androidx.compose.material.icons.rounded.WifiOff
@@ -64,7 +57,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -75,7 +67,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -96,9 +87,9 @@ fun HomeScreen(
     modifier: Modifier = Modifier,
     onSelectTheme: (String) -> Unit = {},
     currentTheme: String = "YT_DARK",
-    onOpenDrawer: () -> Unit = {}
+    onOpenDrawer: () -> Unit = {},
+    onOpenSettings: () -> Unit = {}
 ) {
-    val context = LocalContext.current
     val isOnline by homeViewModel.isOnline.collectAsState()
     val isDownloadedOnly by homeViewModel.isDownloadedOnly.collectAsState()
     val pinnedSongs by homeViewModel.pinnedSongs.collectAsState()
@@ -107,82 +98,9 @@ fun HomeScreen(
     val playlistTopArtwork by homeViewModel.playlistTopArtwork.collectAsState()
     val listenAgainSongs by homeViewModel.listenAgainSongs.collectAsState()
     val mostPlayedSongs by homeViewModel.mostPlayedSongs.collectAsState()
-    val backupStatus by homeViewModel.backupStatus.collectAsState()
     val isBackupLoading by homeViewModel.isBackupLoading.collectAsState()
 
-    var showThemeDialog by remember { mutableStateOf(false) }
     var songPendingRemoveDownload by remember { mutableStateOf<Song?>(null) }
-
-    // File picker launcher for Backup Restore (.tgmusic zip)
-    val restoreLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        uri?.let {
-            val inputStream = context.contentResolver.openInputStream(it)
-            if (inputStream != null) {
-                homeViewModel.importBackup(context, inputStream)
-            }
-        }
-    }
-
-    LaunchedEffect(backupStatus) {
-        backupStatus?.let {
-            Toast.makeText(context, it, Toast.LENGTH_LONG).show()
-            homeViewModel.clearBackupStatus()
-        }
-    }
-
-    if (showThemeDialog) {
-        AlertDialog(
-            onDismissRequest = { showThemeDialog = false },
-            title = { Text("Select Soft Color Theme") },
-            text = {
-                Column {
-                    listOf(
-                        "YT_DARK" to "YT Dark (Classic Soft Dark)",
-                        "PASTEL_MIDNIGHT" to "Pastel Midnight (Dark Slate & Teal)",
-                        "WARM_AMBER" to "Warm Amber (Warm Latte & Amber)",
-                        "NORDIC_SLATE" to "Nordic Slate (Cool Gray & Cyan)"
-                    ).forEach { (themeKey, label) ->
-                        val isSelected = currentTheme == themeKey
-                        TextButton(
-                            onClick = {
-                                onSelectTheme(themeKey)
-                                showThemeDialog = false
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = label,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                if (isSelected) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Check,
-                                        contentDescription = "Currently selected",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showThemeDialog = false }) {
-                    Text("Close")
-                }
-            }
-        )
-    }
 
     Scaffold(
         topBar = {
@@ -212,35 +130,13 @@ fun HomeScreen(
                     }
                 },
                 actions = {
-                    // Soft Theme Switcher Button
-                    IconButton(onClick = { showThemeDialog = true }) {
+                    // Single Settings entry point -- Theme, AI API key, Backup/Restore, and Alarm
+                    // sound settings now live together in SettingsScreen instead of as separate
+                    // top-bar icons here.
+                    IconButton(onClick = onOpenSettings) {
                         Icon(
-                            imageVector = Icons.Rounded.Palette,
-                            contentDescription = "Theme Switcher",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-
-                    // Export Backup Button
-                    IconButton(
-                        onClick = { homeViewModel.exportBackup(context) },
-                        enabled = !isBackupLoading
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Save,
-                            contentDescription = "Export Backup",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-
-                    // Import Restore Button
-                    IconButton(
-                        onClick = { restoreLauncher.launch("*/*") },
-                        enabled = !isBackupLoading
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Restore,
-                            contentDescription = "Restore Backup",
+                            imageVector = Icons.Rounded.Settings,
+                            contentDescription = "Settings",
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
@@ -306,40 +202,6 @@ fun HomeScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                // Downloaded Only Mode Switch
-                item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Rounded.DownloadDone,
-                                contentDescription = null,
-                                tint = if (isDownloadedOnly) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Downloaded Only",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-
-                        Switch(
-                            checked = isDownloadedOnly,
-                            onCheckedChange = homeViewModel::setDownloadedOnly,
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = MaterialTheme.colorScheme.primary,
-                                checkedTrackColor = MaterialTheme.colorScheme.primaryContainer
-                            )
-                        )
-                    }
-                }
-
                 // Section 1: SPEED DIAL -- a 3x3 grid per page; swipe to the next page of 9 when
                 // there are more than 9 pinned items instead of endless horizontal scrolling.
                 item {

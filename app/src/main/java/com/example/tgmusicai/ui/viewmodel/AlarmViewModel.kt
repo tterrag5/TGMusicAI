@@ -5,7 +5,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.tgmusicai.alarm.AlarmScheduler
-import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.Alarm
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.Song
@@ -19,29 +18,8 @@ import kotlinx.coroutines.launch
  * ViewModel managing alarm management state and operations.
  */
 class AlarmViewModel(
-    private val repository: MusicRepository,
-    private val appPreferences: AppPreferences
+    private val repository: MusicRepository
 ) : ViewModel() {
-
-    /** Global alarm-ringing settings, akin to Android Clock's "Alarm volume" and "Gradually increase volume". */
-    val forceMaxVolume: StateFlow<Boolean> = appPreferences.alarmForceMaxVolumeFlow.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = false
-    )
-    val volumeRampUp: StateFlow<Boolean> = appPreferences.alarmVolumeRampUpFlow.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = false
-    )
-
-    fun setForceMaxVolume(enabled: Boolean) {
-        viewModelScope.launch { appPreferences.setAlarmForceMaxVolume(enabled) }
-    }
-
-    fun setVolumeRampUp(enabled: Boolean) {
-        viewModelScope.launch { appPreferences.setAlarmVolumeRampUp(enabled) }
-    }
 
     /**
      * Active stream of all user alarms.
@@ -114,12 +92,11 @@ class AlarmViewModel(
      * Factory for constructing [AlarmViewModel] with dependencies.
      */
     class Factory(
-        private val repository: MusicRepository,
-        private val appPreferences: AppPreferences
+        private val repository: MusicRepository
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return AlarmViewModel(repository, appPreferences) as T
+            return AlarmViewModel(repository) as T
         }
     }
 }

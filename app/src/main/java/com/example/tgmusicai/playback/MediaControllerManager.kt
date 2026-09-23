@@ -6,6 +6,7 @@ import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -36,7 +37,14 @@ class MediaControllerManager(
     private val context: Context
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    
+
+    /**
+     * Pulls the playing track and the one after it fully onto disk, so a signed stream URL
+     * expiring or throttling mid-song cannot kill playback partway through. Best-effort only --
+     * see [StreamPrefetcher].
+     */
+    private val prefetcher = StreamPrefetcher(context, scope)
+
     private var controller: MediaController? = null
 
     // Reactive StateFlows for UI binding
@@ -66,6 +74,17 @@ class MediaControllerManager(
     // doesn't cover it (playback hasn't been handed to the player yet at this point).
     private val _isResolving = MutableStateFlow(false)
     val isResolving: StateFlow<Boolean> = _isResolving.asStateFlow()
+
+    // Set when a cloud song can't be turned into a playable stream URL at all (every Piped and
+    // Invidious endpoint failed). Without this the failure was completely silent: the unresolved
+    // watch URL was still handed to ExoPlayer, which errored internally, so onMediaItemTransition
+    // never fired and the Now Playing screen just sat on "No Song Selected" with no explanation.
+    private val _playbackError = MutableStateFlow<String?>(null)
+    val playbackError: StateFlow<String?> = _playbackError.asStateFlow()
+
+    fun clearPlaybackError() {
+        _playbackError.value = null
+    }
 
     private var positionTickerJob: Job? = null
     private var currentSongList: List<Song> = emptyList()
@@ -117,14 +136,27 @@ class MediaControllerManager(
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // Reset immediately rather than waiting for the next 500ms position-ticker tick --
+                // otherwise _currentPositionMs briefly still holds the outgoing track's last
+                // position while _durationMs (set below) already reflects the new track, which
+                // would misreport progress into the new song for up to 500ms (and, since crossfade
+                // reads both flows together, briefly fade the new track's volume to 0).
+                _currentPositionMs.value = 0L
                 updateCurrentMediaItem(mediaItem)
                 resolveAheadIfNeeded()
+                prefetchAroundCurrent()
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
                     _durationMs.value = controller?.duration?.coerceAtLeast(0L) ?: 0L
+                    // A track that actually played is allowed a fresh retry next time it fails.
+                    reresolveAttempts.clear()
                 }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                recoverFromPlaybackError(error)
             }
 
             override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
@@ -228,7 +260,11 @@ class MediaControllerManager(
                 if (dur > 0) {
                     _durationMs.value = dur
                 }
-                delay(500)
+                // 100ms rather than 500ms: at half-second granularity the synced-lyrics view held
+                // a line and then jumped to the next one, instead of tracking playback the way
+                // YouTube Music does. MediaController.currentPosition is extrapolated locally
+                // between session updates, so polling it more often costs no extra IPC.
+                delay(POSITION_TICK_INTERVAL_MS)
             }
         }
     }
@@ -311,8 +347,24 @@ class MediaControllerManager(
         controller?.pause()
         scope.launch {
             _isResolving.value = true
+            _playbackError.value = null
             val startSong = resolveSongForPlayback(queue[startIndex])
             _isResolving.value = false
+
+            // Handing an unresolved watch URL to ExoPlayer can only ever produce a silent internal
+            // error, so report it to the user instead of pretending playback started.
+            if (isUnresolvedCloudUri(startSong.mediaUri)) {
+                android.util.Log.w(
+                    "TGMusicCloud",
+                    "Giving up on \"${startSong.title}\": no Piped/Invidious endpoint returned a playable stream"
+                )
+                // Kept short: a Toast truncates, so the actionable part has to come first.
+                _playbackError.value =
+                    "Can't stream \"${startSong.title}\" right now. Download it to play offline."
+                onStarted()
+                return@launch
+            }
+
             val initialQueue = queue.toMutableList().also { it[startIndex] = startSong }
             playInternal(initialQueue, startIndex)
             onStarted()
@@ -333,6 +385,94 @@ class MediaControllerManager(
         player.setMediaItems(mediaItems, validIndex, 0L)
         player.prepare()
         player.play()
+        prefetchAroundCurrent()
+    }
+
+    /** Cloud tracks re-resolved after a playback failure, so one bad URL cannot loop forever. */
+    private val reresolveAttempts = mutableSetOf<String>()
+
+    /**
+     * Recovers from a playback failure by resolving the track again, once.
+     *
+     * A resolved YouTube URL is signed and expires, and YouTube throttles repeated fetches from
+     * one address, so a URL that worked a moment ago can start answering HTTP 403 while the
+     * resolver still considers it fresh. Before this, that ended playback outright with no
+     * recovery. Re-resolving is the correct response, and is what makes a stale URL a hiccup
+     * rather than a dead queue.
+     *
+     * Only cloud tracks are retried, and each only once between successful plays -- a local file
+     * that fails to open will not start working because it was asked for twice, and retrying
+     * forever would spin.
+     */
+    private fun recoverFromPlaybackError(error: PlaybackException) {
+        val player = controller ?: return
+        val index = player.currentMediaItemIndex
+        val song = currentSongList.getOrNull(index) ?: return
+        val videoId = song.youtubeId
+
+        if (videoId.isNullOrBlank()) {
+            android.util.Log.w("TGMusicCloud", "Playback failed for a local track: ${error.errorCodeName}")
+            return
+        }
+        if (!reresolveAttempts.add(videoId)) {
+            android.util.Log.w(
+                "TGMusicCloud",
+                "Giving up on \"${song.title}\": still failing after re-resolving (${error.errorCodeName})"
+            )
+            _playbackError.value = "Can't stream \"${song.title}\" right now. Download it to play offline."
+            return
+        }
+
+        android.util.Log.w(
+            "TGMusicCloud",
+            "Playback failed for \"${song.title}\" (${error.errorCodeName}); re-resolving its stream"
+        )
+
+        val generation = queueGeneration
+        scope.launch {
+            // The cached URL is the one that just failed, so it has to go before re-resolving.
+            withContext(Dispatchers.IO) { youtubeExtractor.invalidateCachedStream(videoId) }
+            val resolved = resolveSongForPlayback(song.copy(mediaUri = "https://www.youtube.com/watch?v=$videoId"))
+
+            if (queueGeneration != generation) return@launch
+            if (isUnresolvedCloudUri(resolved.mediaUri)) {
+                _playbackError.value =
+                    "Can't stream \"${song.title}\" right now. Download it to play offline."
+                return@launch
+            }
+
+            val activePlayer = controller ?: return@launch
+            currentSongList = currentSongList.toMutableList().also {
+                if (index < it.size) it[index] = resolved
+            }
+            _playlist.value = currentSongList
+            activePlayer.replaceMediaItem(index, buildMediaItem(resolved))
+            activePlayer.prepare()
+            activePlayer.play()
+        }
+    }
+
+    /**
+     * Caches the playing track and the next one in full, and drops prefetches for anything else.
+     *
+     * Only these two: the point is to protect the track being heard and the handover to the one
+     * after it, not to download the whole queue. Local tracks are ignored by [StreamPrefetcher],
+     * and an unresolved cloud URL is skipped here because prefetching a watch page is pointless --
+     * it is picked up on the next transition, once resolution has patched a real URL in.
+     */
+    private fun prefetchAroundCurrent() {
+        val player = controller ?: return
+        val currentIndex = player.currentMediaItemIndex
+
+        val wanted = listOfNotNull(
+            currentSongList.getOrNull(currentIndex),
+            currentSongList.getOrNull(currentIndex + 1),
+        )
+            .map { it.mediaUri }
+            .filterNot { isUnresolvedCloudUri(it) }
+
+        prefetcher.retainOnly(wanted)
+        wanted.forEach(prefetcher::prefetch)
     }
 
     // Caps how many cloud-stream resolutions run at once. Firing a dozen concurrent requests at
@@ -394,6 +534,8 @@ class MediaControllerManager(
                 currentSongList = currentSongList.toMutableList().also { it[idx] = resolved }
                 _playlist.value = currentSongList
                 controller?.replaceMediaItem(idx, buildMediaItem(resolved))
+                // Now that this one has a real stream URL, it is worth caching ahead.
+                prefetchAroundCurrent()
             }
         }
     }
@@ -450,6 +592,18 @@ class MediaControllerManager(
     /** Sets the player's output volume (0f-1f). Used for the sleep timer's fade-out. */
     fun setVolume(volume: Float) {
         controller?.volume = volume.coerceIn(0f, 1f)
+    }
+
+    /**
+     * Appends [song] to the end of the live "Up Next" queue without interrupting current
+     * playback. If nothing was queued yet, prepares the player so the newly-added item is ready
+     * to play, without forcing playback to start.
+     */
+    fun addToQueue(song: Song) {
+        val player = controller ?: return
+        val wasEmpty = player.mediaItemCount == 0
+        player.addMediaItem(buildMediaItem(song))
+        if (wasEmpty) player.prepare()
     }
 
     /**
@@ -530,6 +684,19 @@ class MediaControllerManager(
     }
 
     /**
+     * Removes the queue items at [indices] (e.g. a bulk multi-select removal from the "Up Next"
+     * queue view). Indices are removed highest-first so each `removeMediaItem` call still targets
+     * the intended item even as earlier removals shift everything after them down by one.
+     */
+    fun removeQueueItems(indices: List<Int>) {
+        val player = controller ?: return
+        val count = player.mediaItemCount
+        indices.distinct().sortedDescending().forEach { index ->
+            if (index in 0 until count) player.removeMediaItem(index)
+        }
+    }
+
+    /**
      * Toggles shuffle mode on/off.
      */
     fun toggleShuffle() {
@@ -554,6 +721,9 @@ class MediaControllerManager(
     }
 
     companion object {
+        /** How often [currentPositionMs] is refreshed while playing -- see [startPositionTicker]. */
+        private const val POSITION_TICK_INTERVAL_MS = 100L
+
         /**
          * Calculates the next repeat mode in the exact 3-state loop:
          * REPEAT_MODE_OFF -> REPEAT_MODE_ALL -> REPEAT_MODE_ONE -> REPEAT_MODE_OFF
@@ -585,6 +755,7 @@ class MediaControllerManager(
 
     fun release() {
         stopPositionTicker()
+        prefetcher.cancelAll()
         controller?.release()
         controller = null
         scope.cancel()

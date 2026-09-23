@@ -26,6 +26,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.ThumbUp
 import androidx.compose.material3.Button
@@ -51,13 +52,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.tgmusicai.data.google.GoogleYouTubePlaylist
+import com.example.tgmusicai.data.youtube.GoogleYouTubePlaylist
+import com.example.tgmusicai.data.youtube.LIKED_MUSIC_PLAYLIST_ID
+import com.example.tgmusicai.ui.components.YouTubeLoginDialog
 import com.example.tgmusicai.ui.util.FormatUtils
 import com.example.tgmusicai.ui.viewmodel.GoogleSyncViewModel
 
 /**
- * Google sign-in and YouTube playlist import/sync screen. Lets the user connect their Google
- * account, see every playlist they own (plus Liked Videos), pick which to import as local
+ * YouTube Music sign-in and playlist import/sync screen. Lets the user sign into their YouTube
+ * Music account (via an in-app [YouTubeLoginDialog] WebView, no Google Cloud Console OAuth
+ * involved), see every playlist they own (plus Liked Music), pick which to import as local
  * playlists, and re-sync already-imported ones on demand.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -76,6 +80,18 @@ fun GoogleSyncScreen(
 
     val syncedYoutubeIds = syncedPlaylists.mapNotNull { it.youtubePlaylistId }.toSet()
     var mergeLikedIntoAppLiked by remember { mutableStateOf(false) }
+    var showLoginDialog by remember { mutableStateOf(false) }
+
+    if (showLoginDialog) {
+        YouTubeLoginDialog(
+            cookieManager = viewModel.cookieManager,
+            onSignedIn = {
+                showLoginDialog = false
+                viewModel.onSignedIn()
+            },
+            onDismiss = { showLoginDialog = false }
+        )
+    }
 
     LaunchedEffect(Unit) {
         if (syncedPlaylists.isNotEmpty()) {
@@ -96,6 +112,11 @@ fun GoogleSyncScreen(
                     if (syncedPlaylists.isNotEmpty()) {
                         IconButton(onClick = { viewModel.refreshAllSynced() }, enabled = !isLoading) {
                             Icon(Icons.Rounded.Refresh, contentDescription = "Refresh synced playlists")
+                        }
+                    }
+                    if (isSignedIn) {
+                        IconButton(onClick = { viewModel.signOut() }) {
+                            Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = "Sign out of YouTube Music")
                         }
                     }
                 },
@@ -128,7 +149,7 @@ fun GoogleSyncScreen(
             when {
                 !isSignedIn -> SignInPrompt(
                     isLoading = isLoading,
-                    onSignIn = { viewModel.signInAndLoadPlaylists() }
+                    onSignIn = { showLoginDialog = true }
                 )
                 isLoading && availablePlaylists.isEmpty() -> Box(
                     modifier = Modifier.fillMaxSize(),
@@ -159,16 +180,16 @@ fun GoogleSyncScreen(
 
                     item {
                         ImportableRow(
-                            title = "Liked Videos",
-                            subtitle = "Your YouTube liked videos",
+                            title = "Liked Music",
+                            subtitle = "Your YouTube Music liked songs",
                             icon = Icons.Rounded.ThumbUp,
-                            isImported = "LL" in syncedYoutubeIds,
-                            isImporting = "LL" in importingIds,
-                            onImport = { viewModel.importLikedVideos(mergeLikedIntoAppLiked) }
+                            isImported = LIKED_MUSIC_PLAYLIST_ID in syncedYoutubeIds,
+                            isImporting = LIKED_MUSIC_PLAYLIST_ID in importingIds,
+                            onImport = { viewModel.importLikedMusic(mergeLikedIntoAppLiked) }
                         )
                     }
 
-                    if ("LL" !in syncedYoutubeIds) {
+                    if (LIKED_MUSIC_PLAYLIST_ID !in syncedYoutubeIds) {
                         item {
                             Row(
                                 modifier = Modifier
@@ -235,7 +256,7 @@ private fun SignInPrompt(isLoading: Boolean, onSignIn: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
-            text = "Connect your Google account to import your YouTube playlists and Liked Videos, and keep them in sync.",
+            text = "Sign in to your YouTube Music account to import your playlists and Liked Music, and keep them in sync.",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 24.dp)
@@ -248,7 +269,7 @@ private fun SignInPrompt(isLoading: Boolean, onSignIn: () -> Unit) {
                     strokeWidth = 2.dp
                 )
             } else {
-                Text("Sign in with Google")
+                Text("Sign in to YouTube Music")
             }
         }
     }

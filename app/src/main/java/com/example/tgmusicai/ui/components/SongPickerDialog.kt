@@ -87,7 +87,15 @@ fun SongPickerDialog(
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
-                    placeholder = { Text("Search title, artist, album...") },
+                    // See LibraryScreen's search field: keep the hint short and one line so the
+                    // field doesn't grow a second row.
+                    placeholder = {
+                        Text(
+                            "Search songs",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
                     leadingIcon = {
                         Icon(imageVector = Icons.Rounded.Search, contentDescription = "Search icon")
                     },

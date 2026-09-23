@@ -275,28 +275,33 @@ fun AlarmScreenContent(
                     }
                 }
 
-                OutlinedButton(
-                    onClick = onSnooze,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp),
-                    shape = RoundedCornerShape(28.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
+                // Hidden entirely when this alarm has snooze turned off (snoozeMinutes == 0) --
+                // offering the button would do nothing, since AlarmScheduler ignores a 0 snooze.
+                val snoozeMinutes = alarm?.snoozeMinutes ?: 10
+                if (snoozeMinutes > 0) {
+                    OutlinedButton(
+                        onClick = onSnooze,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                        shape = RoundedCornerShape(28.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Snooze,
-                            contentDescription = null,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(modifier = Modifier.size(12.dp))
-                        Text(
-                            text = "SNOOZE (${alarm?.snoozeMinutes ?: 10} MIN)",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Snooze,
+                                contentDescription = null,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.size(12.dp))
+                            Text(
+                                text = "SNOOZE ($snoozeMinutes MIN)",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }

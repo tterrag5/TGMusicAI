@@ -4,6 +4,7 @@ import android.widget.Toast
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
@@ -28,6 +28,8 @@ import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.automirrored.rounded.ViewList
+import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -38,6 +40,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -53,12 +57,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.ui.components.AddToPlaylistDialog
 import com.example.tgmusicai.ui.components.SongGridItem
+import com.example.tgmusicai.ui.components.YouTubeSearchResultItem
 import com.example.tgmusicai.ui.components.SongItem
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
 import com.example.tgmusicai.ui.viewmodel.LibraryViewModel
@@ -68,7 +74,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Screen displaying the user's song library loaded from the Room database.
- * Supports filtering songs, playing tracks, configuring AI Metadata Cleaner API keys,
+ * Supports filtering songs, playing tracks, switching between grid and list layouts,
  * adding songs to playlists, and scraping cover art & lyrics for individual tracks.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -77,6 +83,9 @@ fun LibraryScreen(
     libraryViewModel: LibraryViewModel,
     playerViewModel: PlayerViewModel,
     downloadMap: Map<String, com.example.tgmusicai.data.youtube.DownloadProgressState> = emptyMap(),
+    onOpenDrawer: () -> Unit = {},
+    onPlayCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {},
+    onDownloadCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val songs by libraryViewModel.filteredSongs.collectAsState()
@@ -90,9 +99,11 @@ fun LibraryScreen(
     val selectedSongIds by libraryViewModel.selectedSongIds.collectAsState()
     val showBulkAddToPlaylistDialog by libraryViewModel.showBulkAddToPlaylistDialog.collectAsState()
     val isSelectionMode = selectedSongIds.isNotEmpty()
+    val downloadedOnly by libraryViewModel.downloadedOnly.collectAsState()
+    val cloudResults by libraryViewModel.cloudResults.collectAsState()
+    val isSearchingCloud by libraryViewModel.isSearchingCloud.collectAsState()
 
     val context = LocalContext.current
-    var showApiKeyDialog by remember { mutableStateOf(false) }
     var showBulkDeleteConfirm by remember { mutableStateOf(false) }
     var showBulkMoreMenu by remember { mutableStateOf(false) }
 
@@ -164,17 +175,19 @@ fun LibraryScreen(
             } else {
                 TopAppBar(
                     title = { Text("Music Library", style = MaterialTheme.typography.headlineMedium) },
+                navigationIcon = {
+                    IconButton(onClick = onOpenDrawer) {
+                        Icon(
+                            imageVector = Icons.Rounded.Menu,
+                            contentDescription = "Open navigation menu"
+                        )
+                    }
+                },
                     actions = {
                         IconButton(onClick = libraryViewModel::toggleGridView) {
                             Icon(
                                 imageVector = if (isGridView) Icons.AutoMirrored.Rounded.ViewList else Icons.Rounded.GridView,
                                 contentDescription = if (isGridView) "Switch to list view" else "Switch to grid view"
-                            )
-                        }
-                        IconButton(onClick = { showApiKeyDialog = true }) {
-                            Icon(
-                                imageVector = Icons.Rounded.AutoAwesome,
-                                contentDescription = "AI Metadata Settings"
                             )
                         }
                     },
@@ -195,7 +208,16 @@ fun LibraryScreen(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = libraryViewModel::onSearchQueryChanged,
-                placeholder = { Text("Search title, artist, producer, album...") },
+                // Short, and capped to one line: `singleLine` constrains the typed value, not this
+                // placeholder composable, so a long hint wrapped to a second line and made the
+                // whole field noticeably taller than every other search bar in the app.
+                placeholder = {
+                    Text(
+                        "Search",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
                 leadingIcon = {
                     Icon(
                         imageVector = Icons.Rounded.Search,
@@ -223,7 +245,102 @@ fun LibraryScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             )
 
-            if (songs.isEmpty()) {
+            // Downloaded-only lives here now rather than on Home, next to the list it actually
+            // filters. With it on, cloud-only tracks are hidden and no YouTube search is issued.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.DownloadDone,
+                    contentDescription = null,
+                    tint = if (downloadedOnly) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.outline
+                    },
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.size(8.dp))
+                Text(
+                    text = "Downloaded only",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Switch(
+                    checked = downloadedOnly,
+                    onCheckedChange = libraryViewModel::setDownloadedOnly
+                )
+            }
+
+            // While searching, local and cloud results share one scrolling list so YouTube hits
+            // read as a continuation of the library rather than a separate place to go. Browsing
+            // (no query) keeps the grid/list layout.
+            if (searchQuery.isNotBlank() && !downloadedOnly) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 96.dp)
+                ) {
+                    items(songs, key = { "local_${it.id}" }) { song ->
+                        SongItem(
+                            song = song,
+                            isPlaying = currentSong?.id == song.id,
+                            isSelected = song.id in selectedSongIds,
+                            onClick = {
+                                if (isSelectionMode) {
+                                    libraryViewModel.toggleSongSelected(song.id)
+                                } else {
+                                    playerViewModel.playSong(song = song, queue = songs)
+                                }
+                            },
+                            onLongClick = { libraryViewModel.startSelection(song.id) },
+                            onAddToPlaylistClicked = { libraryViewModel.openAddToPlaylistDialog(song) },
+                            onScrapeClicked = { libraryViewModel.scrapeArtworkAndLyrics(song) },
+                            onStartRadioClicked = { playerViewModel.startRadio(song) },
+                            onAnalyzeWithAiClicked = { libraryViewModel.analyzeSongWithAi(song) },
+                            onSwipeToQueue = { playerViewModel.addToQueue(song) },
+                            onSwipeToLike = { libraryViewModel.toggleLikeSong(song) },
+                            liveDownloadStatus = song.youtubeId?.let { downloadMap[it]?.status }
+                        )
+                    }
+
+                    if (isSearchingCloud || cloudResults.isNotEmpty()) {
+                        item {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                            ) {
+                                Text(
+                                    text = "From YouTube",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isSearchingCloud) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                }
+                            }
+                        }
+                        items(cloudResults, key = { "cloud_${it.videoId}" }) { result ->
+                            YouTubeSearchResultItem(
+                                result = result,
+                                isExtracting = false,
+                                downloadState = downloadMap[result.videoId],
+                                onPlayClick = { onPlayCloudResult(result) },
+                                onDownloadClick = { onDownloadCloudResult(result) },
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+            } else if (songs.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -278,6 +395,13 @@ fun LibraryScreen(
                             onAnalyzeWithAiClicked = if (isSelectionMode) null else {
                                 { libraryViewModel.analyzeSongWithAi(song) }
                             },
+                            onAddToQueueClicked = if (isSelectionMode) null else {
+                                { playerViewModel.addToQueue(song) }
+                            },
+                            onToggleLikeClicked = if (isSelectionMode) null else {
+                                { libraryViewModel.toggleLikeSong(song) }
+                            },
+                            liveDownloadStatus = song.youtubeId?.let { downloadMap[it]?.status },
                             modifier = Modifier.animateItem()
                         )
                     }
@@ -312,6 +436,8 @@ fun LibraryScreen(
                             onAnalyzeWithAiClicked = {
                                 libraryViewModel.analyzeSongWithAi(song)
                             },
+                            onSwipeToQueue = { playerViewModel.addToQueue(song) },
+                            onSwipeToLike = { libraryViewModel.toggleLikeSong(song) },
                             liveDownloadStatus = song.youtubeId?.let { downloadMap[it]?.status },
                             modifier = Modifier.animateItem()
                         )
@@ -373,65 +499,8 @@ fun LibraryScreen(
         )
     }
 
-    // AI API Key Settings Dialog
-    if (showApiKeyDialog) {
-        SetApiKeyDialog(
-            onDismissRequest = { showApiKeyDialog = false }
-        )
-    }
 }
 
-@Composable
-fun SetApiKeyDialog(
-    onDismissRequest: () -> Unit
-) {
-    val context = LocalContext.current
-    val appPreferences = remember { AppPreferences(context) }
-    val scope = rememberCoroutineScope()
-    var apiKeyInput by remember { mutableStateOf("") }
-
-    LaunchedEffect(Unit) {
-        apiKeyInput = appPreferences.aiApiKeyFlow.firstOrNull() ?: ""
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismissRequest,
-        title = { Text("AI Metadata Settings") },
-        text = {
-            Column {
-                Text(
-                    text = "Configure Gemini (AIza...) or OpenAI (sk-...) API key for online metadata cleaning. Leave empty to use the zero-memory offline pattern engine.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                OutlinedTextField(
-                    value = apiKeyInput,
-                    onValueChange = { apiKeyInput = it },
-                    label = { Text("API Key (Optional)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    scope.launch {
-                        appPreferences.setAiApiKey(apiKeyInput)
-                        onDismissRequest()
-                    }
-                }
-            ) {
-                Text("Save")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismissRequest) {
-                Text("Cancel")
-            }
-        }
-    )
-}
 
 @Preview(showBackground = true)
 @Composable

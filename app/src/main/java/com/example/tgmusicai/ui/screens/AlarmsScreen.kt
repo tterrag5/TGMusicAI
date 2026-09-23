@@ -16,17 +16,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Alarm
-import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -52,6 +49,7 @@ import com.example.tgmusicai.ui.viewmodel.AlarmViewModel
 @Composable
 fun AlarmsScreen(
     alarmViewModel: AlarmViewModel,
+    onOpenDrawer: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -61,56 +59,6 @@ fun AlarmsScreen(
 
     var showDialog by remember { mutableStateOf(false) }
     var editingAlarm by remember { mutableStateOf<Alarm?>(null) }
-    var showSettingsDialog by remember { mutableStateOf(false) }
-    val forceMaxVolume by alarmViewModel.forceMaxVolume.collectAsState()
-    val volumeRampUp by alarmViewModel.volumeRampUp.collectAsState()
-
-    if (showSettingsDialog) {
-        AlertDialog(
-            onDismissRequest = { showSettingsDialog = false },
-            title = { Text("Alarm Sound Settings") },
-            text = {
-                Column {
-                    Row(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.padding(end = 12.dp)) {
-                            Text("Force max alarm volume", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "Set the phone's alarm volume to maximum whenever an alarm rings.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(checked = forceMaxVolume, onCheckedChange = alarmViewModel::setForceMaxVolume)
-                    }
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Row(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.padding(end = 12.dp)) {
-                            Text("Gradually increase volume", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "Start quiet and ramp up to full volume over about a minute.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(checked = volumeRampUp, onCheckedChange = alarmViewModel::setVolumeRampUp)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showSettingsDialog = false }) {
-                    Text("Done")
-                }
-            }
-        )
-    }
 
     Scaffold(
         topBar = {
@@ -121,9 +69,12 @@ fun AlarmsScreen(
                         fontWeight = FontWeight.Bold
                     )
                 },
-                actions = {
-                    IconButton(onClick = { showSettingsDialog = true }) {
-                        Icon(Icons.Rounded.Settings, contentDescription = "Alarm sound settings")
+                navigationIcon = {
+                    IconButton(onClick = onOpenDrawer) {
+                        Icon(
+                            imageVector = Icons.Rounded.Menu,
+                            contentDescription = "Open navigation menu"
+                        )
                     }
                 }
             )

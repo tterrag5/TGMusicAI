@@ -26,12 +26,6 @@ sealed interface Screen : NavKey {
     data object Playlists : Screen
 
     /**
-     * YouTube Cloud search tab allowing streaming and downloading YouTube audio tracks.
-     */
-    @Serializable
-    data object YouTube : Screen
-
-    /**
      * Alarms tab allowing creation, viewing, editing, and toggling of musical alarms.
      */
     @Serializable
@@ -53,12 +47,6 @@ sealed interface Screen : NavKey {
     ) : Screen
 
     /**
-     * Dedicated full-screen Now Playing view with expanded player controls.
-     */
-    @Serializable
-    data object NowPlayingFull : Screen
-
-    /**
      * Google account sign-in and YouTube playlist import/sync screen.
      */
     @Serializable
@@ -69,4 +57,11 @@ sealed interface Screen : NavKey {
      */
     @Serializable
     data object Downloads : Screen
+
+    /**
+     * Unified Settings screen consolidating theme selection, AI API key configuration,
+     * backup/restore, and alarm sound settings.
+     */
+    @Serializable
+    data object Settings : Screen
 }

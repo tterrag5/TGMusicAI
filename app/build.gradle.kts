@@ -47,11 +47,12 @@ android {
     }
 }
 
-java {
-    toolchain {
-        languageVersion.set(JavaLanguageVersion.of(17))
-    }
-}
+// Deliberately no `java { toolchain { ... } }` block. Pinning a toolchain to Java 17 made Gradle
+// demand a JDK 17 *installation* and fail outright ("Cannot find a Java installation ... matching
+// languageVersion=17") on any machine or shell that only had a newer JDK -- which includes a plain
+// shell here, since JDK 17 arrives via the Nix dev shell in flake.nix rather than system-wide.
+// `compileOptions` above and the Kotlin `jvmTarget` below already pin the emitted bytecode to 17,
+// so the build produces identical output while running on whatever JDK 17-or-newer is present.
 
 kotlin {
     compilerOptions {
@@ -95,16 +96,19 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.guava)
+    implementation(libs.kotlinx.coroutines.play.services)
     implementation(libs.kotlinx.serialization.core)
     implementation(libs.logging.interceptor)
+    implementation(libs.mlkit.translate)
     implementation(libs.material)
     implementation(libs.moshi.kotlin)
     implementation(libs.okhttp)
     implementation(libs.play.services.location)
-    implementation(libs.play.services.auth)
     implementation(libs.retrofit)
     implementation(libs.tensorflow.lite)
     implementation(libs.onnxruntime.android)
+    implementation(libs.androidx.palette.ktx)
+    implementation(libs.androidx.webkit)
     testImplementation(libs.androidx.core)
     testImplementation(libs.androidx.junit)
     testImplementation(libs.junit)

@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -37,6 +38,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
@@ -86,6 +88,7 @@ import com.example.tgmusicai.ui.viewmodel.StatsViewModel
 fun StatsScreen(
     statsViewModel: StatsViewModel,
     playerViewModel: PlayerViewModel,
+    onOpenDrawer: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val mostPlayed by statsViewModel.mostPlayedSongs.collectAsState()
@@ -108,6 +111,14 @@ fun StatsScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Stats", style = MaterialTheme.typography.headlineMedium) },
+            navigationIcon = {
+                IconButton(onClick = onOpenDrawer) {
+                    Icon(
+                        imageVector = Icons.Rounded.Menu,
+                        contentDescription = "Open navigation menu"
+                    )
+                }
+            },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 )

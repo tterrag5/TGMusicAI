@@ -27,12 +27,14 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
@@ -58,6 +60,10 @@ import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.ui.util.FormatUtils
 import com.example.tgmusicai.data.local.entity.Song
 import java.util.Calendar
+import kotlin.math.roundToInt
+
+/** Snooze length applied when the user turns snooze back on after disabling it. */
+private const val DEFAULT_SNOOZE_MINUTES = 10
 
 /**
  * Dialog for creating or editing a musical alarm with customizable time, repeat days, tone source, and snooze.
@@ -85,6 +91,8 @@ fun AddEditAlarmDialog(
     var toneType by remember { mutableStateOf(initialAlarm?.toneType ?: AlarmToneType.RANDOM_LIKED) }
     var toneUriOrId by remember { mutableStateOf(initialAlarm?.toneUriOrId ?: "") }
     var snoozeMinutes by remember { mutableIntStateOf(initialAlarm?.snoozeMinutes ?: 10) }
+    var forceMaxVolume by remember { mutableStateOf(initialAlarm?.forceMaxVolume ?: false) }
+    var volumeRampUp by remember { mutableStateOf(initialAlarm?.volumeRampUp ?: false) }
 
     val initialDaysSet = remember {
         initialAlarm?.repeatDays?.split(",")?.mapNotNull { it.trim().toIntOrNull() }?.toSet() ?: emptySet()
@@ -317,25 +325,84 @@ fun AddEditAlarmDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Snooze Minutes Selection
+                // Snooze duration: any whole number of minutes rather than four fixed chips, plus
+                // an explicit off switch. 0 is the "snooze disabled" sentinel -- snoozeMinutes is
+                // already a plain non-null Int column, so this needs no schema change, but every
+                // consumer has to treat 0 as "no snooze" (see AlarmScheduler.scheduleSnooze,
+                // AlarmActivity's snooze button and AlarmItem's summary line).
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            snoozeMinutes = if (snoozeMinutes == 0) DEFAULT_SNOOZE_MINUTES else 0
+                        }
+                        .padding(vertical = 8.dp)
+                ) {
+                    Text(
+                        text = if (snoozeMinutes == 0) "Snooze off" else "Snooze: $snoozeMinutes min",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = snoozeMinutes > 0,
+                        onCheckedChange = { enabled ->
+                            snoozeMinutes = if (enabled) DEFAULT_SNOOZE_MINUTES else 0
+                        }
+                    )
+                }
+
+                if (snoozeMinutes > 0) {
+                    Slider(
+                        value = snoozeMinutes.toFloat(),
+                        onValueChange = { snoozeMinutes = it.roundToInt().coerceAtLeast(1) },
+                        valueRange = 1f..60f,
+                        steps = 58,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Volume Behavior -- per-alarm now rather than one global setting applied to
+                // every alarm, so a loud "force max volume" wake-up and a gentle unforced one can
+                // coexist as different alarms.
                 Text(
-                    text = "Snooze Duration",
+                    text = "Volume",
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 14.sp,
                     modifier = Modifier.align(Alignment.Start)
                 )
 
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { forceMaxVolume = !forceMaxVolume }
+                        .padding(vertical = 8.dp)
                 ) {
-                    listOf(5, 10, 15, 20).forEach { mins ->
-                        FilterChip(
-                            selected = snoozeMinutes == mins,
-                            onClick = { snoozeMinutes = mins },
-                            label = { Text("${mins}m") }
-                        )
-                    }
+                    Text(
+                        "Force max alarm volume",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(checked = forceMaxVolume, onCheckedChange = { forceMaxVolume = it })
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { volumeRampUp = !volumeRampUp }
+                        .padding(vertical = 8.dp)
+                ) {
+                    Text(
+                        "Gradually increase volume",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(checked = volumeRampUp, onCheckedChange = { volumeRampUp = it })
                 }
             }
         },
@@ -359,7 +426,9 @@ fun AddEditAlarmDialog(
                         toneType = toneType,
                         toneUriOrId = toneUriOrId,
                         snoozeMinutes = snoozeMinutes,
-                        label = label
+                        label = label,
+                        forceMaxVolume = forceMaxVolume,
+                        volumeRampUp = volumeRampUp
                     )
                     onConfirm(updatedAlarm)
                 }

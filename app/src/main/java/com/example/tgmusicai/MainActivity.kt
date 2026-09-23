@@ -17,9 +17,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.tgmusicai.data.google.GoogleAuthManager
-import com.example.tgmusicai.data.google.YouTubeDataApiClient
 import com.example.tgmusicai.data.google.YouTubePlaylistSyncManager
+import com.example.tgmusicai.data.youtube.InnerTubeCookieManager
+import com.example.tgmusicai.data.youtube.YouTubeInnerTubeClient
 import com.example.tgmusicai.data.local.AppDatabase
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.MediaScanner
@@ -78,7 +78,8 @@ class MainActivity : ComponentActivity() {
             playlistDao = database.playlistDao(),
             songStatsDao = database.songStatsDao(),
             alarmDao = database.alarmDao(),
-            listeningHistoryDao = database.listeningHistoryDao()
+            listeningHistoryDao = database.listeningHistoryDao(),
+            database = database
         )
 
         networkObserver = NetworkObserver(this)
@@ -91,21 +92,37 @@ class MainActivity : ComponentActivity() {
 
         mediaControllerManager = MediaControllerManager(this)
 
-        // Must be constructed here (before the activity reaches STARTED) since it registers an
-        // ActivityResultLauncher for the Google consent screen.
-        val googleAuthManager = GoogleAuthManager(this)
-        val youTubeDataApiClient = YouTubeDataApiClient()
+        // Shared by the Library's cloud-search section (the old Explore tab) so searching doesn't
+        // spin up a second extractor with its own connection pool.
+        val youTubeExtractor = com.example.tgmusicai.data.youtube.YouTubeExtractor()
+
+        // YouTube Music sync: authenticated via a captured music.youtube.com web session
+        // (InnerTubeCookieManager) rather than a Google Cloud Console OAuth client -- see
+        // YouTubeInnerTubeClient's doc comment.
+        val innerTubeCookieManager = InnerTubeCookieManager(appPreferences)
+        val youTubeInnerTubeClient = YouTubeInnerTubeClient(innerTubeCookieManager)
         val youTubePlaylistSyncManager = YouTubePlaylistSyncManager(
             songDao = database.songDao(),
             playlistDao = database.playlistDao(),
             musicRepository = repository,
-            apiClient = youTubeDataApiClient
+            innerTubeClient = youTubeInnerTubeClient
+        )
+        val playlistImportExportManager = com.example.tgmusicai.data.local.PlaylistImportExportManager(
+            songDao = database.songDao(),
+            musicRepository = repository
         )
 
         setContent {
             val selectedTheme by appPreferences.selectedThemeFlow.collectAsState(initial = "YT_DARK")
+            val themeModeName by appPreferences.themeModeFlow.collectAsState(initial = "DARK")
+            val dynamicColor by appPreferences.dynamicColorFlow.collectAsState(initial = false)
 
-            TGMusicAITheme(themeName = selectedTheme) {
+            TGMusicAITheme(
+                themeName = selectedTheme,
+                themeMode = com.example.tgmusicai.ui.theme.ThemeMode.fromName(themeModeName),
+                systemInDarkTheme = androidx.compose.foundation.isSystemInDarkTheme(),
+                dynamicColor = dynamicColor
+            ) {
                 val onboardingCompleted by appPreferences.onboardingCompletedFlow.collectAsState(initial = null)
 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -116,7 +133,8 @@ class MainActivity : ComponentActivity() {
                             factory = remember {
                                 HomeViewModel.Factory(
                                     repository = repository,
-                                    networkObserver = networkObserver
+                                    networkObserver = networkObserver,
+                                    appPreferences = appPreferences
                                 )
                             }
                         )
@@ -126,15 +144,23 @@ class MainActivity : ComponentActivity() {
                                     repository = repository,
                                     lyricsRepository = lyricsRepository,
                                     coverArtScraper = coverArtScraper,
-                                    aiFeatureManager = aiFeatureManager
+                                    aiFeatureManager = aiFeatureManager,
+                                    appPreferences = appPreferences,
+                                    youtubeExtractor = youTubeExtractor
                                 )
                             }
                         )
                         val playlistViewModel: PlaylistViewModel = viewModel(
-                            factory = remember { PlaylistViewModel.Factory(repository) }
+                            factory = remember {
+                                PlaylistViewModel.Factory(
+                                    repository,
+                                    playlistImportExportManager,
+                                    appPreferences
+                                )
+                            }
                         )
                         val alarmViewModel: AlarmViewModel = viewModel(
-                            factory = remember { AlarmViewModel.Factory(repository, appPreferences) }
+                            factory = remember { AlarmViewModel.Factory(repository) }
                         )
                         val statsViewModel: StatsViewModel = viewModel(
                             factory = remember { StatsViewModel.Factory(repository) }
@@ -169,9 +195,9 @@ class MainActivity : ComponentActivity() {
                         val googleSyncViewModel: GoogleSyncViewModel = viewModel(
                             factory = remember {
                                 GoogleSyncViewModel.Factory(
-                                    authManager = googleAuthManager,
+                                    cookieManager = innerTubeCookieManager,
                                     syncManager = youTubePlaylistSyncManager,
-                                    apiClient = youTubeDataApiClient,
+                                    innerTubeClient = youTubeInnerTubeClient,
                                     playlistDao = database.playlistDao()
                                 )
                             }

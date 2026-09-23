@@ -95,10 +95,17 @@ object AlarmScheduler {
     /**
      * Schedules a temporary snooze alarm for the specified [Alarm.snoozeMinutes] duration from now.
      *
+     * A [Alarm.snoozeMinutes] of 0 means the user disabled snooze for this alarm, and is ignored:
+     * scheduling it would set a trigger time of "now" and make the alarm ring again immediately.
+     *
      * @param context Application context.
      * @param alarm The snoozed alarm entity.
      */
     fun scheduleSnooze(context: Context, alarm: Alarm) {
+        if (alarm.snoozeMinutes <= 0) {
+            android.util.Log.d("AlarmScheduler", "Snooze is disabled for alarm ${alarm.id}; ignoring snooze request")
+            return
+        }
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val snoozeMs = alarm.snoozeMinutes * 60 * 1000L
         val triggerTimeMs = System.currentTimeMillis() + snoozeMs
