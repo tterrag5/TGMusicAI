@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.tgmusicai.data.network.NetworkObserver
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.data.repository.SongWithStats
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.Song
@@ -28,7 +29,8 @@ import java.io.InputStream
 class HomeViewModel(
     private val repository: MusicRepository,
     private val networkObserver: NetworkObserver,
-    private val appPreferences: AppPreferences? = null
+    private val appPreferences: AppPreferences? = null,
+    private val recommendationEngine: RecommendationEngine? = null
 ) : ViewModel() {
 
     val isOnline: StateFlow<Boolean> = networkObserver.isOnline
@@ -95,6 +97,34 @@ class HomeViewModel(
     ) { list, downloadedOnly ->
         if (downloadedOnly) list.filter { it.song.isDownloaded } else list
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _recommendedSongs = MutableStateFlow<List<Song>>(emptyList())
+
+    /**
+     * The "Made for you" row: songs picked by [RecommendationEngine] from what the user has been
+     * listening to lately. Empty when there is no engine, nothing has been played yet, or too few
+     * results came back to be worth a row -- the screen hides the section rather than showing a
+     * stub.
+     */
+    val recommendedSongs: StateFlow<List<Song>> = _recommendedSongs.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            // Recomputed whenever the Downloaded-only preference flips, since it changes which
+            // songs are eligible. Recommendation is a read-only best effort: a failure here leaves
+            // the row empty and touches nothing else.
+            _isDownloadedOnly.collect { downloadedOnly ->
+                _recommendedSongs.value = try {
+                    recommendationEngine?.recommendForLibrary(
+                        limit = RECOMMENDATION_ROW_SIZE,
+                        downloadedOnly = downloadedOnly,
+                    ).orEmpty()
+                } catch (e: Throwable) {
+                    emptyList()
+                }
+            }
+        }
+    }
 
     fun setDownloadedOnly(enabled: Boolean) {
         viewModelScope.launch {
@@ -171,11 +201,17 @@ class HomeViewModel(
     class Factory(
         private val repository: MusicRepository,
         private val networkObserver: NetworkObserver,
-        private val appPreferences: AppPreferences? = null
+        private val appPreferences: AppPreferences? = null,
+        private val recommendationEngine: RecommendationEngine? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return HomeViewModel(repository, networkObserver, appPreferences) as T
+            return HomeViewModel(repository, networkObserver, appPreferences, recommendationEngine) as T
         }
+    }
+
+    private companion object {
+        /** How many songs the Home recommendations row asks for. */
+        const val RECOMMENDATION_ROW_SIZE = 20
     }
 }

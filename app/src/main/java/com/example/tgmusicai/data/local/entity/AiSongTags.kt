@@ -18,6 +18,12 @@ data class AiSongTags(
     val tags: String? = null,
     /** 384-dim MiniLM sentence embedding of the song's lyrics, comma-separated floats. Null if no lyrics were available. */
     val lyricsEmbedding: String? = null,
+    /**
+     * Acoustic profile: the song's mean-pooled YAMNet class-score vector, quantized and hex-encoded
+     * by [com.example.tgmusicai.ai.AudioProfileCodec]. Null for a song with no local audio file
+     * (cloud-only tracks are never tagged) or one analyzed before this column existed.
+     */
+    val audioProfile: String? = null,
     /** Epoch millis when this row was last (re)computed; used to detect stale analysis after song edits. */
     val computedAt: Long = System.currentTimeMillis()
 )

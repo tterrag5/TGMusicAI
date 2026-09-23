@@ -16,6 +16,22 @@ import java.nio.ByteOrder
  * every public function returns [AiModelResult] instead of propagating exceptions, and a bad
  * per-call input/decode failure never disables the engine for the next call.
  */
+/**
+ * A song's tags alongside the raw mean-pooled YAMNet class scores they were derived from. The
+ * scores are what [com.example.tgmusicai.ai.AudioProfileCodec] stores as an acoustic profile.
+ */
+data class AudioProfile(val tags: List<String>, val scores: FloatArray) {
+    // FloatArray gives identity equals/hashCode, which would silently break any structural
+    // comparison of this class, so both are defined over the array's contents.
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is AudioProfile) return false
+        return tags == other.tags && scores.contentEquals(other.scores)
+    }
+
+    override fun hashCode(): Int = 31 * tags.hashCode() + scores.contentHashCode()
+}
+
 class SongTaggingEngine(private val context: Context) {
 
     companion object {
@@ -100,7 +116,25 @@ class SongTaggingEngine(private val context: Context) {
      * mood), derived from decoding a short window of the file and mean-pooling YAMNet's per-frame
      * class scores. Returns [AiModelResult.Unavailable] if the model or the file can't be used.
      */
-    fun tagAudioFile(filePath: String): AiModelResult<List<String>> {
+    fun tagAudioFile(filePath: String): AiModelResult<List<String>> =
+        when (val result = profileAudioFile(filePath)) {
+            is AiModelResult.Success -> AiModelResult.Success(result.value.tags)
+            is AiModelResult.Unavailable -> AiModelResult.Unavailable(result.reason)
+            is AiModelResult.Error -> AiModelResult.Error(result.throwable)
+        }
+
+    /**
+     * Tags the audio at [filePath] and also returns the mean-pooled class-score vector the tags
+     * were picked from.
+     *
+     * The vector is the tagging work's real output -- the eight label strings are a lossy summary
+     * of it -- and it doubles as an acoustic fingerprint for
+     * [com.example.tgmusicai.data.repository.RecommendationEngine]. This model is the
+     * `yamnet/classification` variant, whose only output tensor is the 521 class scores (verified
+     * on device: `outputCount=1`), so these scores, not a hidden embedding layer, are the richest
+     * acoustic representation available without shipping another model.
+     */
+    fun profileAudioFile(filePath: String): AiModelResult<AudioProfile> {
         if (!ensureInitialized()) return AiModelResult.Unavailable("model unavailable")
         val interp = interpreter ?: return AiModelResult.Unavailable("model unavailable")
         val labelNames = labels ?: return AiModelResult.Unavailable("labels unavailable")
@@ -131,7 +165,7 @@ class SongTaggingEngine(private val context: Context) {
                     .take(MAX_TAGS)
                     .mapNotNull { labelNames.getOrNull(it) }
 
-                AiModelResult.Success(tags)
+                AiModelResult.Success(AudioProfile(tags = tags, scores = meanScores))
             }
         } catch (e: Throwable) {
             Log.e(TAG, "Audio tagging inference failed for this call ($filePath)", e)

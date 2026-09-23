@@ -38,24 +38,28 @@ class AiFeatureManager(
      * failure. Safe to call from a UI action (runs on its own IO scope) or a background job alike.
      */
     suspend fun analyzeSong(song: Song): AnalysisOutcome = withContext(scope.coroutineContext) {
-        val tags = try {
+        val profile = try {
             localFilePath(song.mediaUri)?.let { path ->
-                when (val result = taggingEngine.tagAudioFile(path)) {
+                when (val result = taggingEngine.profileAudioFile(path)) {
                     is AiModelResult.Success -> result.value
                     is AiModelResult.Unavailable -> {
                         Log.d(TAG, "Song tagging unavailable for song ${song.id}: ${result.reason}")
-                        emptyList()
+                        null
                     }
                     is AiModelResult.Error -> {
                         Log.e(TAG, "Song tagging failed for song ${song.id}", result.throwable)
-                        emptyList()
+                        null
                     }
                 }
-            } ?: emptyList()
+            }
         } catch (e: Throwable) {
             Log.e(TAG, "Unexpected error tagging song ${song.id} -- feature stays up for other songs", e)
-            emptyList()
+            null
         }
+        val tags = profile?.tags ?: emptyList()
+        // The class-score vector the tags were picked from doubles as an acoustic fingerprint for
+        // recommendations. It used to be discarded once the eight labels were read off it.
+        val audioProfile = profile?.scores?.let(AudioProfileCodec::encode)
 
         val embedding = try {
             song.lyrics?.takeIf { it.isNotBlank() }?.let { lyrics ->
@@ -70,12 +74,13 @@ class AiFeatureManager(
         }
 
         try {
-            if (tags.isNotEmpty() || embedding != null) {
+            if (tags.isNotEmpty() || embedding != null || audioProfile != null) {
                 aiSongTagsDao.insertOrUpdate(
                     AiSongTags(
                         songId = song.id,
                         tags = tags.takeIf { it.isNotEmpty() }?.joinToString(","),
-                        lyricsEmbedding = embedding?.joinToString(",") { it.toString() }
+                        lyricsEmbedding = embedding?.joinToString(",") { it.toString() },
+                        audioProfile = audioProfile
                     )
                 )
             }
@@ -93,7 +98,14 @@ class AiFeatureManager(
      */
     suspend fun analyzeSongIfNeeded(song: Song): AnalysisOutcome? = withContext(scope.coroutineContext) {
         val alreadyAnalyzed = try {
-            aiSongTagsDao.getForSong(song.id) != null
+            val existing = aiSongTagsDao.getForSong(song.id)
+            // A row that predates the acoustic profile column is re-analyzed, but only when there
+            // is a local file to analyze -- otherwise every cloud-only song would be retried on
+            // every backfill pass, forever, and never gain a profile.
+            val missingProfile = existing != null &&
+                existing.audioProfile.isNullOrBlank() &&
+                localFilePath(song.mediaUri) != null
+            existing != null && !missingProfile
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to check existing AI tags for song ${song.id}, skipping to be safe", e)
             true
@@ -125,11 +137,14 @@ class AiFeatureManager(
     suspend fun rankBySimilarLyrics(seedSongId: Long, candidateSongIds: List<Long>, limit: Int = 20): List<Long> =
         withContext(scope.coroutineContext) {
             try {
-                val seedEmbedding = aiSongTagsDao.getForSong(seedSongId)?.lyricsEmbedding?.let(::parseEmbedding)
+                // One query for the whole table rather than one per candidate. The previous version
+                // made a database round-trip for every song in the library on every call.
+                val rows = aiSongTagsDao.getAll().associateBy { it.songId }
+                val seedEmbedding = rows[seedSongId]?.lyricsEmbedding?.let(::parseEmbedding)
                     ?: return@withContext emptyList()
                 candidateSongIds
                     .mapNotNull { id ->
-                        val embedding = aiSongTagsDao.getForSong(id)?.lyricsEmbedding?.let(::parseEmbedding) ?: return@mapNotNull null
+                        val embedding = rows[id]?.lyricsEmbedding?.let(::parseEmbedding) ?: return@mapNotNull null
                         id to LyricsEmbeddingEngine.cosineSimilarity(seedEmbedding, embedding)
                     }
                     .sortedByDescending { it.second }
@@ -137,6 +152,31 @@ class AiFeatureManager(
                     .map { it.first }
             } catch (e: Throwable) {
                 Log.e(TAG, "Failed to rank songs by lyrical similarity", e)
+                emptyList()
+            }
+        }
+
+    /**
+     * Ranks [candidateSongIds] by how close they *sound* to [seedSongId], using the cached acoustic
+     * profiles only -- never triggers new analysis. Returns an empty list when the seed has no
+     * profile (a cloud-only track, or one not analyzed yet) or on any failure.
+     */
+    suspend fun rankBySimilarAudio(seedSongId: Long, candidateSongIds: List<Long>, limit: Int = 20): List<Long> =
+        withContext(scope.coroutineContext) {
+            try {
+                val rows = aiSongTagsDao.getAll().associateBy { it.songId }
+                val seedProfile = AudioProfileCodec.decode(rows[seedSongId]?.audioProfile)
+                    ?: return@withContext emptyList()
+                candidateSongIds
+                    .mapNotNull { id ->
+                        val profile = AudioProfileCodec.decode(rows[id]?.audioProfile) ?: return@mapNotNull null
+                        id to AudioProfileCodec.cosineSimilarity(seedProfile, profile)
+                    }
+                    .sortedByDescending { it.second }
+                    .take(limit)
+                    .map { it.first }
+            } catch (e: Throwable) {
+                Log.e(TAG, "Failed to rank songs by acoustic similarity", e)
                 emptyList()
             }
         }

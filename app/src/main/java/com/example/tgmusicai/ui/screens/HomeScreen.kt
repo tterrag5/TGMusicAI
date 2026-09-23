@@ -78,6 +78,9 @@ import com.example.tgmusicai.ui.util.FormatUtils
 import com.example.tgmusicai.ui.viewmodel.HomeViewModel
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
 
+/** Below this many recommendations the Home row is hidden instead of shown half-empty. */
+private const val MIN_RECOMMENDATIONS_TO_SHOW = 3
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
@@ -98,6 +101,7 @@ fun HomeScreen(
     val playlistTopArtwork by homeViewModel.playlistTopArtwork.collectAsState()
     val listenAgainSongs by homeViewModel.listenAgainSongs.collectAsState()
     val mostPlayedSongs by homeViewModel.mostPlayedSongs.collectAsState()
+    val recommendedSongs by homeViewModel.recommendedSongs.collectAsState()
     val isBackupLoading by homeViewModel.isBackupLoading.collectAsState()
 
     var songPendingRemoveDownload by remember { mutableStateOf<Song?>(null) }
@@ -315,6 +319,31 @@ fun HomeScreen(
                                     onPlay = { playerViewModel.playSong(item.song, queue = listenAgainSongs.map { it.song }) },
                                     onPinToggle = { homeViewModel.togglePinSong(item.song) },
                                     onRemoveDownload = { songPendingRemoveDownload = item.song }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Section 2b: MADE FOR YOU
+                // Hidden rather than shown empty: with nothing played yet the engine has no taste
+                // to work from, and an empty "Made for you" reads as broken.
+                if (recommendedSongs.size >= MIN_RECOMMENDATIONS_TO_SHOW) {
+                    item {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        SectionTitle(title = "Made for you", icon = Icons.Rounded.AutoAwesome)
+
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            items(recommendedSongs) { song ->
+                                SongCardItem(
+                                    song = song,
+                                    subtitle = "Song • ${song.artist}",
+                                    onPlay = { playerViewModel.playSong(song, queue = recommendedSongs) },
+                                    onPinToggle = { homeViewModel.togglePinSong(song) },
+                                    onRemoveDownload = { songPendingRemoveDownload = song }
                                 )
                             }
                         }
