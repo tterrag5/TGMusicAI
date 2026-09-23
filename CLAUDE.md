@@ -24,6 +24,16 @@ Unit tests live in `app/src/test/java/com/example/tgmusicai/` (one file per feat
 
 There is a Nix flake (`flake.nix`) for the dev environment; not required if Android Studio/JDK 17/SDK 35+ are already set up.
 
+The build runs on **any JDK 17 or newer**. It used to hard-require a JDK 17 *installation* via
+`gradle/gradle-daemon-jvm.properties` (`toolchainVersion=17`) plus a `java { toolchain { ... } }`
+block, which meant `./gradlew` failed outright with *"Cannot find a Java installation ... matching
+languageVersion=17"* in any shell that hadn't run `nix develop` — including a fresh terminal on
+this machine, where only JDK 21 is on `PATH`. Both pins were removed; `compileOptions` and the
+Kotlin `jvmTarget` still pin the emitted bytecode to 17, so output is unchanged. Don't reintroduce
+either pin.
+
+`adb` is not on `PATH` — it lives at `~/Android/Sdk/platform-tools/adb`.
+
 ## Reference docs (read before large changes)
 
 `MD Files/` (gitignored, local-only — not in git) holds detailed internal docs kept as the working reference:
