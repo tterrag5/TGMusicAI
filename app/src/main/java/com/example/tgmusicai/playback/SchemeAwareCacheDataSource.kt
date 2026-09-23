@@ -9,6 +9,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.SimpleCache
+import com.example.tgmusicai.data.youtube.YouTubeExtractor
 
 /**
  * Routes each [open] to the disk-cached HTTP data source for `http(s)://` streams (YouTube audio)
@@ -42,9 +43,19 @@ private class SchemeAwareCacheDataSource(
 
 /** [DataSource.Factory] for [SchemeAwareCacheDataSource] -- see its doc comment. */
 class SchemeAwareCacheDataSourceFactory(context: Context, cache: SimpleCache) : DataSource.Factory {
+    private val httpFactory = DefaultHttpDataSource.Factory()
+        // Must match the User-Agent the stream was resolved and pre-flight-checked with.
+        // YouTube's signed googlevideo URLs answer 206 to that agent and 403 to Media3's default
+        // one, so without this every cloud track fails at playback with
+        // ERROR_CODE_IO_BAD_HTTP_STATUS *after* resolution reported success -- which looks like a
+        // resolution bug and is not one.
+        .setUserAgent(YouTubeExtractor.REALISTIC_USER_AGENT)
+        // googlevideo redirects between its own hosts, sometimes across protocols.
+        .setAllowCrossProtocolRedirects(true)
+
     private val cachedHttpFactory = CacheDataSource.Factory()
         .setCache(cache)
-        .setUpstreamDataSourceFactory(DefaultHttpDataSource.Factory())
+        .setUpstreamDataSourceFactory(httpFactory)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     private val plainFactory = DefaultDataSource.Factory(context)
 
