@@ -24,6 +24,17 @@ data class AiSongTags(
      * (cloud-only tracks are never tagged) or one analyzed before this column existed.
      */
     val audioProfile: String? = null,
+    /**
+     * Comma-separated themes the lyrics are about, from [com.example.tgmusicai.ai.LyricThemes].
+     * Null when the song has no lyrics, or when none cleared the tagging threshold.
+     */
+    val lyricThemes: String? = null,
+    /**
+     * BCP-47 tag of the language the lyrics are in (`en`, `es`, `pt`, ...), or null when it could
+     * not be determined. Never guessed: grouping songs by a wrongly detected language is worse
+     * than not grouping them at all.
+     */
+    val lyricsLanguage: String? = null,
     /** Epoch millis when this row was last (re)computed; used to detect stale analysis after song edits. */
     val computedAt: Long = System.currentTimeMillis()
 )

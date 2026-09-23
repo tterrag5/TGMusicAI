@@ -17,11 +17,15 @@ import kotlinx.coroutines.withContext
 /**
  * Picks songs related to a seed, or to the library as a whole, entirely on the device.
  *
- * Four signals are blended: how similar two songs *sound* (EffNet-Discogs music embeddings), how
- * similar their *lyrics* are (MiniLM embeddings), how often they are actually *played together*
- * (co-occurrence within listening sessions), and plain *metadata* overlap (artist, producer,
- * album). The result is re-ranked so one artist cannot take over the queue, and nudged toward
- * tracks the user has not worn out.
+ * Signals blended: how two songs *sound* (EffNet-Discogs music embeddings), how similar their
+ * *lyrics* read (MiniLM embeddings), what they are *about* (themes tagged from those embeddings),
+ * what *language* they are in, how often they are actually *played together* (co-occurrence within
+ * listening sessions), and plain *metadata* overlap (artist, producer, album). The result is
+ * re-ranked so one artist cannot take over the queue, and nudged toward tracks the user has not
+ * worn out.
+ *
+ * Sound and meaning carry equal weight. An audio model hears a furious song about class and a
+ * furious song about a breakup as near-identical, and a listener rarely agrees.
  *
  * The design and the reasoning behind every weight are written up in
  * `MD Files/RECOMMENDATIONS_IMPLEMENTATION_SPEC.md`. Two points are worth repeating here because
@@ -131,12 +135,23 @@ class RecommendationEngine(
                     decodeProfile(candidateProfile),
                 ).coerceAtLeast(0f)
 
-                val lyrical = cosineOrZero(seedEmbeddings[index], candidateEmbedding)
+                // Cross-language lyric similarity is not trustworthy: the sentence model is
+                // English-centric, so two songs in different languages can score high for
+                // reasons that have nothing to do with meaning. Attenuate rather than zero,
+                // since a translated or bilingual song is a real case.
+                val sameLanguage = sameLanguage(seedProfiles[index], candidateProfile)
+                val languagePenalty = if (sameLanguage == false) CROSS_LANGUAGE_ATTENUATION else 1f
+
+                val lyrical = cosineOrZero(seedEmbeddings[index], candidateEmbedding) * languagePenalty
+                val thematic = themeOverlap(seedProfiles[index], candidateProfile) * languagePenalty
+                val language = if (sameLanguage == true) 1f else 0f
                 val behaviour = cooccurrenceScore(seed.id, candidate.id, cooccurrence)
                 val metadata = metadataAffinity(seed, candidate)
 
                 val combined = W_ACOUSTIC * acoustic +
                     W_LYRICAL * lyrical +
+                    W_THEMATIC * thematic +
+                    W_LANGUAGE * language +
                     W_BEHAVIOUR * behaviour +
                     W_METADATA * metadata
                 if (combined > best) best = combined
@@ -162,6 +177,54 @@ class RecommendationEngine(
         !seed.producer.isNullOrBlank() && candidate.producer.equals(seed.producer, ignoreCase = true) -> 0.8f
         candidate.album.equals(seed.album, ignoreCase = true) && seed.album.isNotBlank() -> 0.6f
         else -> 0f
+    }
+
+    /**
+     * How much two songs are about the same things, as the share of the seed's themes the
+     * candidate also carries.
+     *
+     * This is the signal that makes "another song arguing the same thing" findable. Raw embedding
+     * similarity blends subject with vocabulary, register and imagery all at once, so two songs
+     * can read alike and mean nothing in common. A theme is a statement about what a song is
+     * about, and matching on it is what groups a song about class and work with another one,
+     * however differently the two are written or sung.
+     *
+     * Scaled by the seed's theme count rather than the union, so a candidate about many things
+     * does not dilute a strong match on the few the seed is about.
+     */
+    private fun themeOverlap(
+        seed: com.example.tgmusicai.data.local.entity.AiSongTags?,
+        candidate: com.example.tgmusicai.data.local.entity.AiSongTags?,
+    ): Float {
+        val seedThemes = themesOf(seed)
+        if (seedThemes.isEmpty()) return 0f
+        val candidateThemes = themesOf(candidate)
+        if (candidateThemes.isEmpty()) return 0f
+
+        val shared = seedThemes.count { it in candidateThemes }
+        return shared.toFloat() / seedThemes.size
+    }
+
+    private fun themesOf(tags: com.example.tgmusicai.data.local.entity.AiSongTags?): Set<String> =
+        tags?.lyricThemes
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.toSet()
+            .orEmpty()
+
+    /**
+     * True when both songs' lyrics are in the same language, false when they are in different
+     * ones, and null when either is unknown -- which must not be read as "different", or every
+     * un-analyzed song would be penalized for it.
+     */
+    private fun sameLanguage(
+        seed: com.example.tgmusicai.data.local.entity.AiSongTags?,
+        candidate: com.example.tgmusicai.data.local.entity.AiSongTags?,
+    ): Boolean? {
+        val seedLanguage = seed?.lyricsLanguage?.takeIf { it.isNotBlank() } ?: return null
+        val candidateLanguage = candidate?.lyricsLanguage?.takeIf { it.isNotBlank() } ?: return null
+        return seedLanguage.equals(candidateLanguage, ignoreCase = true)
     }
 
     /** Favours songs the user has not worn out, saturating so a single unplayed track cannot dominate. */
@@ -391,20 +454,36 @@ class RecommendationEngine(
             return sessions
         }
 
-        // Acoustic dominates. It is the only signal that describes the music itself, it is
-        // available for every analyzed local song rather than only those with lyrics, and since it
-        // became a real music embedding (EffNet-Discogs, trained on millions of recordings against
-        // a style taxonomy) rather than a vector of general audio-event scores, it is by some
-        // distance the most informative of the four. Behaviour sits well below it on purpose: with
-        // one user the co-occurrence counts are small, and over-weighting them collapses every
-        // recommendation onto whatever was played most recently. Metadata is kept deliberately
-        // small -- artist matching is what the old implementation did on its own, and leaning on
-        // it just returns the same artist over and over.
-        private const val W_ACOUSTIC = 0.50f
-        private const val W_LYRICAL = 0.15f
-        private const val W_BEHAVIOUR = 0.22f
-        private const val W_METADATA = 0.08f
-        private const val W_NOVELTY = 0.05f
+        // What a song sounds like and what it is about are weighted the same: acoustic is 0.38,
+        // and the three lyric terms together are 0.38 as well. That is deliberate. Two songs can
+        // be acoustically almost identical and be arguing opposite things, and a listener who
+        // plays one song about class and work generally wants another -- which nothing about the
+        // sound, the genre tag or the artist will ever reveal.
+        //
+        // Within the lyric side, raw embedding similarity carries the most because it is the most
+        // general; themes add the sharp, explicit "about the same thing" match that embeddings
+        // blur; language is small because it is a coarse grouping, not a statement of meaning.
+        //
+        // Behaviour sits below both: with one user the co-occurrence counts are small, and
+        // over-weighting them collapses every recommendation onto whatever was played most
+        // recently. Metadata is kept deliberately small -- artist matching is what the old
+        // implementation did on its own, and leaning on it just returns the same artist over.
+        private const val W_ACOUSTIC = 0.38f
+        private const val W_LYRICAL = 0.20f
+        private const val W_THEMATIC = 0.14f
+        private const val W_LANGUAGE = 0.04f
+        private const val W_BEHAVIOUR = 0.16f
+        private const val W_METADATA = 0.05f
+        private const val W_NOVELTY = 0.03f
+
+        /**
+         * What cross-language lyric similarity is multiplied by.
+         *
+         * The sentence-embedding model is English-centric, so comparing lyrics across languages
+         * measures something other than meaning. Attenuating rather than zeroing keeps translated
+         * and bilingual songs reachable.
+         */
+        private const val CROSS_LANGUAGE_ATTENUATION = 0.4f
 
         /** Subtracted from anything played in the last [RECENT_PLAY_WINDOW_MS], to avoid immediate repeats. */
         private const val PENALTY_RECENT = 0.30f

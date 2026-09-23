@@ -22,6 +22,18 @@ class LyricsEmbeddingEngine(private val context: Context) {
         private const val MODEL_ASSET = "ai/minilm_quantized.onnx"
         private const val VOCAB_ASSET = "ai/vocab.txt"
         private const val MAX_SEQ_LEN = 128
+
+        /**
+         * Words per embedding window. Comfortably under [MAX_SEQ_LEN] wordpiece tokens, since
+         * wordpiece splits uncommon words -- which song lyrics are full of -- into several tokens.
+         */
+        private const val WINDOW_WORDS = 70
+
+        /** Overlap between windows, so a phrase crossing a boundary survives whole in one of them. */
+        private const val WINDOW_OVERLAP_WORDS = 15
+
+        /** Cap on windows per song, so a transcript of an hour-long mix cannot dominate analysis. */
+        private const val MAX_WINDOWS = 12
         const val EMBEDDING_DIM = 384
 
         /** Cosine similarity between two embeddings of the same dimension produced by [embed]. Returns 0f on mismatch. */
@@ -64,10 +76,77 @@ class LyricsEmbeddingEngine(private val context: Context) {
         return isAvailable
     }
 
-    /** Embeds [lyricsText] into a 384-dim, L2-normalized sentence embedding. */
+    /**
+     * Embeds [lyricsText] into a 384-dim, L2-normalized embedding covering the whole song.
+     *
+     * The model reads at most [MAX_SEQ_LEN] tokens at a time, which is roughly a single verse, so
+     * long lyrics are split into overlapping windows and their embeddings averaged. Embedding only
+     * the first window -- which is what this used to do -- means a song is represented by its
+     * opening lines, and anything it is actually about that arrives in a later verse, a bridge or
+     * a chorus payoff simply is not in the vector.
+     *
+     * Windows overlap so a phrase spanning a boundary is whole in at least one of them.
+     */
     fun embed(lyricsText: String): AiModelResult<FloatArray> {
         if (lyricsText.isBlank()) return AiModelResult.Unavailable("blank lyrics text")
         if (!ensureInitialized()) return AiModelResult.Unavailable("model unavailable")
+
+        val windows = windowsOf(lyricsText)
+        if (windows.isEmpty()) return AiModelResult.Unavailable("blank lyrics text")
+
+        val pooled = FloatArray(EMBEDDING_DIM)
+        var embedded = 0
+        for (window in windows) {
+            when (val result = embedWindow(window)) {
+                is AiModelResult.Success -> {
+                    for (i in 0 until EMBEDDING_DIM) pooled[i] += result.value[i]
+                    embedded++
+                }
+                // One bad window should not lose the whole song; the rest still describe it.
+                is AiModelResult.Unavailable -> Log.d(TAG, "Skipped a lyrics window: ${result.reason}")
+                is AiModelResult.Error -> Log.w(TAG, "Skipped a lyrics window", result.throwable)
+            }
+        }
+        if (embedded == 0) return AiModelResult.Unavailable("no lyrics window could be embedded")
+
+        for (i in pooled.indices) pooled[i] /= embedded
+        return AiModelResult.Success(l2Normalize(pooled))
+    }
+
+    /**
+     * Splits [text] into overlapping word windows sized to fit [MAX_SEQ_LEN] wordpiece tokens.
+     *
+     * Words rather than tokens because the tokenizer exposes no streaming interface, and the
+     * budget is deliberately conservative: wordpiece splits unusual words into several tokens, so
+     * assuming fewer words per window keeps the tail of a window from being silently truncated.
+     */
+    private fun windowsOf(text: String): List<String> {
+        val words = text.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (words.isEmpty()) return emptyList()
+        if (words.size <= WINDOW_WORDS) return listOf(text)
+
+        val windows = mutableListOf<String>()
+        var start = 0
+        while (start < words.size && windows.size < MAX_WINDOWS) {
+            val end = minOf(start + WINDOW_WORDS, words.size)
+            windows.add(words.subList(start, end).joinToString(" "))
+            if (end == words.size) break
+            start += WINDOW_WORDS - WINDOW_OVERLAP_WORDS
+        }
+        return windows
+    }
+
+    private fun l2Normalize(vector: FloatArray): FloatArray {
+        var sum = 0.0
+        for (v in vector) sum += v.toDouble() * v
+        val norm = kotlin.math.sqrt(sum).toFloat()
+        if (norm <= 0f || !norm.isFinite()) return vector
+        for (i in vector.indices) vector[i] /= norm
+        return vector
+    }
+
+    /** Embeds one window that already fits the model's token budget. */
+    private fun embedWindow(lyricsText: String): AiModelResult<FloatArray> {
         val ortSession = session ?: return AiModelResult.Unavailable("model unavailable")
         val wordPieceTokenizer = tokenizer ?: return AiModelResult.Unavailable("tokenizer unavailable")
 

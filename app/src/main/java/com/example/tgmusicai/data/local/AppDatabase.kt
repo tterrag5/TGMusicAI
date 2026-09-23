@@ -46,7 +46,7 @@ import com.example.tgmusicai.data.local.entity.SongStats
         AiSongTags::class,
         ListeningHistory::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -186,6 +186,20 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Adds the lyric theme and language columns to `ai_song_tags`.
+         *
+         * Both are left null for existing rows and filled in by the next backfill, for the same
+         * reason the acoustic profile was: producing them means re-running the embedding model
+         * over every song's lyrics, which does not belong inside a migration.
+         */
+        private val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ai_song_tags ADD COLUMN lyricThemes TEXT")
+                db.execSQL("ALTER TABLE ai_song_tags ADD COLUMN lyricsLanguage TEXT")
+            }
+        }
+
+        /**
          * Returns the app-wide singleton [AppDatabase], creating it on first call.
          * Double-checked locking (`synchronized` + null check twice) avoids building the
          * database twice if two threads race to call this before [INSTANCE] is set.
@@ -203,7 +217,7 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 .addMigrations(
                     MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                    MIGRATION_11_12, MIGRATION_12_13,
+                    MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
                 )
                 .fallbackToDestructiveMigration()
                 .build()

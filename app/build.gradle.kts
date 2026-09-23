@@ -100,6 +100,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.core)
     implementation(libs.logging.interceptor)
     implementation(libs.mlkit.translate)
+    implementation(libs.mlkit.language.id)
     implementation(libs.material)
     implementation(libs.moshi.kotlin)
     implementation(libs.okhttp)

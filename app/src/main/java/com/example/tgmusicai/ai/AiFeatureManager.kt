@@ -30,6 +30,7 @@ class AiFeatureManager(
     private val taggingEngine by lazy { SongTaggingEngine(appContext) }
     private val embeddingEngine by lazy { LyricsEmbeddingEngine(appContext) }
     private val musicEmbeddingEngine by lazy { MusicEmbeddingEngine(appContext) }
+    private val lyricSemanticsEngine by lazy { LyricSemanticsEngine(embeddingEngine) }
 
     data class AnalysisOutcome(val tags: List<String>, val hasLyricsEmbedding: Boolean)
 
@@ -93,6 +94,22 @@ class AiFeatureManager(
             null
         }
 
+        // What the lyrics are about, and what language they are in. Both come from the embedding
+        // that was just computed, so tagging costs a few dot products rather than another model.
+        val lyricThemes = try {
+            embedding?.let { lyricSemanticsEngine.themesFor(it) }.orEmpty()
+        } catch (e: Throwable) {
+            Log.e(TAG, "Theme tagging failed for song ${song.id} -- feature stays up for other songs", e)
+            emptyList()
+        }
+
+        val lyricsLanguage = try {
+            song.lyrics?.takeIf { it.isNotBlank() }?.let { lyricSemanticsEngine.languageOf(it) }
+        } catch (e: Throwable) {
+            Log.e(TAG, "Language identification failed for song ${song.id}", e)
+            null
+        }
+
         try {
             if (tags.isNotEmpty() || embedding != null || audioProfile != null) {
                 aiSongTagsDao.insertOrUpdate(
@@ -100,7 +117,9 @@ class AiFeatureManager(
                         songId = song.id,
                         tags = tags.takeIf { it.isNotEmpty() }?.joinToString(","),
                         lyricsEmbedding = embedding?.joinToString(",") { it.toString() },
-                        audioProfile = audioProfile
+                        audioProfile = audioProfile,
+                        lyricThemes = lyricThemes.takeIf { it.isNotEmpty() }?.joinToString(","),
+                        lyricsLanguage = lyricsLanguage
                     )
                 )
             }
@@ -128,7 +147,13 @@ class AiFeatureManager(
             val staleProfile = existing != null &&
                 storedWidth != MusicEmbeddingEngine.EMBEDDING_DIM &&
                 localFilePath(song.mediaUri) != null
-            existing != null && !staleProfile
+            // A row analyzed before lyric themes existed is re-run too, but only when the song has
+            // lyrics to read -- an instrumental will never have themes and must not be retried on
+            // every pass.
+            val missingLyricAnalysis = existing != null &&
+                existing.lyricThemes.isNullOrBlank() &&
+                !song.lyrics.isNullOrBlank()
+            existing != null && !staleProfile && !missingLyricAnalysis
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to check existing AI tags for song ${song.id}, skipping to be safe", e)
             true
