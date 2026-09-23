@@ -17,7 +17,7 @@ import kotlinx.coroutines.withContext
 /**
  * Picks songs related to a seed, or to the library as a whole, entirely on the device.
  *
- * Four signals are blended: how similar two songs *sound* (YAMNet class-score profiles), how
+ * Four signals are blended: how similar two songs *sound* (EffNet-Discogs music embeddings), how
  * similar their *lyrics* are (MiniLM embeddings), how often they are actually *played together*
  * (co-occurrence within listening sessions), and plain *metadata* overlap (artist, producer,
  * album). The result is re-ranked so one artist cannot take over the queue, and nudged toward
@@ -30,8 +30,9 @@ import kotlinx.coroutines.withContext
  * - **There is only one user**, so the collaborative filtering that drives commercial
  *   recommenders has nothing to work with. Listening *sessions* stand in for users instead, which
  *   is why co-occurrence is measured per session rather than per play.
- * - **No new model ships for this.** The acoustic profile is a by-product of the tagging pass that
- *   already runs, so the strongest signal here costs one nullable column and no extra inference.
+ * - **The acoustic signal is the one that carries the feature.** It is the only input that
+ *   describes the music rather than its paperwork or its play count, which is why it holds half
+ *   the weight and why it is worth a dedicated model.
  *
  * Every signal degrades to zero independently. A song with no analysis, no lyrics and no history
  * still gets scored and still comes back -- the engine never returns an empty list for a non-empty
@@ -390,14 +391,19 @@ class RecommendationEngine(
             return sessions
         }
 
-        // Acoustic outweighs lyrical because every analyzed local song has a profile, while only a
-        // minority have lyrics to embed. Behaviour sits below acoustic on purpose: with one user
-        // the co-occurrence counts are small, and over-weighting them collapses every
-        // recommendation onto whatever was played most recently.
-        private const val W_ACOUSTIC = 0.35f
-        private const val W_LYRICAL = 0.20f
-        private const val W_BEHAVIOUR = 0.25f
-        private const val W_METADATA = 0.15f
+        // Acoustic dominates. It is the only signal that describes the music itself, it is
+        // available for every analyzed local song rather than only those with lyrics, and since it
+        // became a real music embedding (EffNet-Discogs, trained on millions of recordings against
+        // a style taxonomy) rather than a vector of general audio-event scores, it is by some
+        // distance the most informative of the four. Behaviour sits well below it on purpose: with
+        // one user the co-occurrence counts are small, and over-weighting them collapses every
+        // recommendation onto whatever was played most recently. Metadata is kept deliberately
+        // small -- artist matching is what the old implementation did on its own, and leaning on
+        // it just returns the same artist over and over.
+        private const val W_ACOUSTIC = 0.50f
+        private const val W_LYRICAL = 0.15f
+        private const val W_BEHAVIOUR = 0.22f
+        private const val W_METADATA = 0.08f
         private const val W_NOVELTY = 0.05f
 
         /** Subtracted from anything played in the last [RECENT_PLAY_WINDOW_MS], to avoid immediate repeats. */

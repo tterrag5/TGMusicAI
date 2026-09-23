@@ -29,6 +29,7 @@ class AiFeatureManager(
 
     private val taggingEngine by lazy { SongTaggingEngine(appContext) }
     private val embeddingEngine by lazy { LyricsEmbeddingEngine(appContext) }
+    private val musicEmbeddingEngine by lazy { MusicEmbeddingEngine(appContext) }
 
     data class AnalysisOutcome(val tags: List<String>, val hasLyricsEmbedding: Boolean)
 
@@ -38,28 +39,47 @@ class AiFeatureManager(
      * failure. Safe to call from a UI action (runs on its own IO scope) or a background job alike.
      */
     suspend fun analyzeSong(song: Song): AnalysisOutcome = withContext(scope.coroutineContext) {
-        val profile = try {
-            localFilePath(song.mediaUri)?.let { path ->
-                when (val result = taggingEngine.profileAudioFile(path)) {
+        val localPath = localFilePath(song.mediaUri)
+
+        val tags = try {
+            localPath?.let { path ->
+                when (val result = taggingEngine.tagAudioFile(path)) {
                     is AiModelResult.Success -> result.value
                     is AiModelResult.Unavailable -> {
                         Log.d(TAG, "Song tagging unavailable for song ${song.id}: ${result.reason}")
-                        null
+                        emptyList()
                     }
                     is AiModelResult.Error -> {
                         Log.e(TAG, "Song tagging failed for song ${song.id}", result.throwable)
+                        emptyList()
+                    }
+                }
+            } ?: emptyList()
+        } catch (e: Throwable) {
+            Log.e(TAG, "Unexpected error tagging song ${song.id} -- feature stays up for other songs", e)
+            emptyList()
+        }
+
+        // The acoustic fingerprint recommendations rank on. A separate model from the tagger:
+        // YAMNet names sounds, EffNet-Discogs places music in a musical space.
+        val audioProfile = try {
+            localPath?.let { path ->
+                when (val result = musicEmbeddingEngine.embedAudioFile(path)) {
+                    is AiModelResult.Success -> AudioProfileCodec.encode(result.value)
+                    is AiModelResult.Unavailable -> {
+                        Log.d(TAG, "Music embedding unavailable for song ${song.id}: ${result.reason}")
+                        null
+                    }
+                    is AiModelResult.Error -> {
+                        Log.e(TAG, "Music embedding failed for song ${song.id}", result.throwable)
                         null
                     }
                 }
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "Unexpected error tagging song ${song.id} -- feature stays up for other songs", e)
+            Log.e(TAG, "Unexpected error embedding song ${song.id} -- feature stays up for other songs", e)
             null
         }
-        val tags = profile?.tags ?: emptyList()
-        // The class-score vector the tags were picked from doubles as an acoustic fingerprint for
-        // recommendations. It used to be discarded once the eight labels were read off it.
-        val audioProfile = profile?.scores?.let(AudioProfileCodec::encode)
 
         val embedding = try {
             song.lyrics?.takeIf { it.isNotBlank() }?.let { lyrics ->
@@ -99,13 +119,16 @@ class AiFeatureManager(
     suspend fun analyzeSongIfNeeded(song: Song): AnalysisOutcome? = withContext(scope.coroutineContext) {
         val alreadyAnalyzed = try {
             val existing = aiSongTagsDao.getForSong(song.id)
-            // A row that predates the acoustic profile column is re-analyzed, but only when there
-            // is a local file to analyze -- otherwise every cloud-only song would be retried on
-            // every backfill pass, forever, and never gain a profile.
-            val missingProfile = existing != null &&
-                existing.audioProfile.isNullOrBlank() &&
+            // A row is re-analyzed when its acoustic profile is missing or was written by an older
+            // model, but only when there is a local file to analyze -- otherwise every cloud-only
+            // song would be retried on every backfill pass, forever, and never gain a profile.
+            // The dimension check is what lets a model change heal itself: profiles of the wrong
+            // width contribute nothing to similarity, and this replaces them on the next backfill.
+            val storedWidth = AudioProfileCodec.decode(existing?.audioProfile)?.size
+            val staleProfile = existing != null &&
+                storedWidth != MusicEmbeddingEngine.EMBEDDING_DIM &&
                 localFilePath(song.mediaUri) != null
-            existing != null && !missingProfile
+            existing != null && !staleProfile
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to check existing AI tags for song ${song.id}, skipping to be safe", e)
             true

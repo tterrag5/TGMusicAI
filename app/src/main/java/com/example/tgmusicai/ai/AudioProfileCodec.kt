@@ -4,22 +4,26 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * Packs a song's acoustic profile -- the mean-pooled YAMNet class-score vector produced by
- * [SongTaggingEngine] -- into a short string for the `ai_song_tags.audioProfile` column, and back.
+ * Packs a song's acoustic profile -- the 1280-dimension music embedding produced by
+ * [MusicEmbeddingEngine] -- into a string for the `ai_song_tags.audioProfile` column, and back.
  *
  * The vector is L2-normalized, quantized to signed 8-bit, and written as hex, which costs about
- * 1KB per song against roughly 5KB for the same numbers written as comma-separated floats. Across
- * a few thousand songs that is the difference between two megabytes and ten.
+ * 2.5KB per song against roughly 13KB for the same numbers written as comma-separated floats.
+ * Across a few thousand songs that is the difference between five megabytes and twenty-five.
  *
  * Hex rather than Base64 because `android.util.Base64` returns stubbed values under the project's
  * `unitTests.isReturnDefaultValues = true`, which would make the codec untestable on the JVM, and
- * `java.util.Base64` needs API 26 against this module's `minSdk = 24`. A third of a kilobyte per
- * song is a fair price for a codec that is pure Kotlin and fully unit-testable.
+ * `java.util.Base64` needs API 26 against this module's `minSdk = 24`. The extra third over
+ * Base64 is a fair price for a codec that is pure Kotlin and fully unit-testable.
  *
- * Normalizing before quantizing is what makes 8 bits safe here. Raw AudioSet mean scores bunch up
- * near zero, so quantizing them directly would flatten nearly every component to 0 and destroy the
- * ranking the profile exists to support. After normalization the components use the available
- * range, and cosine similarity does not care about the overall scale that normalization removes.
+ * Normalizing before quantizing is what makes 8 bits safe here. Embedding components bunch up near
+ * zero, so quantizing them directly would flatten nearly every one to 0 and destroy the ranking
+ * the profile exists to support. After normalization the components use the available range, and
+ * cosine similarity does not care about the overall scale that normalization removes.
+ *
+ * Deliberately dimension-agnostic: [cosineSimilarity] treats two profiles of different widths as
+ * no signal rather than an error, so swapping the model out later degrades those songs to
+ * "unanalyzed" until the next backfill instead of breaking anything.
  *
  * Pure Kotlin with no Android dependencies, so it is unit-testable on the JVM.
  */
