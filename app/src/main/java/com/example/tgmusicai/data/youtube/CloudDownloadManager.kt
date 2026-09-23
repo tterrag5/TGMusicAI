@@ -504,7 +504,8 @@ class CloudDownloadManager(
                         mediaUri = localUri,
                         producer = cleaned.producer,
                         youtubeId = videoId,
-                        isDownloaded = true
+                        isDownloaded = true,
+                        folderPath = outputFile.parent
                     )
 
                     val existingByUri = songDao.getSongByUri(localUri)
@@ -521,7 +522,8 @@ class CloudDownloadManager(
                                 producer = cleaned.producer,
                                 mediaUri = localUri,
                                 youtubeId = videoId,
-                                isDownloaded = true
+                                isDownloaded = true,
+                                folderPath = outputFile.parent
                             )
                         )
                         existingPlaceholder.id

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MoreVert
@@ -43,6 +44,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
@@ -68,6 +70,7 @@ import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.ui.components.AddToPlaylistDialog
 import com.example.tgmusicai.ui.components.SongGridItem
 import com.example.tgmusicai.ui.components.YouTubeSearchResultItem
+import com.example.tgmusicai.data.repository.MusicFolderTree
 import com.example.tgmusicai.ui.components.SongItem
 import com.example.tgmusicai.ui.components.TagEditorDialog
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
@@ -107,6 +110,9 @@ fun LibraryScreen(
     val cloudResults by libraryViewModel.cloudResults.collectAsState()
     val isSearchingCloud by libraryViewModel.isSearchingCloud.collectAsState()
     val songForTagEdit by libraryViewModel.songForTagEdit.collectAsState()
+    val folderBrowsingEnabled by libraryViewModel.folderBrowsingEnabled.collectAsState()
+    val currentFolder by libraryViewModel.currentFolder.collectAsState()
+    val canNavigateUpFolder by libraryViewModel.canNavigateUp.collectAsState()
     val tagWriteConsentRequest by libraryViewModel.tagWriteConsentRequest.collectAsState()
 
     val context = LocalContext.current
@@ -218,11 +224,25 @@ fun LibraryScreen(
                     }
                 },
                     actions = {
-                        IconButton(onClick = libraryViewModel::toggleGridView) {
+                        IconButton(
+                            onClick = { libraryViewModel.setFolderBrowsingEnabled(!folderBrowsingEnabled) }
+                        ) {
                             Icon(
-                                imageVector = if (isGridView) Icons.AutoMirrored.Rounded.ViewList else Icons.Rounded.GridView,
-                                contentDescription = if (isGridView) "Switch to list view" else "Switch to grid view"
+                                imageVector = if (folderBrowsingEnabled) Icons.Rounded.LibraryMusic else Icons.Rounded.Folder,
+                                contentDescription = if (folderBrowsingEnabled) {
+                                    "Show all songs"
+                                } else {
+                                    "Browse by folder"
+                                }
                             )
+                        }
+                        if (!folderBrowsingEnabled) {
+                            IconButton(onClick = libraryViewModel::toggleGridView) {
+                                Icon(
+                                    imageVector = if (isGridView) Icons.AutoMirrored.Rounded.ViewList else Icons.Rounded.GridView,
+                                    contentDescription = if (isGridView) "Switch to list view" else "Switch to grid view"
+                                )
+                            }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -312,7 +332,29 @@ fun LibraryScreen(
             // While searching, local and cloud results share one scrolling list so YouTube hits
             // read as a continuation of the library rather than a separate place to go. Browsing
             // (no query) keeps the grid/list layout.
-            if (searchQuery.isNotBlank() && !downloadedOnly) {
+            if (folderBrowsingEnabled) {
+                FolderBrowser(
+                    folder = currentFolder,
+                    canNavigateUp = canNavigateUpFolder,
+                    currentSongId = currentSong?.id,
+                    onNavigateUp = libraryViewModel::navigateUpFolder,
+                    onOpenFolder = libraryViewModel::openFolder,
+                    onPlaySong = { song ->
+                        playerViewModel.playSong(
+                            song = song,
+                            queue = libraryViewModel.songsInFolderRecursively(currentFolder)
+                        )
+                    },
+                    onAddToPlaylist = libraryViewModel::openAddToPlaylistDialog,
+                    onEditTags = { song ->
+                        if (libraryViewModel.canEditTags(song)) libraryViewModel.openTagEditor(song)
+                    },
+                    onPlayFolder = { folder ->
+                        val queue = libraryViewModel.songsInFolderRecursively(folder)
+                        queue.firstOrNull()?.let { playerViewModel.playSong(song = it, queue = queue) }
+                    }
+                )
+            } else if (searchQuery.isNotBlank() && !downloadedOnly) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 96.dp)
@@ -552,6 +594,127 @@ fun LibraryScreenEmptyPreview() {
     TGMusicAITheme {
         Box(modifier = Modifier.fillMaxSize()) {
             Text("Library Preview")
+        }
+    }
+}
+
+/**
+ * Browses the library the way it is laid out on disk: subfolders first, then the tracks sitting
+ * directly in the folder that is open.
+ *
+ * Useful for a library organised by folder rather than by tags -- bootlegs, live sets, anything
+ * ripped without clean metadata -- where "which folder did I put it in" is the only thing the user
+ * actually remembers about a track.
+ */
+@Composable
+private fun FolderBrowser(
+    folder: MusicFolderTree.FolderNode,
+    canNavigateUp: Boolean,
+    currentSongId: Long?,
+    onNavigateUp: () -> Unit,
+    onOpenFolder: (String) -> Unit,
+    onPlaySong: (com.example.tgmusicai.data.local.entity.Song) -> Unit,
+    onAddToPlaylist: (com.example.tgmusicai.data.local.entity.Song) -> Unit,
+    onEditTags: (com.example.tgmusicai.data.local.entity.Song) -> Unit,
+    onPlayFolder: (MusicFolderTree.FolderNode) -> Unit
+) {
+    if (folder.subfolders.isEmpty() && folder.songs.isEmpty()) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                // The folder of a track is recorded when it is scanned, and filled in for older
+                // tracks by a background pass, so an empty tree usually means that pass has not
+                // finished rather than that there is nothing on the device.
+                text = "No folders yet. Local tracks appear here once they've been scanned.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(32.dp)
+            )
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 96.dp)
+    ) {
+        item {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                if (canNavigateUp) {
+                    IconButton(onClick = onNavigateUp) {
+                        Icon(
+                            Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = "Go to the parent folder"
+                        )
+                    }
+                }
+                Text(
+                    text = folder.name.ifBlank { "All folders" },
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (folder.totalSongCount > 0) {
+                    TextButton(onClick = { onPlayFolder(folder) }) {
+                        Text("Play all")
+                    }
+                }
+            }
+        }
+
+        items(folder.subfolders, key = { "folder_${it.path}" }) { child ->
+            Surface(
+                onClick = { onOpenFolder(child.path) },
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 14.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Folder,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.size(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = child.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            // Counts everything beneath, not just what sits directly inside --
+                            // a folder of subfolders would otherwise read as empty.
+                            text = "${child.totalSongCount} ${if (child.totalSongCount == 1) "song" else "songs"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
+        items(folder.songs, key = { "song_${it.id}" }) { song ->
+            SongItem(
+                song = song,
+                isPlaying = currentSongId == song.id,
+                onClick = { onPlaySong(song) },
+                onAddToPlaylistClicked = { onAddToPlaylist(song) },
+                onEditTagsClicked = { onEditTags(song) }
+            )
         }
     }
 }

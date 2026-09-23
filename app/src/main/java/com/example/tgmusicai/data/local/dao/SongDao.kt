@@ -145,6 +145,18 @@ interface SongDao {
     @Query("SELECT COUNT(*) FROM songs WHERE replay_gain_db IS NULL AND is_downloaded = 1")
     fun countSongsMissingReplayGain(): Flow<Int>
 
+    /** Records which directory a track's file lives in, for the folder browser. */
+    @Query("UPDATE songs SET folder_path = :folderPath WHERE id = :id")
+    suspend fun updateFolderPath(id: Long, folderPath: String?)
+
+    /** Local tracks whose folder is not known yet, for the background backfill pass. */
+    @Query("SELECT * FROM songs WHERE folder_path IS NULL AND is_downloaded = 1 LIMIT :limit")
+    suspend fun getSongsMissingFolderPath(limit: Int): List<Song>
+
+    /** Every known folder with the number of tracks in it, for rendering the folder tree. */
+    @Query("SELECT * FROM songs WHERE folder_path IS NOT NULL AND is_downloaded = 1 ORDER BY title ASC")
+    fun getSongsWithFolder(): Flow<List<Song>>
+
     /** Applies an in-app tag edit to the library row backing the file that was just rewritten. */
     @Query(
         "UPDATE songs SET title = :title, artist = :artist, album = :album, producer = :producer WHERE id = :id"

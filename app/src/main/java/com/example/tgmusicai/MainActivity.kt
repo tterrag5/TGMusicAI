@@ -28,6 +28,7 @@ import com.example.tgmusicai.ai.AiFeatureManager
 import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.FolderPathBackfill
 import com.example.tgmusicai.data.repository.TagEditorManager
 import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.playback.MediaControllerManager
@@ -101,6 +102,9 @@ class MainActivity : ComponentActivity() {
         // never affect app startup even if the AI deps/models turn out to be broken on a device.
         val aiFeatureManager = AiFeatureManager(this, database.aiSongTagsDao())
         val tagEditorManager = TagEditorManager(this, database.songDao())
+        // Fills in where each already-known track lives on disk, so the Library's folder browser
+        // works for a library that predates the column rather than only for newly scanned tracks.
+        val folderPathBackfill = FolderPathBackfill(this, database.songDao())
 
         mediaControllerManager = MediaControllerManager(this)
 
@@ -241,6 +245,10 @@ class MainActivity : ComponentActivity() {
                         LaunchedEffect(Unit) {
                             lifecycleScope.launch {
                                 MediaScanner.scanMediaStore(this@MainActivity, database.songDao())
+                                // Runs after the scan, not alongside it: the scan is what gives
+                                // newly-found tracks their folder, so starting the backfill first
+                                // would just mean two passes over the same rows.
+                                folderPathBackfill.runToCompletion()
                             }
                         }
 

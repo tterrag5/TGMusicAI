@@ -220,6 +220,18 @@ private class FakeTestSongDao : SongDao {
         val index = songs.indexOfFirst { it.id == id }
         if (index >= 0) songs[index] = songs[index].copy(replayGainDb = gainDb, replayPeak = peak)
     }
+
+    override suspend fun updateFolderPath(id: Long, folderPath: String?) {
+        val index = songs.indexOfFirst { it.id == id }
+        if (index >= 0) songs[index] = songs[index].copy(folderPath = folderPath)
+    }
+
+    override suspend fun getSongsMissingFolderPath(limit: Int): List<Song> =
+        songs.filter { it.folderPath == null && it.isDownloaded }.take(limit)
+
+    override fun getSongsWithFolder(): Flow<List<Song>> =
+        flowOf(songs.filter { it.folderPath != null && it.isDownloaded })
+
     override suspend fun getSongsMissingReplayGain(limit: Int): List<Song> =
         songs.filter { it.replayGainDb == null && it.isDownloaded }.take(limit)
     override fun countSongsMissingReplayGain(): Flow<Int> =

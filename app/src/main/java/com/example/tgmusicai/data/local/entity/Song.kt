@@ -96,5 +96,17 @@ data class Song(
      * fixed ceiling.
      */
     @ColumnInfo(name = "replay_peak")
-    val replayPeak: Float? = null
+    val replayPeak: Float? = null,
+
+    /**
+     * Directory the audio file lives in, for browsing the library by folder.
+     *
+     * Stored rather than derived on demand because most local tracks are addressed by a
+     * `content://` MediaStore URI, and recovering a path from one of those costs a content-provider
+     * query per song -- unworkable when building a folder tree for a whole library. Null for
+     * cloud-only tracks, which have no folder, and for rows added before this column existed until
+     * the backfill fills them in.
+     */
+    @ColumnInfo(name = "folder_path")
+    val folderPath: String? = null
 )

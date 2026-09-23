@@ -13,6 +13,7 @@ import com.example.tgmusicai.data.local.AudioTagIo
 import com.example.tgmusicai.data.repository.TagEditorManager
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
 import com.example.tgmusicai.data.youtube.YouTubeSearchResult
+import com.example.tgmusicai.data.repository.MusicFolderTree
 import com.example.tgmusicai.data.repository.MusicRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -320,6 +322,71 @@ class LibraryViewModel(
             appPreferences?.setLibraryGridView(!isGridView.value)
         }
     }
+
+    // --- Folder browsing ---
+
+    /**
+     * Whether the library is showing folders rather than a flat song list. Deliberately not
+     * persisted: it is a way of looking for something right now, not a standing preference like
+     * grid-vs-list, and reopening the app into a half-navigated folder tree is disorienting.
+     */
+    private val _folderBrowsingEnabled = MutableStateFlow(false)
+    val folderBrowsingEnabled: StateFlow<Boolean> = _folderBrowsingEnabled.asStateFlow()
+
+    /** Path of the folder currently open, or null while at the top of the tree. */
+    private val _currentFolderPath = MutableStateFlow<String?>(null)
+
+    /**
+     * The whole folder tree, rebuilt whenever the library changes. Cheap enough to rebuild wholesale
+     * -- it is a grouping pass over rows already in memory -- and doing so means a newly scanned
+     * track appears in its folder without any invalidation logic.
+     */
+    private val folderTree: StateFlow<MusicFolderTree.FolderNode> = repository.allSongs
+        .map { MusicFolderTree.build(it) }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = MusicFolderTree.FolderNode("", "", emptyList(), emptyList())
+        )
+
+    /**
+     * The folder being shown. Resolved against the freshly built tree on every change rather than
+     * held as an object, so a rescan that replaces the tree cannot strand the browser on a node
+     * that no longer exists.
+     */
+    val currentFolder: StateFlow<MusicFolderTree.FolderNode> =
+        combine(folderTree, _currentFolderPath) { tree, path ->
+            if (path == null) tree else MusicFolderTree.findNode(tree, path) ?: tree
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = MusicFolderTree.FolderNode("", "", emptyList(), emptyList())
+        )
+
+    /** True when there is a parent folder to go back to. */
+    val canNavigateUp: StateFlow<Boolean> = combine(folderTree, _currentFolderPath) { tree, path ->
+        path != null && path != tree.path
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    fun setFolderBrowsingEnabled(enabled: Boolean) {
+        _folderBrowsingEnabled.value = enabled
+        if (!enabled) _currentFolderPath.value = null
+    }
+
+    fun openFolder(path: String) {
+        _currentFolderPath.value = path
+    }
+
+    /** Steps up one directory, stopping at the top of the tree rather than walking off it. */
+    fun navigateUpFolder() {
+        val current = _currentFolderPath.value ?: return
+        val parent = current.substringBeforeLast('/', missingDelimiterValue = "")
+        _currentFolderPath.value = parent.takeIf { it.isNotEmpty() && it != current }
+    }
+
+    /** Every track in the open folder and everything below it, in the order they are displayed. */
+    fun songsInFolderRecursively(node: MusicFolderTree.FolderNode): List<Song> =
+        node.songs + node.subfolders.flatMap { songsInFolderRecursively(it) }
 
     // Multi-select: a non-empty set means selection mode is active. Long-pressing a song starts
     // it; tapping any song while active toggles that song instead of playing it.

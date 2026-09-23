@@ -34,6 +34,11 @@ import com.example.tgmusicai.data.local.entity.SongStats
  * Stats screen's total-listening-time hero metric and weekly listening trend chart.
  * Version = 11 added alarms.forceMaxVolume/volumeRampUp -- these used to be one global setting
  * pair in AppPreferences applied to every alarm; now each alarm picks its own.
+ * Version = 12 added ai_song_tags.audioProfile, the acoustic fingerprint recommendations rank on.
+ * Version = 13 added playlists.position so playlists keep a user-chosen order.
+ * Version = 14 added ai_song_tags.lyricThemes/lyricsLanguage.
+ * Version = 15 added songs.replay_gain_db/replay_peak, backing per-track volume normalization.
+ * Version = 16 added songs.folder_path, backing the library's folder browser.
  */
 @Database(
     entities = [
@@ -46,7 +51,7 @@ import com.example.tgmusicai.data.local.entity.SongStats
         AiSongTags::class,
         ListeningHistory::class
     ],
-    version = 15,
+    version = 16,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -216,6 +221,20 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Adds the folder column to `songs`, backing the library's folder browser.
+         *
+         * Left null for existing rows and filled in by a background pass rather than here: the
+         * value for a MediaStore-backed track can only be recovered by querying the content
+         * provider once per song, which is not something a migration should be doing while the
+         * user waits for the app to open.
+         */
+        private val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE songs ADD COLUMN folder_path TEXT")
+            }
+        }
+
+        /**
          * Returns the app-wide singleton [AppDatabase], creating it on first call.
          * Double-checked locking (`synchronized` + null check twice) avoids building the
          * database twice if two threads race to call this before [INSTANCE] is set.
@@ -233,7 +252,7 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 .addMigrations(
                     MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                    MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15,
+                    MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
                 )
                 .fallbackToDestructiveMigration()
                 .build()

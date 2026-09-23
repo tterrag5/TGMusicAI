@@ -118,7 +118,11 @@ object MediaScanner {
                                 mediaUri = uri.toString(),
                                 producer = cleaned.producer,
                                 replayGainDb = replayGain?.trackGainDb,
-                                replayPeak = replayGain?.trackPeak
+                                replayPeak = replayGain?.trackPeak,
+                                // Recorded now, while the real path is in hand from MediaStore's
+                                // DATA column. Recovering it later from the content:// URI costs
+                                // a provider query per song.
+                                folderPath = path?.let { java.io.File(it).parent }
                             )
                         )
                         Log.d(TAG, "Added song: $title")
