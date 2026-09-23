@@ -6,4 +6,6 @@
 <resources>
     <!-- Shown under the home-screen launcher icon and as the default app title. -->
     <string name="app_name">TGMusic</string>
+    <!-- Shown in the launcher's widget picker, so it has to live here rather than in Compose. -->
+    <string name="widget_description">Control playback and see what\'s playing.</string>
 </resources>

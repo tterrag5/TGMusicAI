@@ -32,6 +32,8 @@ import com.example.tgmusicai.data.local.entity.ListeningHistory
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.MusicRepository
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.example.tgmusicai.widget.NowPlayingWidgetState
+import com.example.tgmusicai.widget.refreshNowPlayingWidgets
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
@@ -255,6 +257,7 @@ class PlaybackService : MediaLibraryService() {
                         // error count left over from an earlier unrelated skip sequence.
                         if (isPlaying) consecutivePlaybackErrors = 0
                         if (isPlaying) startTelemetryTicker(this@apply) else stopTelemetryTicker()
+                        publishWidgetState(currentMediaItem, isPlaying)
                     }
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
@@ -280,6 +283,7 @@ class PlaybackService : MediaLibraryService() {
                         maybeExtendQueueForAutoplay(this@apply)
                         resetListenTracking(mediaItem)
                         applyReplayGain(mediaItem)
+                        publishWidgetState(mediaItem, isPlaying)
                         updateCustomLayout()
                     }
 
@@ -582,6 +586,36 @@ class PlaybackService : MediaLibraryService() {
             trackedSongId = songId
             database.songStatsDao().addListenTime(songId, ms)
             database.listeningHistoryDao().insert(ListeningHistory(songId = songId, durationMs = ms))
+        }
+    }
+
+    /**
+     * Mirrors what is playing into the snapshot the home-screen widget renders from, then asks
+     * every placed widget to redraw.
+     *
+     * The widget lives in the launcher's process and cannot see the player, so this push is the
+     * only thing that keeps it current. Failures are swallowed: a widget that shows a stale track
+     * is a far smaller problem than one that takes playback down with it.
+     */
+    private fun publishWidgetState(mediaItem: MediaItem?, isPlaying: Boolean) {
+        serviceScope.launch {
+            try {
+                val metadata = mediaItem?.mediaMetadata
+                NowPlayingWidgetState.write(
+                    context = applicationContext,
+                    title = metadata?.title?.toString(),
+                    artist = metadata?.artist?.toString(),
+                    // The raw stored artwork URI, not the FileProvider one minted for Android Auto:
+                    // the widget reads it inside this app's own process, where a plain path works
+                    // and a per-consumer content:// grant would only get in the way.
+                    artworkUri = SongMediaExtras.artworkUri(metadata?.extras)
+                        ?: metadata?.artworkUri?.toString(),
+                    isPlaying = isPlaying
+                )
+                refreshNowPlayingWidgets(applicationContext)
+            } catch (e: Throwable) {
+                android.util.Log.w("PlaybackService", "Could not update the home-screen widget", e)
+            }
         }
     }
 

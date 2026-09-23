@@ -102,6 +102,23 @@
         </receiver>
 
         <!--
+            Home-screen widget. Exported because the launcher lives in another process and has to
+            be able to instantiate it; the only thing it can do is render and forward taps to the
+            playback session, which any media controller could already do.
+        -->
+        <receiver
+            android:name=".widget.TGMusicWidgetReceiver"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/tg_music_widget_info" />
+        </receiver>
+
+        <!--
             Lets Android Auto (Gearhead) and Assistant/Gemini read locally-scraped cover art:
             Song.artworkUri for scraped covers is a file:// path into this app's private external
             storage, which other processes cannot open directly. PlaybackService mints a

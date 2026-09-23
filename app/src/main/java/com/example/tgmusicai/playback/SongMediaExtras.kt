@@ -49,6 +49,9 @@ object SongMediaExtras {
     /** The YouTube video id embedded in [extras], if any. */
     fun youtubeId(extras: Bundle?): String? = extras?.getString(KEY_YOUTUBE_ID)
 
+    /** The song's own stored artwork URI, before any per-consumer content:// URI is minted from it. */
+    fun artworkUri(extras: Bundle?): String? = extras?.getString(KEY_ARTWORK_URI)
+
     fun toSong(mediaUri: String, title: String, artist: String, album: String, extras: Bundle?): Song {
         return Song(
             id = extras?.getLong(KEY_SONG_ID, 0L) ?: 0L,

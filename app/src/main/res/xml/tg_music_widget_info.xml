@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Widget metadata. minWidth/minHeight are the smallest cells the launcher will let the user resize
+  to; the two layouts TGMusicWidget declares cover everything from that size upward.
+
+  targetCellWidth/Height are the Android 12+ way of stating a default size in grid cells and are
+  what modern launchers actually honour; minWidth/minHeight remain for older launchers that ignore
+  them.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="250dp"
+    android:minHeight="60dp"
+    android:targetCellWidth="4"
+    android:targetCellHeight="1"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen"
+    android:description="@string/widget_description"
+    android:initialLayout="@layout/glance_default_loading_layout"
+    android:updatePeriodMillis="0" />
