@@ -138,12 +138,17 @@ class YouTubeViewModel(application: Application) : AndroidViewModel(application)
                         mediaUri = audioStream.url,
                         producer = cleaned.producer,
                         youtubeId = item.videoId,
+                        artworkUri = item.thumbnailUri,
                         isDownloaded = false
                     )
                     // Persist a real row for this stream (deduped by youtubeId) before playing --
                     // otherwise this Song stays a transient id=0 object forever and its play can
                     // never be attributed to a song_stats row, silently disappearing from Stats.
                     val persistedId = musicRepository.ensurePersisted(streamSong)
+                    // ensurePersisted returns an existing row untouched, and rows saved before
+                    // cloud artwork was carried through have a null artworkUri -- so backfill the
+                    // thumbnail rather than leaving those songs permanently art-less.
+                    backfillCloudArtwork(persistedId, item.thumbnailUri)
                     mediaControllerManager.playSong(streamSong.copy(id = persistedId))
                 } else {
                     val failureMsg = "Failed to resolve audio stream for video ID '${item.videoId}': No working stream endpoints found"
@@ -207,6 +212,7 @@ class YouTubeViewModel(application: Application) : AndroidViewModel(application)
                     mediaUri = "https://www.youtube.com/watch?v=${item.videoId}",
                     producer = cleaned.producer,
                     youtubeId = item.videoId,
+                    artworkUri = item.thumbnailUri,
                     isDownloaded = false
                 )
                 db.songDao().insertSong(cloudSong)
@@ -226,6 +232,26 @@ class YouTubeViewModel(application: Application) : AndroidViewModel(application)
                     Log.e(LOG_TAG, "Cover art scraping failed for cloud track $songId", e)
                 }
             }
+        }
+    }
+
+    /**
+     * Gives a cloud song its YouTube thumbnail when it has no artwork yet.
+     *
+     * Cloud tracks have no embedded album art to read and no local file for [CoverArtScraper] to
+     * work from, so without this every streamed song shows the placeholder everywhere. Existing
+     * artwork is never replaced: a scraped cover is better than a video thumbnail, and downloads
+     * overwrite this with the real thing.
+     */
+    private suspend fun backfillCloudArtwork(songId: Long, thumbnailUri: String?) {
+        if (thumbnailUri.isNullOrBlank()) return
+        try {
+            val saved = db.songDao().getSongById(songId) ?: return
+            if (saved.artworkUri.isNullOrBlank()) {
+                musicRepository.updateSongArtwork(songId, thumbnailUri)
+            }
+        } catch (e: Exception) {
+            Log.e(LOG_TAG, "Could not backfill cloud artwork for song $songId", e)
         }
     }
 }
