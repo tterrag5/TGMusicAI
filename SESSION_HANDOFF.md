@@ -6,13 +6,18 @@ Snapshot of everything completed in the previous working session, so no conversa
 
 ## Current state at a glance
 
-- **~66 files modified/untracked. Nothing is committed.** All of it builds and all 51 unit tests pass.
+- **Committed** on branch `feature/ui-overhaul-and-keyless-ai` (`main` untouched, nothing pushed). Working tree clean, builds green, 51 unit tests pass.
+- To hand this to a fresh AI session, paste the message in **`NEXT_SESSION_PROMPT.md`**.
 - Five of six planned phases are **done and verified on an emulator**. Phase 2 (cloud stream resolution) is **not started**.
 - `CLAUDE.md` was updated to match the new architecture — trust it over any older internal notes.
 
-### Build environment gotcha
+### Build environment
 
-Needs **JDK 17**; it is a Nix flake project. If Gradle errors with *"Cannot find a Java installation … matching languageVersion=17"*, you are outside the dev shell — run `nix develop`, or pass `-Dorg.gradle.java.home=/nix/store/<…>-openjdk-17.0.20+8`. `adb` is at `~/Android/Sdk/platform-tools/adb`, not on `PATH`.
+`./gradlew` works from a plain shell on **any JDK 17 or newer**. It previously hard-required a JDK 17 *installation* from two places — a `java { toolchain { languageVersion = 17 } }` block and `gradle/gradle-daemon-jvm.properties` — which made every build fail outside the Nix dev shell with *"Cannot find a Java installation … matching languageVersion=17"*. Both pins were removed; emitted bytecode is still 17. Verified on JDK 17 and 21. `nix develop` still works and is fine to use.
+
+`adb` is at `~/Android/Sdk/platform-tools/adb`, not on `PATH`.
+
+**If the emulator's UI doesn't match this document**, it has reverted to an older snapshot — this happened once after a host restart. Check `adb shell dumpsys package com.example.tgmusicai | grep lastUpdateTime` and reinstall with `./gradlew installDebug` before concluding code is missing.
 
 ---
 
