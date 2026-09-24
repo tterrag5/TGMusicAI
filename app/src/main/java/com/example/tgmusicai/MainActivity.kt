@@ -29,9 +29,10 @@ import com.example.tgmusicai.ai.AiFeatureManager
 import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
-import com.example.tgmusicai.data.repository.FolderPathBackfill
+import com.example.tgmusicai.data.repository.GenreBackfill
 import com.example.tgmusicai.data.repository.SongRecognitionManager
 import com.example.tgmusicai.data.repository.TagEditorManager
+import com.example.tgmusicai.data.repository.CloudRecommendationSource
 import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.ui.onboarding.OnboardingScreen
@@ -110,9 +111,9 @@ class MainActivity : ComponentActivity() {
         // never affect app startup even if the AI deps/models turn out to be broken on a device.
         val aiFeatureManager = AiFeatureManager(this, database.aiSongTagsDao())
         val tagEditorManager = TagEditorManager(this, database.songDao())
-        // Fills in where each already-known track lives on disk, so the Library's folder browser
+        // Reads the genre out of each already-known track's file, so the Library's tag browser
         // works for a library that predates the column rather than only for newly scanned tracks.
-        val folderPathBackfill = FolderPathBackfill(this, database.songDao())
+        val genreBackfill = GenreBackfill(this, database.songDao())
         // Identifies a track playing nearby against an index built from this library. Opt-in: the
         // index is only built when the user asks for it in Settings.
         val songRecognitionManager = SongRecognitionManager(
@@ -135,6 +136,14 @@ class MainActivity : ComponentActivity() {
         // Browses YouTube Music's public catalogue -- artists, albums, moods, charts. Takes the
         // cookie manager only to personalise results; unlike playlist sync it works signed out.
         val youTubeMusicBrowser = YouTubeMusicBrowser(innerTubeCookieManager)
+        // Turns the local taste profile above into YouTube lookups, so the Home screen can
+        // recommend music the library does not hold yet. Shared with nothing else here: the
+        // playback service builds its own for autoplay, since it outlives this Activity.
+        val cloudRecommendationSource = CloudRecommendationSource(
+            browser = youTubeMusicBrowser,
+            songDao = database.songDao(),
+            recommendationEngine = recommendationEngine
+        )
         val youTubePlaylistSyncManager = YouTubePlaylistSyncManager(
             songDao = database.songDao(),
             playlistDao = database.playlistDao(),
@@ -169,7 +178,8 @@ class MainActivity : ComponentActivity() {
                                     repository = repository,
                                     networkObserver = networkObserver,
                                     appPreferences = appPreferences,
-                                    recommendationEngine = recommendationEngine
+                                    recommendationEngine = recommendationEngine,
+                                    cloudRecommendationSource = cloudRecommendationSource
                                 )
                             }
                         )
@@ -183,7 +193,8 @@ class MainActivity : ComponentActivity() {
                                     appPreferences = appPreferences,
                                     youtubeExtractor = youTubeExtractor,
                                     tagEditorManager = tagEditorManager,
-                                    musicBrowser = youTubeMusicBrowser
+                                    musicBrowser = youTubeMusicBrowser,
+                                    aiSongTagsDao = database.aiSongTagsDao()
                                 )
                             }
                         )
@@ -275,7 +286,7 @@ class MainActivity : ComponentActivity() {
                                 // Runs after the scan, not alongside it: the scan is what gives
                                 // newly-found tracks their folder, so starting the backfill first
                                 // would just mean two passes over the same rows.
-                                folderPathBackfill.runToCompletion()
+                                genreBackfill.runToCompletion()
                             }
                         }
 

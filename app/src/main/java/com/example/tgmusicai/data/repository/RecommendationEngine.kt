@@ -102,6 +102,22 @@ class RecommendationEngine(
     }
 
     /**
+     * The songs this engine would seed a library-wide recommendation from: what the user has
+     * actually been playing lately, best guess first.
+     *
+     * Exposed so callers that recommend somewhere *other* than the local library -- currently
+     * [CloudRecommendationSource], which turns these into YouTube lookups -- can start from the
+     * same taste signal instead of re-deriving one. Returns an empty list on a fresh install,
+     * which callers must treat as "no taste known yet" rather than as a failure.
+     */
+    suspend fun tasteSeeds(limit: Int = 8): List<Song> = withContext(Dispatchers.IO) {
+        if (limit <= 0) return@withContext emptyList()
+        val candidates = loadCandidates(downloadedOnly = false)
+        if (candidates.isEmpty()) return@withContext emptyList()
+        recentSeeds(candidates).take(limit)
+    }
+
+    /**
      * Drops the cached co-occurrence map so the next request rebuilds it. Call after a play is
      * recorded; the map is derived from listening history and goes stale as soon as that grows.
      */

@@ -36,10 +36,15 @@ import com.example.tgmusicai.data.local.AppDatabase
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.ListeningHistory
 import com.example.tgmusicai.data.local.entity.Song
+import com.example.tgmusicai.data.repository.CloudRecommendationSource
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.data.scrobble.ListenBrainzScrobbler
 import com.example.tgmusicai.data.sponsorblock.SponsorBlockManager
+import com.example.tgmusicai.data.youtube.InnerTubeCookieManager
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.example.tgmusicai.data.youtube.YouTubeMusicBrowser
+import com.example.tgmusicai.data.youtube.YouTubeSearchResult
 import com.example.tgmusicai.widget.NowPlayingWidgetState
 import com.example.tgmusicai.widget.refreshNowPlayingWidgets
 import com.google.common.collect.ImmutableList
@@ -56,6 +61,7 @@ import kotlinx.coroutines.guava.future
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Background media playback service extending [MediaLibraryService] for Android Auto support.
@@ -84,6 +90,24 @@ class PlaybackService : MediaLibraryService() {
     private val sponsorBlock by lazy { SponsorBlockManager() }
     private val scrobbler by lazy { ListenBrainzScrobbler() }
 
+    /**
+     * Supplies the cloud half of autoplay: tracks the library does not hold, picked from the
+     * artists the user actually plays. Built lazily because a device that never reaches the end of
+     * a queue never needs it, and because it must not add work to service start-up.
+     */
+    private val cloudRecommendations by lazy {
+        CloudRecommendationSource(
+            browser = YouTubeMusicBrowser(InnerTubeCookieManager(AppPreferences(applicationContext))),
+            songDao = database.songDao(),
+            recommendationEngine = RecommendationEngine(
+                songDao = database.songDao(),
+                songStatsDao = database.songStatsDao(),
+                aiSongTagsDao = database.aiSongTagsDao(),
+                listeningHistoryDao = database.listeningHistoryDao()
+            )
+        )
+    }
+
     // Cast, when the device supports it. Both stay null on a device without Play Services, which
     // leaves the session running on the plain ExoPlayer.
     private var castPlayer: CastPlayer? = null
@@ -107,6 +131,13 @@ class PlaybackService : MediaLibraryService() {
      * [volumeNormalizationEnabled] is: they are consulted on a media item transition and on the
      * playback ticker, neither of which can afford to suspend on a DataStore read.
      */
+    /**
+     * The app-wide "Downloaded only" preference. When it is on the user has said they want nothing
+     * fetched from the network, so autoplay stays entirely local.
+     */
+    @Volatile
+    private var downloadedOnly: Boolean = false
+
     @Volatile
     private var sponsorBlockEnabled: Boolean = false
 
@@ -375,6 +406,15 @@ class PlaybackService : MediaLibraryService() {
                 }
         }
 
+        // "Downloaded only" decides whether autoplay may reach for cloud recommendations at all.
+        // Mirrored into a field for the same reason the others are: autoplay runs on a media item
+        // transition, which cannot suspend on a DataStore read.
+        serviceScope.launch(Dispatchers.Main) {
+            AppPreferences(applicationContext).downloadedOnlyFlow.collect { enabled ->
+                downloadedOnly = enabled
+            }
+        }
+
         // Scrobbling settings. A token that is removed takes effect immediately rather than at the
         // next track, so turning it off really does stop submissions.
         serviceScope.launch(Dispatchers.Main) {
@@ -453,6 +493,30 @@ class PlaybackService : MediaLibraryService() {
         private const val SPONSOR_END_GUARD_MS = 1_000L
         private const val YOUTUBE_FALLBACK_SEARCH_CANDIDATES = 6
         private const val YOUTUBE_FALLBACK_RESOLVE_TARGET = 3
+
+        /** Random on-device tracks one autoplay queue extension appends. */
+        private const val AUTOPLAY_LOCAL_COUNT = 3
+
+        /**
+         * Recommended cloud tracks one autoplay queue extension appends. Deliberately fewer than
+         * the local half: each one costs a stream resolution, and a queue extension that keeps the
+         * user in music they own reads as their library continuing rather than as the app wandering
+         * off into YouTube.
+         */
+        private const val AUTOPLAY_CLOUD_COUNT = 2
+
+        /**
+         * How many recommendations to consider per track actually wanted. Some fraction of any
+         * batch will not resolve, and over-fetching from an already-cached list costs nothing.
+         */
+        private const val RECOMMENDATION_OVERFETCH = 4
+
+        /**
+         * Ceiling on the whole recommendation fetch-and-resolve pass. It runs when the last track
+         * in the queue *starts*, so there are minutes of slack -- but the pass must still end on
+         * its own rather than hold a coroutine open on a network that never answers.
+         */
+        private const val RECOMMENDATION_RESOLVE_TIMEOUT_MS = 30_000L
 
         // Automotive media tree category IDs (children of ROOT_ID, surfaced via onGetChildren).
         const val ROOT_ID = "root"
@@ -557,11 +621,17 @@ class PlaybackService : MediaLibraryService() {
     private var lastAutoExtendedAtIndex = -1
 
     /**
-     * Appends a few random already-downloaded songs to the live queue as soon as playback
-     * reaches the current last item, provided repeat is off -- so the queue never actually runs
-     * out (repeat off), the new songs are visible and skippable in "Up Next" (since they're
-     * really appended to the player's timeline, not swapped in reactively after a stop), and nothing
-     * audibly interrupts playback.
+     * Appends a few songs to the live queue as soon as playback reaches the current last item,
+     * provided repeat is off -- so the queue never actually runs out, the new songs are visible
+     * and skippable in "Up Next" (they are really appended to the player's timeline, not swapped
+     * in reactively after a stop), and nothing audibly interrupts playback.
+     *
+     * The songs are a mix: recommendations from YouTube Music chosen around what the user
+     * actually plays, plus random tracks already on the device. Both halves are requested, and
+     * whatever comes back is interleaved so the run does not read as a block of cloud followed by
+     * a block of local. The local half is what makes this work on a plane -- a failed or empty
+     * recommendation fetch must never leave the queue un-extended, which is why local tracks are
+     * asked for outright rather than only after the network has been given its chance.
      */
     private fun maybeExtendQueueForAutoplay(exoPlayer: ExoPlayer) {
         if (exoPlayer.repeatMode != Player.REPEAT_MODE_OFF) return
@@ -572,62 +642,146 @@ class PlaybackService : MediaLibraryService() {
 
         val existingIds = (0 until exoPlayer.mediaItemCount).map { exoPlayer.getMediaItemAt(it).mediaId }.toSet()
         serviceScope.launch {
-            val candidates = database.songDao().getRandomDownloadedSongs(5)
+            val local = database.songDao().getRandomDownloadedSongs(AUTOPLAY_LOCAL_COUNT)
                 .filter { it.mediaUri !in existingIds }
+            val cloud = resolvedRecommendations(AUTOPLAY_CLOUD_COUNT, existingIds)
+            val candidates = interleave(cloud, local)
             if (candidates.isEmpty()) return@launch
             withContext(Dispatchers.Main) {
-                val items = candidates.map { song ->
-                    MediaItem.Builder()
-                        .setMediaId(song.mediaUri)
-                        .setUri(Uri.parse(song.mediaUri))
-                        .setMediaMetadata(
-                            MediaMetadata.Builder()
-                                .setTitle(song.title)
-                                .setArtist(song.artist)
-                                .setAlbumTitle(song.album)
-                                .setArtworkUri(resolveCarArtworkUri(song.artworkUri))
-                                .setIsPlayable(true)
-                                .setExtras(SongMediaExtras.fromSong(song))
-                                .build()
-                        )
-                        .build()
-                }
+                val items = candidates.map { song -> autoplayMediaItem(song) }
                 exoPlayer.addMediaItems(items)
-                android.util.Log.d("PlaybackService", "Auto-extended queue with ${items.size} random song(s)")
+                android.util.Log.d(
+                    "PlaybackService",
+                    "Auto-extended queue with ${items.size} song(s): ${cloud.size} recommended, ${local.size} local"
+                )
             }
         }
     }
 
     /**
-     * Picks a random already-downloaded song (different from the one that just ended, if
-     * possible) and starts playing it, so the queue ending with repeat off doesn't just stop.
+     * Picks a song (different from the one that just ended, if possible) and starts playing it,
+     * so the queue ending with repeat off doesn't just stop. Prefers a recommendation and falls
+     * back to a random downloaded track, on the same reasoning as [maybeExtendQueueForAutoplay].
      */
     private fun playRandomSongAsAutoplay(exoPlayer: ExoPlayer) {
         val lastMediaId = exoPlayer.currentMediaItem?.mediaId
         serviceScope.launch {
+            val excluded = setOfNotNull(lastMediaId)
             val candidates = database.songDao().getRandomDownloadedSongs(3)
-            val next = candidates.firstOrNull { it.mediaUri != lastMediaId } ?: candidates.firstOrNull()
+            val next = resolvedRecommendations(1, excluded).firstOrNull()
+                ?: candidates.firstOrNull { it.mediaUri !in excluded }
+                ?: candidates.firstOrNull()
             if (next == null) return@launch
             withContext(Dispatchers.Main) {
-                val item = MediaItem.Builder()
-                    .setMediaId(next.mediaUri)
-                    .setUri(Uri.parse(next.mediaUri))
-                    .setMediaMetadata(
-                        MediaMetadata.Builder()
-                            .setTitle(next.title)
-                            .setArtist(next.artist)
-                            .setAlbumTitle(next.album)
-                            .setArtworkUri(resolveCarArtworkUri(next.artworkUri))
-                            .setIsPlayable(true)
-                            .setExtras(SongMediaExtras.fromSong(next))
-                            .build()
-                    )
-                    .build()
-                exoPlayer.setMediaItem(item)
+                exoPlayer.setMediaItem(autoplayMediaItem(next))
                 exoPlayer.prepare()
                 exoPlayer.play()
             }
         }
+    }
+
+    /** The queue entry for one autoplay pick, local or cloud -- they differ only in their URI. */
+    private fun autoplayMediaItem(song: Song): MediaItem = MediaItem.Builder()
+        .setMediaId(song.mediaUri)
+        .setUri(Uri.parse(song.mediaUri))
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(song.title)
+                .setArtist(song.artist)
+                .setAlbumTitle(song.album)
+                .setArtworkUri(resolveCarArtworkUri(song.artworkUri))
+                .setIsPlayable(true)
+                .setExtras(SongMediaExtras.fromSong(song))
+                .build()
+        )
+        .build()
+
+    /**
+     * Up to [limit] recommended cloud tracks, each already **resolved to a playable stream** and
+     * persisted as a song row.
+     *
+     * Resolving here rather than appending a watch URL is the whole point of this function. An
+     * unresolved cloud item fails the instant ExoPlayer tries to play it, and a queue of them is
+     * exactly the cascade that the guard in `onPlayerError` exists to contain -- autoplay adding
+     * its own would be self-inflicted. Anything that cannot be resolved is dropped.
+     *
+     * Returns nothing when "Downloaded only" is set, when the device is offline, or when the whole
+     * attempt outruns [RECOMMENDATION_RESOLVE_TIMEOUT_MS]. The caller treats an empty list as "use
+     * local tracks", which is what keeps autoplay working with no network.
+     */
+    private suspend fun resolvedRecommendations(limit: Int, excludedMediaIds: Set<String>): List<Song> {
+        if (limit <= 0 || downloadedOnly) return emptyList()
+        return try {
+            withTimeoutOrNull(RECOMMENDATION_RESOLVE_TIMEOUT_MS) {
+                val tracks = cloudRecommendations.recommendedTracks(
+                    limit = limit * RECOMMENDATION_OVERFETCH
+                )
+                val resolved = mutableListOf<Song>()
+                // Shuffled so a queue that runs dry three times in one evening does not append the
+                // same few tracks each time; the cached recommendation list barely changes.
+                for (track in tracks.shuffled()) {
+                    if (resolved.size >= limit) break
+                    val song = resolveRecommendation(track) ?: continue
+                    if (song.mediaUri in excludedMediaIds) continue
+                    if (resolved.any { it.mediaUri == song.mediaUri }) continue
+                    resolved += song
+                }
+                resolved
+            }.orEmpty()
+        } catch (e: Throwable) {
+            android.util.Log.w("PlaybackService", "Could not resolve autoplay recommendations", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Turns one recommendation into a playable, persisted [Song], or null when its stream cannot
+     * be resolved.
+     *
+     * The row is persisted (deduped by video id) before it is queued for the same reason
+     * `YouTubeViewModel.playTrack` persists one: a transient id=0 song can never be attributed to
+     * a play-count row, so autoplayed tracks would silently never appear in Stats.
+     */
+    private suspend fun resolveRecommendation(track: YouTubeSearchResult): Song? = try {
+        val stream = youtubeExtractor.extractAudioStream(track.videoId)
+        if (stream == null || stream.url.isBlank()) {
+            null
+        } else {
+            val cleaned = com.example.tgmusicai.data.local.AiMetadataCleaner.cleanOffline(
+                track.title,
+                track.uploader
+            )
+            val song = Song(
+                id = 0,
+                title = cleaned.cleanTitle,
+                artist = cleaned.artist ?: track.uploader,
+                album = "YouTube Cloud",
+                durationMs = track.durationSeconds * 1000L,
+                mediaUri = stream.url,
+                producer = cleaned.producer,
+                youtubeId = track.videoId,
+                artworkUri = track.thumbnailUri,
+                isDownloaded = false
+            )
+            song.copy(id = repository.ensurePersisted(song))
+        }
+    } catch (e: Throwable) {
+        android.util.Log.w("PlaybackService", "Could not resolve recommendation ${track.videoId}", e)
+        null
+    }
+
+    /**
+     * Alternates between two lists, starting with [first], and appends whatever is left over when
+     * one runs out -- so a queue extension mixes recommendations and local tracks instead of
+     * playing one group and then the other.
+     */
+    private fun <T> interleave(first: List<T>, second: List<T>): List<T> {
+        val mixed = mutableListOf<T>()
+        for (i in 0 until maxOf(first.size, second.size)) {
+            first.getOrNull(i)?.let { mixed += it }
+            second.getOrNull(i)?.let { mixed += it }
+        }
+        return mixed
     }
 
     // Play-tracking & listen-time telemetry -- deliberately owned by this Service (not the
