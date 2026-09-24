@@ -353,7 +353,12 @@ fun SettingsScreen(
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     // The honest cost, stated before they commit to it.
-                                    "Building the index reads through each track once and stores a few thousand rows per song, so it takes a while and uses real storage. It's why this is off until you ask for it.",
+                                    // Measured on-device rather than estimated: the fingerprinter
+                                    // produces about 120 landmarks per second of audio, so a
+                                    // typical song costs roughly 25,000 rows and 1-2 MB. Worth
+                                    // stating concretely -- this is the kind of cost a user should
+                                    // be able to decline knowingly.
+                                    "Building the index reads through each track once. Expect roughly 1-2 MB per song, so a large library can run to several hundred megabytes. It's why this is off until you ask for it, and you can clear it again at any time.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

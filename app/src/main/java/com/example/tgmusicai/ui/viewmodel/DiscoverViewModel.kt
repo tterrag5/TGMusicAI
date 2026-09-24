@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.tgmusicai.data.youtube.YouTubeAlbumPage
 import com.example.tgmusicai.data.youtube.YouTubeAlbumRef
 import com.example.tgmusicai.data.youtube.YouTubeArtistPage
+import com.example.tgmusicai.data.youtube.YouTubeHomeShelf
 import com.example.tgmusicai.data.youtube.YouTubeMoodCategory
 import com.example.tgmusicai.data.youtube.YouTubeMusicBrowser
 import com.example.tgmusicai.data.youtube.YouTubeSearchResult
@@ -30,6 +31,9 @@ class DiscoverViewModel(
 
     private val _moods = MutableStateFlow<List<YouTubeMoodCategory>>(emptyList())
     val moods: StateFlow<List<YouTubeMoodCategory>> = _moods.asStateFlow()
+
+    private val _homeShelves = MutableStateFlow<List<YouTubeHomeShelf>>(emptyList())
+    val homeShelves: StateFlow<List<YouTubeHomeShelf>> = _homeShelves.asStateFlow()
 
     private val _charts = MutableStateFlow<List<YouTubeSearchResult>>(emptyList())
     val charts: StateFlow<List<YouTubeSearchResult>> = _charts.asStateFlow()
@@ -65,6 +69,10 @@ class DiscoverViewModel(
         discoverJob = viewModelScope.launch {
             _isLoadingDiscover.value = true
             try {
+                // The home feed first, and shown as soon as it lands: it is the one source that
+                // reliably returns something, so waiting on the other two before drawing anything
+                // would leave the screen blank for no reason.
+                _homeShelves.value = browser.fetchHomeFeed()
                 _moods.value = browser.fetchMoodCategories()
                 _charts.value = browser.fetchTopChart()
             } finally {

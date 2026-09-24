@@ -107,7 +107,15 @@ fun YouTubeSearchResultItem(
                 Spacer(modifier = Modifier.height(2.dp))
 
                 Text(
-                    text = "${result.uploader} • ${FormatUtils.formatDuration(result.durationSeconds * 1000L)}",
+                    // Duration is omitted rather than shown as "0:00" when it is unknown. Not every
+                    // source carries one -- YouTube Music's home-feed rows leave it out where
+                    // playlist rows include it -- and a row of tracks all claiming to be zero
+                    // seconds long reads as broken data rather than as missing data.
+                    text = if (result.durationSeconds > 0) {
+                        "${result.uploader} • ${FormatUtils.formatDuration(result.durationSeconds * 1000L)}"
+                    } else {
+                        result.uploader
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

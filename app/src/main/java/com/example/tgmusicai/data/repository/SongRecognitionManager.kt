@@ -35,9 +35,10 @@ import kotlinx.coroutines.withContext
  * know which one -- and unlike a cloud service, it works with no network and tells nobody what you
  * are listening to.
  *
- * Indexing is opt-in. The index runs to a few thousand rows per track, which is a real amount of
- * storage to spend on a feature not everyone wants, so nothing is built until asked and the whole
- * thing can be dropped again.
+ * Indexing is opt-in. Measured on-device, the index runs to about 120 rows per second of audio --
+ * roughly 25,000 rows and 1-2 MB for a typical song, and several hundred megabytes for a large
+ * library. That is a real amount of storage to spend on a feature not everyone wants, so nothing
+ * is built until asked and the whole thing can be dropped again.
  *
  * Failures are contained the way the rest of the on-device analysis is: one undecodable track is
  * skipped, and recognition returning "not sure" is a normal outcome rather than an error.

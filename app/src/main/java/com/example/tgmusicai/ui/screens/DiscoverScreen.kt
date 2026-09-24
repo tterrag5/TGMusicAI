@@ -63,6 +63,7 @@ fun DiscoverScreen(
     modifier: Modifier = Modifier
 ) {
     val moods by discoverViewModel.moods.collectAsState()
+    val homeShelves by discoverViewModel.homeShelves.collectAsState()
     val charts by discoverViewModel.charts.collectAsState()
     val selectedMood by discoverViewModel.selectedMood.collectAsState()
     val moodPlaylists by discoverViewModel.moodPlaylists.collectAsState()
@@ -92,6 +93,27 @@ fun DiscoverScreen(
                 .padding(innerPadding),
             contentPadding = PaddingValues(bottom = 120.dp)
         ) {
+            // YouTube's own recommendations, shown first. Each shelf keeps its heading -- "Listen
+            // again" and "Quick picks" mean different things, and merging them is just a pile of
+            // songs.
+            if (selectedMood == null) {
+                homeShelves.forEach { shelf ->
+                    item(key = "shelf_${shelf.title}") { SectionHeading(shelf.title) }
+                    items(shelf.tracks, key = { "shelftrack_${shelf.title}_${it.videoId}" }) { track ->
+                        YouTubeSearchResultItem(
+                            result = track,
+                            isExtracting = false,
+                            downloadState = null,
+                            onPlayClick = { onPlayTrack(track) },
+                            onDownloadClick = { onDownloadTrack(track) }
+                        )
+                    }
+                    items(shelf.items, key = { "shelfitem_${shelf.title}_${it.browseId}" }) { tile ->
+                        TileRow(playlist = tile, onClick = { onOpenAlbum(tile) })
+                    }
+                }
+            }
+
             if (moods.isNotEmpty()) {
                 item {
                     SectionHeading("Moods & genres")
@@ -129,7 +151,6 @@ fun DiscoverScreen(
                     }
                 }
             } else {
-                item { SectionHeading("Charts") }
                 if (isLoading) {
                     item {
                         Box(
@@ -141,11 +162,13 @@ fun DiscoverScreen(
                             CircularProgressIndicator()
                         }
                     }
-                } else if (charts.isEmpty()) {
-                    item {
-                        EmptyNote("Charts aren't available right now. They're region-specific and YouTube doesn't publish them everywhere.")
-                    }
-                } else {
+                }
+
+                // Charts are secondary and only rendered when they returned something. They are
+                // region-gated and often empty, and an empty section under a heading reads as a
+                // broken screen rather than as content YouTube simply does not publish here.
+                if (charts.isNotEmpty()) {
+                    item { SectionHeading("Charts") }
                     items(charts, key = { "chart_${it.videoId}" }) { track ->
                         YouTubeSearchResultItem(
                             result = track,
@@ -154,6 +177,12 @@ fun DiscoverScreen(
                             onPlayClick = { onPlayTrack(track) },
                             onDownloadClick = { onDownloadTrack(track) }
                         )
+                    }
+                }
+
+                if (!isLoading && homeShelves.isEmpty() && charts.isEmpty() && moods.isEmpty()) {
+                    item {
+                        EmptyNote("Couldn't reach YouTube Music just now. Check your connection and pull the screen open again.")
                     }
                 }
             }

@@ -47,6 +47,18 @@ data class YouTubeAlbumPage(
     val tracks: List<YouTubeSearchResult>
 )
 
+/**
+ * One row of YouTube Music's home feed, keeping its own heading.
+ *
+ * A shelf holds either tracks or tiles (albums, playlists), never both, so whichever list is
+ * non-empty is the one to render.
+ */
+data class YouTubeHomeShelf(
+    val title: String,
+    val tracks: List<YouTubeSearchResult>,
+    val items: List<YouTubeAlbumRef>
+)
+
 /** One of YouTube Music's mood or genre categories, e.g. "Focus" or "Workout". */
 data class YouTubeMoodCategory(
     val title: String,
@@ -269,6 +281,42 @@ class YouTubeMusicBrowser(
         }
     }
 
+    /**
+     * YouTube Music's own home feed: the "Quick picks", "Listen again" and "Mixed for you" rows.
+     *
+     * The better primary source for a discovery screen than the charts are. Charts are region-gated
+     * and frequently return nothing at all, which leaves the screen looking broken through no fault
+     * of the user's. The home feed always returns something: recommendations tailored to the
+     * account when a session exists, and generally-popular material when it does not.
+     *
+     * Shelves are returned with their own headings rather than flattened into one list, because
+     * "Listen again" and "Quick picks" mean different things and a merged list of both is just a
+     * pile of songs.
+     */
+    suspend fun fetchHomeFeed(): List<YouTubeHomeShelf> {
+        val root = browse(BROWSE_ID_HOME) ?: return emptyList()
+        return try {
+            sectionShelves(root)
+                .filter { it.tracks.isNotEmpty() || it.items.isNotEmpty() }
+                .map { shelf ->
+                    YouTubeHomeShelf(
+                        // A shelf with no heading still holds usable content, so it gets a generic
+                        // one rather than being dropped.
+                        title = shelf.title.ifBlank { "Recommended" },
+                        tracks = shelf.tracks,
+                        items = shelf.items
+                    )
+                }
+                // The feed repeats an item across shelves fairly often; distinct titles keep the
+                // screen from showing the same row twice under two names.
+                .distinctBy { it.title }
+                .take(MAX_HOME_SHELVES)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Could not parse the home feed", e)
+            emptyList()
+        }
+    }
+
     /** The current top-songs chart. Empty if charts are unavailable in the user's region. */
     suspend fun fetchTopChart(): List<YouTubeSearchResult> {
         val root = browse(BROWSE_ID_CHARTS) ?: return emptyList()
@@ -446,9 +494,16 @@ class YouTubeMusicBrowser(
 
         private const val SEARCH_URL = "https://music.youtube.com/youtubei/v1/search"
 
-        /** YouTube Music's own well-known browse ids for its moods/genres and charts pages. */
+        /** YouTube Music's own well-known browse ids for its home, moods/genres and charts pages. */
+        const val BROWSE_ID_HOME = "FEmusic_home"
         const val BROWSE_ID_MOODS = "FEmusic_moods_and_genres"
         const val BROWSE_ID_CHARTS = "FEmusic_charts"
+
+        /**
+         * Home-feed rows to keep. The feed is long and paginated; this is roughly what fits before
+         * a user stops scrolling, and it bounds how much parsing one screen load costs.
+         */
+        private const val MAX_HOME_SHELVES = 8
 
         /**
          * Opaque tokens that restrict a search to one kind of result. They are protobuf filter
