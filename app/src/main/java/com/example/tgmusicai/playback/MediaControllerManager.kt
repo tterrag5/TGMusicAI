@@ -80,6 +80,28 @@ class MediaControllerManager(
     private val _isResolving = MutableStateFlow(false)
     val isResolving: StateFlow<Boolean> = _isResolving.asStateFlow()
 
+    private val _pendingSong = MutableStateFlow<Song?>(null)
+
+    /**
+     * The track the user just asked for, while its stream is still being resolved.
+     *
+     * A cloud track takes seconds to turn into a playable URL, and until [playInternal] runs the
+     * player still reports the *previous* track. Tapping a cloud song therefore opened Now Playing
+     * on whatever was already playing and sat there -- it looked like the tap had been ignored, or
+     * like the app had opened the wrong song. Showing the requested track straight away, with the
+     * resolving indicator the mini player already has, makes the wait legible instead of wrong.
+     */
+    val pendingSong: StateFlow<Song?> = _pendingSong.asStateFlow()
+
+    /**
+     * Declares what is about to play, before anything is resolved. Called by the cloud play path
+     * so the UI can switch to the tapped track immediately; cleared once playback starts or the
+     * attempt fails.
+     */
+    fun setPendingSong(song: Song?) {
+        _pendingSong.value = song
+    }
+
     // Set when a cloud song can't be turned into a playable stream URL at all (every Piped and
     // Invidious endpoint failed). Without this the failure was completely silent: the unresolved
     // watch URL was still handed to ExoPlayer, which errored internally, so onMediaItemTransition
@@ -147,6 +169,9 @@ class MediaControllerManager(
                 // would misreport progress into the new song for up to 500ms (and, since crossfade
                 // reads both flows together, briefly fade the new track's volume to 0).
                 _currentPositionMs.value = 0L
+                // Queued tracks stack after the current one; once that one is over, the count of
+                // them means nothing and the next "add to queue" starts a fresh run.
+                pendingQueueInsertions = 0
                 updateCurrentMediaItem(mediaItem)
                 resolveAheadIfNeeded()
                 prefetchAroundCurrent()
@@ -302,6 +327,8 @@ class MediaControllerManager(
             if (player != null) {
                 player.seekTo(songIndex, 0L)
                 player.play()
+                // Nothing had to be resolved, so any track announced as pending is now playing.
+                _pendingSong.value = null
                 onStarted()
                 return
             }
@@ -353,6 +380,7 @@ class MediaControllerManager(
         scope.launch {
             _isResolving.value = true
             _playbackError.value = null
+            _pendingSong.value = queue[startIndex]
             val startSong = resolveSongForPlayback(queue[startIndex])
             _isResolving.value = false
 
@@ -366,12 +394,14 @@ class MediaControllerManager(
                 // Kept short: a Toast truncates, so the actionable part has to come first.
                 _playbackError.value =
                     "Can't stream \"${startSong.title}\" right now. Download it to play offline."
+                _pendingSong.value = null
                 onStarted()
                 return@launch
             }
 
             val initialQueue = queue.toMutableList().also { it[startIndex] = startSong }
             playInternal(initialQueue, startIndex)
+            _pendingSong.value = null
             onStarted()
             resolveRemainingInBackground(initialQueue, startIndex)
         }
@@ -607,9 +637,57 @@ class MediaControllerManager(
     fun addToQueue(song: Song) {
         val player = controller ?: return
         val wasEmpty = player.mediaItemCount == 0
-        player.addMediaItem(buildMediaItem(song))
+
+        // Directly after the track playing, not at the end of the queue. "Add to queue" means
+        // "play this next"; appending it behind an hour of already-queued music is the one thing
+        // it obviously must not do. Queuing several in a row keeps their order, because each new
+        // one lands after the previous addition rather than displacing it.
+        val insertAt = if (wasEmpty) {
+            0
+        } else {
+            (player.currentMediaItemIndex + 1 + pendingQueueInsertions).coerceAtMost(player.mediaItemCount)
+        }
+        pendingQueueInsertions++
+
+        player.addMediaItem(insertAt, buildMediaItem(song))
+        // The queue sheet reads currentSongList, which the player timeline alone does not update:
+        // without this the song really was queued but never appeared in the list, which looked
+        // exactly like the queue ignoring it.
+        currentSongList = currentSongList.toMutableList().also {
+            it.add(insertAt.coerceAtMost(it.size), song)
+        }
+        _playlist.value = currentSongList
         if (wasEmpty) player.prepare()
+
+        // A cloud track is queued as an unresolved watch URL, which fails the instant playback
+        // reaches it. Resolve it in the background and swap the real stream in, the same way a
+        // freshly loaded queue resolves everything after its first track.
+        if (isUnresolvedCloudUri(song.mediaUri)) {
+            val generation = queueGeneration
+            scope.launch(Dispatchers.IO) {
+                val resolved = resolveSemaphore.withPermit { resolveSongForPlayback(song) }
+                if (resolved.mediaUri == song.mediaUri) return@launch
+                withContext(Dispatchers.Main) {
+                    if (queueGeneration != generation) return@withContext
+                    val livePlayer = controller ?: return@withContext
+                    // Located by media id rather than by the index it went in at: the user can
+                    // skip, reorder or queue something else while this resolves.
+                    val index = currentSongList.indexOfFirst { it.mediaUri == song.mediaUri }
+                    if (index < 0 || index >= livePlayer.mediaItemCount) return@withContext
+                    currentSongList = currentSongList.toMutableList().also { it[index] = resolved }
+                    _playlist.value = currentSongList
+                    livePlayer.replaceMediaItem(index, buildMediaItem(resolved))
+                }
+            }
+        }
     }
+
+    /**
+     * How many tracks have been queued since the current one started, so a run of "add to queue"
+     * taps stacks up in the order they were tapped instead of each one jumping in front of the
+     * last. Reset on every track transition, where the count stops meaning anything.
+     */
+    private var pendingQueueInsertions = 0
 
     /**
      * The ExoPlayer's current audio session id, or 0 if no controller is connected yet.
