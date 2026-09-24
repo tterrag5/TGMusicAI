@@ -7,11 +7,13 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.tgmusicai.data.network.NetworkObserver
 import com.example.tgmusicai.data.local.AppPreferences
+import com.example.tgmusicai.data.repository.CloudRecommendationSource
 import com.example.tgmusicai.data.repository.MusicRepository
 import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.data.repository.SongWithStats
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.Song
+import com.example.tgmusicai.data.youtube.YouTubeSearchResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -30,7 +32,8 @@ class HomeViewModel(
     private val repository: MusicRepository,
     private val networkObserver: NetworkObserver,
     private val appPreferences: AppPreferences? = null,
-    private val recommendationEngine: RecommendationEngine? = null
+    private val recommendationEngine: RecommendationEngine? = null,
+    private val cloudRecommendationSource: CloudRecommendationSource? = null
 ) : ViewModel() {
 
     val isOnline: StateFlow<Boolean> = networkObserver.isOnline
@@ -126,6 +129,42 @@ class HomeViewModel(
         }
     }
 
+    private val _cloudRecommendations = MutableStateFlow<List<YouTubeSearchResult>>(emptyList())
+
+    /**
+     * The "Recommended for you" row: tracks from YouTube Music that the library does not already
+     * hold, chosen from the artists the user has actually been playing (see
+     * [CloudRecommendationSource]).
+     *
+     * Starts empty and fills in when the request lands. Home is the first screen on launch, so it
+     * must never wait on a network call to draw -- the row simply is not there until there is
+     * something to put in it, rather than reserving space for a spinner that then shifts
+     * everything below it.
+     */
+    val cloudRecommendations: StateFlow<List<YouTubeSearchResult>> = _cloudRecommendations.asStateFlow()
+
+    init {
+        loadCloudRecommendations(forceRefresh = false)
+    }
+
+    /**
+     * Fetches the cloud recommendation row. Failures and an absent source both leave the row
+     * empty; nothing else on Home depends on it.
+     */
+    fun loadCloudRecommendations(forceRefresh: Boolean = false) {
+        val source = cloudRecommendationSource ?: return
+        viewModelScope.launch {
+            _cloudRecommendations.value = try {
+                source.recommendedTracks(
+                    limit = CLOUD_RECOMMENDATION_ROW_SIZE,
+                    forceRefresh = forceRefresh,
+                )
+            } catch (e: Throwable) {
+                emptyList()
+            }
+        }
+    }
+
     fun setDownloadedOnly(enabled: Boolean) {
         viewModelScope.launch {
             appPreferences?.setDownloadedOnly(enabled)
@@ -202,16 +241,26 @@ class HomeViewModel(
         private val repository: MusicRepository,
         private val networkObserver: NetworkObserver,
         private val appPreferences: AppPreferences? = null,
-        private val recommendationEngine: RecommendationEngine? = null
+        private val recommendationEngine: RecommendationEngine? = null,
+        private val cloudRecommendationSource: CloudRecommendationSource? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return HomeViewModel(repository, networkObserver, appPreferences, recommendationEngine) as T
+            return HomeViewModel(
+                repository,
+                networkObserver,
+                appPreferences,
+                recommendationEngine,
+                cloudRecommendationSource
+            ) as T
         }
     }
 
     private companion object {
         /** How many songs the Home recommendations row asks for. */
         const val RECOMMENDATION_ROW_SIZE = 20
+
+        /** How many cloud tracks the "Recommended for you" row asks for. */
+        const val CLOUD_RECOMMENDATION_ROW_SIZE = 20
     }
 }

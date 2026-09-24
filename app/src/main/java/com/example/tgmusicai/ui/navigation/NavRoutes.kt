@@ -19,11 +19,6 @@ sealed interface Screen : NavKey {
     @Serializable
     data object Library : Screen
 
-    /**
-     * Playlists tab allowing creation, deletion, and viewing of user playlists.
-     */
-    @Serializable
-    data object Playlists : Screen
 
     /**
      * Alarms tab allowing creation, viewing, editing, and toggling of musical alarms.
@@ -64,12 +59,6 @@ sealed interface Screen : NavKey {
      */
     @Serializable
     data object Settings : Screen
-
-    /**
-     * YouTube Music discovery: mood and genre categories, and the current charts.
-     */
-    @Serializable
-    data object Discover : Screen
 
     /**
      * A YouTube Music artist's page: top tracks, albums, singles and related artists.

@@ -6,11 +6,13 @@ import androidx.lifecycle.viewModelScope
 import com.example.tgmusicai.data.youtube.YouTubeAlbumPage
 import com.example.tgmusicai.data.youtube.YouTubeAlbumRef
 import com.example.tgmusicai.data.youtube.YouTubeArtistPage
+import com.example.tgmusicai.data.youtube.YouTubeArtistRef
 import com.example.tgmusicai.data.youtube.YouTubeHomeShelf
 import com.example.tgmusicai.data.youtube.YouTubeMoodCategory
 import com.example.tgmusicai.data.youtube.YouTubeMusicBrowser
 import com.example.tgmusicai.data.youtube.YouTubeSearchResult
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -60,6 +62,7 @@ class DiscoverViewModel(
     // quick succession would otherwise let the slower response land last and overwrite the page
     // the user is actually looking at.
     private var discoverJob: Job? = null
+    private var searchJob: Job? = null
     private var moodJob: Job? = null
     private var detailJob: Job? = null
 
@@ -77,6 +80,67 @@ class DiscoverViewModel(
                 _charts.value = browser.fetchTopChart()
             } finally {
                 _isLoadingDiscover.value = false
+            }
+        }
+    }
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _playlistResults = MutableStateFlow<List<YouTubeAlbumRef>>(emptyList())
+
+    /**
+     * Playlists and mixes matching [searchQuery]. Separate from the track search on the Library's
+     * own search bar: that one answers "which song", this one answers "which mix", and YouTube
+     * needs a different request for each.
+     */
+    val playlistResults: StateFlow<List<YouTubeAlbumRef>> = _playlistResults.asStateFlow()
+
+    private val _artistResults = MutableStateFlow<List<YouTubeArtistRef>>(emptyList())
+
+    /** Artists matching [searchQuery], each opening a full artist page. */
+    val artistResults: StateFlow<List<YouTubeArtistRef>> = _artistResults.asStateFlow()
+
+    private val _albumResults = MutableStateFlow<List<YouTubeAlbumRef>>(emptyList())
+
+    /** Albums matching [searchQuery]. */
+    val albumResults: StateFlow<List<YouTubeAlbumRef>> = _albumResults.asStateFlow()
+
+    private val _isSearching = MutableStateFlow(false)
+    val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
+
+    /**
+     * Searches the catalogue for playlists and mixes, artists and albums.
+     *
+     * Debounced, and the in-flight request is cancelled on each keystroke: typing a ten-character
+     * query would otherwise issue thirty searches and let whichever answered last win, which is how
+     * a result list ends up showing matches for a prefix the user has already finished typing.
+     *
+     * The three lookups are separate requests because YouTube filters a search to one result type
+     * at a time. Playlists are shown first: songs are already searchable from the Library's own
+     * search bar, so what this adds is everything that is not a song.
+     */
+    fun onSearchQueryChanged(query: String) {
+        _searchQuery.value = query
+        searchJob?.cancel()
+        if (query.isBlank()) {
+            _playlistResults.value = emptyList()
+            _artistResults.value = emptyList()
+            _albumResults.value = emptyList()
+            _isSearching.value = false
+            return
+        }
+        searchJob = viewModelScope.launch {
+            delay(SEARCH_DEBOUNCE_MS)
+            _isSearching.value = true
+            try {
+                // Each lands as it arrives rather than after all three, so the first section fills
+                // in while the others are still in flight.
+                _playlistResults.value = browser.searchPlaylists(query)
+                _artistResults.value = browser.searchArtists(query)
+                _albumResults.value = browser.searchAlbums(query)
+            } finally {
+                _isSearching.value = false
             }
         }
     }
@@ -120,6 +184,11 @@ class DiscoverViewModel(
                 _isLoadingDetail.value = false
             }
         }
+    }
+
+    private companion object {
+        /** Quiet time after the last keystroke before a search is issued. */
+        const val SEARCH_DEBOUNCE_MS = 350L
     }
 
     class Factory(private val browser: YouTubeMusicBrowser) : ViewModelProvider.Factory {

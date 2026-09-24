@@ -1,32 +1,41 @@
 package com.example.tgmusicai.ui.screens
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.Clear
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -34,32 +43,45 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.tgmusicai.data.youtube.YouTubeAlbumRef
+import com.example.tgmusicai.data.youtube.YouTubeArtistRef
 import com.example.tgmusicai.data.youtube.YouTubeSearchResult
-import com.example.tgmusicai.ui.components.YouTubeSearchResultItem
+import com.example.tgmusicai.ui.components.CloudTile
 import com.example.tgmusicai.ui.viewmodel.DiscoverViewModel
 
+/** Columns in the Discover grid, matching the Library's own song grid. */
+private const val DISCOVER_GRID_COLUMNS = 3
+
 /**
- * Discovery for the cloud half of the library: the mood and genre categories YouTube Music itself
- * publishes, and the current chart.
+ * Discovery for the cloud half of the library: a search for playlists and mixes, YouTube Music's
+ * own recommendation shelves, the mood and genre categories it publishes, and the current chart.
+ *
+ * Laid out as a grid of artwork tiles rather than a list of rows, so it reads like the rest of the
+ * library rather than like a separate feed. Section headings span the full width; everything under
+ * them is a tile.
  *
  * The categories are fetched rather than hardcoded. Hardcoding a list of moods would be simpler,
  * but each one is addressed by an opaque token that cannot be guessed and has to come from that
  * page regardless -- and the set changes over time.
+ *
+ * This is a body rather than a screen: it draws no top bar and owns no `Scaffold`, because it is
+ * rendered inside [LibraryScreen] as one of that screen's views. Discovery used to be its own
+ * navigation-drawer destination, which put browsing the cloud catalogue somewhere other than the
+ * library that browsing adds to.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DiscoverScreen(
+fun DiscoverContent(
     discoverViewModel: DiscoverViewModel,
-    onOpenDrawer: () -> Unit,
     onPlayTrack: (YouTubeSearchResult) -> Unit,
     onDownloadTrack: (YouTubeSearchResult) -> Unit,
     onOpenAlbum: (YouTubeAlbumRef) -> Unit,
+    onOpenArtist: (YouTubeArtistRef) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val moods by discoverViewModel.moods.collectAsState()
@@ -68,57 +90,129 @@ fun DiscoverScreen(
     val selectedMood by discoverViewModel.selectedMood.collectAsState()
     val moodPlaylists by discoverViewModel.moodPlaylists.collectAsState()
     val isLoading by discoverViewModel.isLoadingDiscover.collectAsState()
+    val searchQuery by discoverViewModel.searchQuery.collectAsState()
+    val playlistResults by discoverViewModel.playlistResults.collectAsState()
+    val artistResults by discoverViewModel.artistResults.collectAsState()
+    val albumResults by discoverViewModel.albumResults.collectAsState()
+    val isSearching by discoverViewModel.isSearching.collectAsState()
 
     LaunchedEffect(Unit) { discoverViewModel.loadDiscover() }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Discover", style = MaterialTheme.typography.headlineMedium) },
-                navigationIcon = {
-                    IconButton(onClick = onOpenDrawer) {
-                        Icon(Icons.Rounded.Menu, contentDescription = "Open navigation menu")
+    val searching = searchQuery.isNotBlank()
+
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(DISCOVER_GRID_COLUMNS),
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 120.dp)
+    ) {
+        // Playlists and mixes, searched separately from songs: the Library's own search bar
+        // answers "which song", and a mix is not a song.
+        fullWidth {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = discoverViewModel::onSearchQueryChanged,
+                placeholder = { Text("Search mixes, artists & albums", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { discoverViewModel.onSearchQueryChanged("") }) {
+                            Icon(Icons.Rounded.Clear, contentDescription = "Clear search")
+                        }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
+                singleLine = true,
+                shape = RoundedCornerShape(28.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
             )
-        },
-        modifier = modifier
-    ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding),
-            contentPadding = PaddingValues(bottom = 120.dp)
-        ) {
-            // YouTube's own recommendations, shown first. Each shelf keeps its heading -- "Listen
-            // again" and "Quick picks" mean different things, and merging them is just a pile of
-            // songs.
-            if (selectedMood == null) {
-                homeShelves.forEach { shelf ->
-                    item(key = "shelf_${shelf.title}") { SectionHeading(shelf.title) }
-                    items(shelf.tracks, key = { "shelftrack_${shelf.title}_${it.videoId}" }) { track ->
-                        YouTubeSearchResultItem(
-                            result = track,
-                            isExtracting = false,
-                            downloadState = null,
-                            onPlayClick = { onPlayTrack(track) },
-                            onDownloadClick = { onDownloadTrack(track) }
-                        )
-                    }
-                    items(shelf.items, key = { "shelfitem_${shelf.title}_${it.browseId}" }) { tile ->
-                        TileRow(playlist = tile, onClick = { onOpenAlbum(tile) })
-                    }
+        }
+
+        if (searching) {
+            val nothingFound = playlistResults.isEmpty() && artistResults.isEmpty() && albumResults.isEmpty()
+            if (isSearching && nothingFound) {
+                fullWidth { LoadingRow() }
+            } else if (nothingFound) {
+                fullWidth { EmptyNote("Nothing on YouTube Music matched that.") }
+            }
+
+            if (playlistResults.isNotEmpty()) {
+                fullWidth(key = "heading_playlists") { SectionHeading("Playlists & mixes") }
+                items(playlistResults, key = { "searchplaylist_${it.browseId}" }) { playlist ->
+                    CloudTile(
+                        title = playlist.title,
+                        subtitle = playlist.subtitle,
+                        artworkUrl = playlist.thumbnailUrl,
+                        onClick = { onOpenAlbum(playlist) }
+                    )
                 }
             }
 
-            if (moods.isNotEmpty()) {
-                item {
+            if (artistResults.isNotEmpty()) {
+                fullWidth(key = "heading_artists") { SectionHeading("Artists") }
+                items(artistResults, key = { "searchartist_${it.browseId}" }) { artist ->
+                    CloudTile(
+                        title = artist.name,
+                        subtitle = "Artist",
+                        artworkUrl = artist.thumbnailUrl,
+                        onClick = { onOpenArtist(artist) }
+                    )
+                }
+            }
+
+            if (albumResults.isNotEmpty()) {
+                fullWidth(key = "heading_albums") { SectionHeading("Albums") }
+                items(albumResults, key = { "searchalbum_${it.browseId}" }) { album ->
+                    CloudTile(
+                        title = album.title,
+                        subtitle = album.subtitle,
+                        artworkUrl = album.thumbnailUrl,
+                        onClick = { onOpenAlbum(album) }
+                    )
+                }
+            }
+
+            // Browsing sections stay out of the way while a search is open: the answer the user
+            // asked for should not be followed by four screens of unrelated shelves.
+            return@LazyVerticalGrid
+        }
+
+        // YouTube's own recommendations. Each shelf keeps its heading -- "Listen again" and
+        // "Quick picks" mean different things, and merging them is just a pile of songs.
+        if (selectedMood == null) {
+            homeShelves.forEach { shelf ->
+                fullWidth(key = "shelf_${shelf.title}") { SectionHeading(shelf.title) }
+                items(shelf.tracks, key = { "shelftrack_${shelf.title}_${it.videoId}" }) { track ->
+                    CloudTile(
+                        title = track.title,
+                        subtitle = track.uploader,
+                        artworkUrl = track.thumbnailUri,
+                        onClick = { onPlayTrack(track) },
+                        showPlayOverlay = true,
+                        onDownload = { onDownloadTrack(track) }
+                    )
+                }
+                items(shelf.items, key = { "shelfitem_${shelf.title}_${it.browseId}" }) { tile ->
+                    CloudTile(
+                        title = tile.title,
+                        subtitle = tile.subtitle,
+                        artworkUrl = tile.thumbnailUrl,
+                        onClick = { onOpenAlbum(tile) }
+                    )
+                }
+            }
+        }
+
+        if (moods.isNotEmpty()) {
+            fullWidth {
+                Column {
                     SectionHeading("Moods & genres")
                     LazyRow(
-                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(moods, key = { it.browseId + it.title }) { mood ->
@@ -138,56 +232,62 @@ fun DiscoverScreen(
                     }
                 }
             }
+        }
 
-            if (selectedMood != null) {
-                item {
-                    SectionHeading(selectedMood?.title.orEmpty())
-                }
-                if (moodPlaylists.isEmpty()) {
-                    item { EmptyNote("Nothing in this category right now.") }
-                } else {
-                    items(moodPlaylists, key = { "mood_${it.browseId}" }) { playlist ->
-                        TileRow(playlist = playlist, onClick = { onOpenAlbum(playlist) })
-                    }
-                }
+        if (selectedMood != null) {
+            fullWidth { SectionHeading(selectedMood?.title.orEmpty()) }
+            if (moodPlaylists.isEmpty()) {
+                fullWidth { EmptyNote("Nothing in this category right now.") }
             } else {
-                if (isLoading) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(32.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator()
-                        }
-                    }
+                items(moodPlaylists, key = { "mood_${it.browseId}" }) { playlist ->
+                    CloudTile(
+                        title = playlist.title,
+                        subtitle = playlist.subtitle,
+                        artworkUrl = playlist.thumbnailUrl,
+                        onClick = { onOpenAlbum(playlist) }
+                    )
                 }
+            }
+        } else {
+            if (isLoading) {
+                fullWidth { LoadingRow() }
+            }
 
-                // Charts are secondary and only rendered when they returned something. They are
-                // region-gated and often empty, and an empty section under a heading reads as a
-                // broken screen rather than as content YouTube simply does not publish here.
-                if (charts.isNotEmpty()) {
-                    item { SectionHeading("Charts") }
-                    items(charts, key = { "chart_${it.videoId}" }) { track ->
-                        YouTubeSearchResultItem(
-                            result = track,
-                            isExtracting = false,
-                            downloadState = null,
-                            onPlayClick = { onPlayTrack(track) },
-                            onDownloadClick = { onDownloadTrack(track) }
-                        )
-                    }
+            // Charts are secondary and only rendered when they returned something. They are
+            // region-gated and often empty, and an empty section under a heading reads as a
+            // broken screen rather than as content YouTube simply does not publish here.
+            if (charts.isNotEmpty()) {
+                fullWidth { SectionHeading("Charts") }
+                items(charts, key = { "chart_${it.videoId}" }) { track ->
+                    CloudTile(
+                        title = track.title,
+                        subtitle = track.uploader,
+                        artworkUrl = track.thumbnailUri,
+                        onClick = { onPlayTrack(track) },
+                        showPlayOverlay = true,
+                        onDownload = { onDownloadTrack(track) }
+                    )
                 }
+            }
 
-                if (!isLoading && homeShelves.isEmpty() && charts.isEmpty() && moods.isEmpty()) {
-                    item {
-                        EmptyNote("Couldn't reach YouTube Music just now. Check your connection and pull the screen open again.")
-                    }
+            if (!isLoading && homeShelves.isEmpty() && charts.isEmpty() && moods.isEmpty()) {
+                fullWidth {
+                    EmptyNote("Couldn't reach YouTube Music just now. Check your connection, then switch away from this tab and back.")
                 }
             }
         }
     }
+}
+
+/**
+ * Adds one item that spans every column -- headings, the search field and empty notes, which are
+ * the things in this grid that are not tiles.
+ */
+private fun androidx.compose.foundation.lazy.grid.LazyGridScope.fullWidth(
+    key: Any? = null,
+    content: @Composable () -> Unit
+) {
+    item(key = key, span = { GridItemSpan(maxLineSpan) }) { content() }
 }
 
 @Composable
@@ -196,7 +296,7 @@ private fun SectionHeading(text: String) {
         text = text,
         style = MaterialTheme.typography.titleMedium,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp)
     )
 }
 
@@ -206,11 +306,23 @@ private fun EmptyNote(text: String) {
         text = text,
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp)
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 24.dp)
     )
 }
 
-/** One album, single or playlist tile rendered as a list row. */
+@Composable
+private fun LoadingRow() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(32.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        CircularProgressIndicator()
+    }
+}
+
+/** One album, single or playlist tile rendered as a list row, for the screens that still list. */
 @Composable
 internal fun TileRow(playlist: YouTubeAlbumRef, onClick: () -> Unit) {
     androidx.compose.material3.Surface(

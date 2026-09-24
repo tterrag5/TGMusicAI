@@ -16,8 +16,9 @@ import com.example.tgmusicai.data.youtube.YouTubeAlbumRef
 import com.example.tgmusicai.data.youtube.YouTubeArtistRef
 import com.example.tgmusicai.data.youtube.YouTubeMusicBrowser
 import com.example.tgmusicai.data.youtube.YouTubeSearchResult
-import com.example.tgmusicai.data.repository.MusicFolderTree
+import com.example.tgmusicai.data.repository.LibraryTag
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.MusicTagIndex
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -37,6 +38,17 @@ import kotlinx.coroutines.launch
  */
 private const val CLOUD_ENTITY_RESULT_LIMIT = 5
 
+/**
+ * The ways the Library screen can show itself.
+ *
+ * Discover and Playlists are views here rather than destinations of their own. Browsing YouTube
+ * Music is looking through the library's cloud half -- the same thing the search bar already does
+ * when it lists "From YouTube" results -- and a playlist is a way of looking at the same songs.
+ * Both used to sit elsewhere in the navigation (Discover in the drawer, Playlists in the bottom
+ * bar), which split one idea across three places.
+ */
+enum class LibraryView { SONGS, TAGS, PLAYLISTS, DISCOVER }
+
 class LibraryViewModel(
     private val repository: MusicRepository,
     private val lyricsRepository: LyricsRepository? = null,
@@ -45,7 +57,8 @@ class LibraryViewModel(
     private val appPreferences: AppPreferences? = null,
     private val youtubeExtractor: YouTubeExtractor? = null,
     private val tagEditorManager: TagEditorManager? = null,
-    private val musicBrowser: YouTubeMusicBrowser? = null
+    private val musicBrowser: YouTubeMusicBrowser? = null,
+    private val aiSongTagsDao: com.example.tgmusicai.data.local.dao.AiSongTagsDao? = null
 ) : ViewModel() {
 
     // User search query for filtering songs
@@ -161,10 +174,16 @@ class LibraryViewModel(
         if (query.isBlank()) {
             base
         } else {
+            // Tags count as something to search by, so typing "jazz" finds the tracks tagged jazz
+            // as well as the ones with it in a title. Read from the already-built index rather
+            // than re-derived, so the two views never disagree about what carries a tag.
+            val taggedIds = MusicTagIndex.songIdsMatching(libraryTags.value, query)
             base.filter { song ->
+                song.id in taggedIds ||
                 song.title.contains(query, ignoreCase = true) ||
                 song.artist.contains(query, ignoreCase = true) ||
                 song.album.contains(query, ignoreCase = true) ||
+                (song.genre != null && song.genre.contains(query, ignoreCase = true)) ||
                 (song.producer != null && song.producer.contains(query, ignoreCase = true))
             }
         }
@@ -351,70 +370,82 @@ class LibraryViewModel(
         }
     }
 
-    // --- Folder browsing ---
+    // --- Tag browsing ---
 
     /**
-     * Whether the library is showing folders rather than a flat song list. Deliberately not
-     * persisted: it is a way of looking for something right now, not a standing preference like
-     * grid-vs-list, and reopening the app into a half-navigated folder tree is disorienting.
+     * Which of the library's views is showing. Deliberately not persisted: it is a way of looking
+     * for something right now, not a standing preference like grid-vs-list.
      */
-    private val _folderBrowsingEnabled = MutableStateFlow(false)
-    val folderBrowsingEnabled: StateFlow<Boolean> = _folderBrowsingEnabled.asStateFlow()
+    private val _libraryView = MutableStateFlow(LibraryView.SONGS)
+    val libraryView: StateFlow<LibraryView> = _libraryView.asStateFlow()
 
-    /** Path of the folder currently open, or null while at the top of the tree. */
-    private val _currentFolderPath = MutableStateFlow<String?>(null)
+    /** The tag the browser has open, or null while showing the whole tag list. */
+    private val _selectedTag = MutableStateFlow<String?>(null)
+    val selectedTag: StateFlow<String?> = _selectedTag.asStateFlow()
 
     /**
-     * The whole folder tree, rebuilt whenever the library changes. Cheap enough to rebuild wholesale
-     * -- it is a grouping pass over rows already in memory -- and doing so means a newly scanned
-     * track appears in its folder without any invalidation logic.
+     * Every tag in the library: the genres the files declare, plus what on-device analysis has
+     * inferred. Rebuilt whenever the library or the analysis table changes, which is what makes a
+     * newly scanned or newly analysed track appear under its tags with no refresh button.
      */
-    private val folderTree: StateFlow<MusicFolderTree.FolderNode> = repository.allSongs
-        .map { MusicFolderTree.build(it) }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = MusicFolderTree.FolderNode("", "", emptyList(), emptyList())
-        )
+    val libraryTags: StateFlow<List<LibraryTag>> = combine(
+        repository.allSongs,
+        aiSongTagsDao?.observeAll() ?: MutableStateFlow(emptyList())
+    ) { songs, aiTags ->
+        MusicTagIndex.build(songs, aiTags)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
 
     /**
-     * The folder being shown. Resolved against the freshly built tree on every change rather than
-     * held as an object, so a rescan that replaces the tree cannot strand the browser on a node
-     * that no longer exists.
+     * The tags to show, narrowed by whatever is typed in the search box -- so the search bar
+     * filters tags while the tag view is open, the same way it filters songs elsewhere.
      */
-    val currentFolder: StateFlow<MusicFolderTree.FolderNode> =
-        combine(folderTree, _currentFolderPath) { tree, path ->
-            if (path == null) tree else MusicFolderTree.findNode(tree, path) ?: tree
-        }.stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = MusicFolderTree.FolderNode("", "", emptyList(), emptyList())
-        )
+    val visibleTags: StateFlow<List<LibraryTag>> = combine(
+        libraryTags,
+        _searchQuery
+    ) { tags, query ->
+        MusicTagIndex.matching(tags, query)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
 
-    /** True when there is a parent folder to go back to. */
-    val canNavigateUp: StateFlow<Boolean> = combine(folderTree, _currentFolderPath) { tree, path ->
-        path != null && path != tree.path
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+    /** The songs carrying the open tag, in library order. Empty while no tag is open. */
+    val songsForSelectedTag: StateFlow<List<Song>> = combine(
+        repository.allSongs,
+        libraryTags,
+        _selectedTag,
+        downloadedOnly
+    ) { songs, tags, selected, localOnly ->
+        if (selected == null) {
+            emptyList()
+        } else {
+            val ids = tags.firstOrNull { it.name.equals(selected, ignoreCase = true) }?.songIds.orEmpty()
+            songs.filter { it.id in ids && (!localOnly || it.isDownloaded) }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
 
-    fun setFolderBrowsingEnabled(enabled: Boolean) {
-        _folderBrowsingEnabled.value = enabled
-        if (!enabled) _currentFolderPath.value = null
+    /**
+     * Switches views. Leaving the tag browser closes the open tag, so coming back to it later
+     * starts at the tag list rather than wherever the user last stopped.
+     */
+    fun setLibraryView(view: LibraryView) {
+        _libraryView.value = view
+        if (view != LibraryView.TAGS) _selectedTag.value = null
     }
 
-    fun openFolder(path: String) {
-        _currentFolderPath.value = path
+    /** Opens one tag, or goes back to the tag list when [tag] is null. */
+    fun selectTag(tag: String?) {
+        _selectedTag.value = tag
     }
-
-    /** Steps up one directory, stopping at the top of the tree rather than walking off it. */
-    fun navigateUpFolder() {
-        val current = _currentFolderPath.value ?: return
-        val parent = current.substringBeforeLast('/', missingDelimiterValue = "")
-        _currentFolderPath.value = parent.takeIf { it.isNotEmpty() && it != current }
-    }
-
-    /** Every track in the open folder and everything below it, in the order they are displayed. */
-    fun songsInFolderRecursively(node: MusicFolderTree.FolderNode): List<Song> =
-        node.songs + node.subfolders.flatMap { songsInFolderRecursively(it) }
 
     // Multi-select: a non-empty set means selection mode is active. Long-pressing a song starts
     // it; tapping any song while active toggles that song instead of playing it.
@@ -496,7 +527,8 @@ class LibraryViewModel(
         private val appPreferences: AppPreferences? = null,
         private val youtubeExtractor: YouTubeExtractor? = null,
         private val tagEditorManager: TagEditorManager? = null,
-        private val musicBrowser: YouTubeMusicBrowser? = null
+        private val musicBrowser: YouTubeMusicBrowser? = null,
+        private val aiSongTagsDao: com.example.tgmusicai.data.local.dao.AiSongTagsDao? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -508,7 +540,8 @@ class LibraryViewModel(
                 appPreferences = appPreferences,
                 youtubeExtractor = youtubeExtractor,
                 tagEditorManager = tagEditorManager,
-                musicBrowser = musicBrowser
+                musicBrowser = musicBrowser,
+                aiSongTagsDao = aiSongTagsDao
             ) as T
         }
     }

@@ -210,25 +210,10 @@ fun MainScreen(
                     // Home, Library and Explore used to be listed here as well, which meant three
                     // of the six entries did exactly what the bottom bar already did.
 
-                    // Nav item: Discover (YouTube Music moods, genres and charts)
-                    NavigationDrawerItem(
-                        icon = { Icon(Icons.Rounded.Explore, contentDescription = null) },
-                        label = { Text("Discover", fontWeight = FontWeight.SemiBold) },
-                        selected = currentDestination is Screen.Discover,
-                        onClick = {
-                            navigateTopLevel(Screen.Discover)
-                            scope.launch { drawerState.close() }
-                        },
-                        colors = NavigationDrawerItemDefaults.colors(
-                            selectedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            selectedTextColor = MaterialTheme.colorScheme.onBackground,
-                            unselectedContainerColor = Color.Transparent,
-                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
-                        ),
-                        modifier = Modifier.padding(vertical = 2.dp)
-                    )
+                    // Discover is not listed here: it is one of the Library screen's views now,
+                    // reached from that screen's Songs / Folders / Discover switcher. Browsing the
+                    // cloud catalogue belongs with the library it adds to, not in a drawer beside
+                    // it.
 
                     // Nav item: Stats
                     NavigationDrawerItem(
@@ -381,7 +366,7 @@ fun MainScreen(
                                     if (likedPlaylist != null) {
                                         backStack.add(Screen.PlaylistDetail(likedPlaylist.playlistId, likedPlaylist.name))
                                     } else {
-                                        backStack.add(Screen.Playlists)
+                                        navigateTopLevel(Screen.Library)
                                     }
                                     scope.launch { drawerState.close() }
                                 }
@@ -459,15 +444,6 @@ fun MainScreen(
                         )
 
                         NavigationBarItem(
-                            selected = currentDestination is Screen.Playlists,
-                            onClick = {
-                                navigateTopLevel(Screen.Playlists)
-                            },
-                            icon = { Icon(Icons.AutoMirrored.Rounded.QueueMusic, contentDescription = "Playlists") },
-                            label = { Text("Playlists") }
-                        )
-
-                        NavigationBarItem(
                             selected = currentDestination is Screen.Alarms,
                             onClick = {
                                 navigateTopLevel(Screen.Alarms)
@@ -510,20 +486,13 @@ fun MainScreen(
                                             currentTheme = currentTheme,
                                             onSelectTheme = onSelectTheme,
                                             onOpenDrawer = { scope.launch { drawerState.open() } },
-                                            onOpenSettings = { backStack.add(Screen.Settings) }
-                                        )
-                                    }
-                                    is Screen.Discover -> {
-                                        DiscoverScreen(
-                                            discoverViewModel = discoverViewModel,
-                                            onOpenDrawer = { scope.launch { drawerState.open() } },
-                                            onPlayTrack = { result ->
+                                            onOpenSettings = { backStack.add(Screen.Settings) },
+                                            onPlayCloudResult = { result ->
                                                 youTubeViewModel.playTrack(result, mediaControllerManager)
                                                 playerViewModel.expandNowPlaying()
                                             },
-                                            onDownloadTrack = { result -> youTubeViewModel.downloadTrack(result) },
-                                            onOpenAlbum = { album ->
-                                                backStack.add(Screen.AlbumDetail(album.browseId, album.title))
+                                            onDownloadCloudResult = { result ->
+                                                youTubeViewModel.downloadTrack(result)
                                             }
                                         )
                                     }
@@ -580,6 +549,12 @@ fun MainScreen(
                                             libraryViewModel = libraryViewModel,
                                             playerViewModel = playerViewModel,
                                             recognitionViewModel = recognitionViewModel,
+                                            discoverViewModel = discoverViewModel,
+                                            playlistViewModel = playlistViewModel,
+                                            onPlaylistClick = { playlistId, playlistName ->
+                                                backStack.add(Screen.PlaylistDetail(playlistId, playlistName))
+                                            },
+                                            onOpenYouTubeImport = { navigateTopLevel(Screen.GoogleSync) },
                                             downloadMap = downloadMap,
                                             onOpenDrawer = { scope.launch { drawerState.open() } },
                                             onPlayCloudResult = { result ->
@@ -595,15 +570,6 @@ fun MainScreen(
                                             onOpenAlbum = { album ->
                                                 backStack.add(Screen.AlbumDetail(album.browseId, album.title))
                                             }
-                                        )
-                                    }
-                                    is Screen.Playlists -> {
-                                        PlaylistsScreen(
-                                            playlistViewModel = playlistViewModel,
-                                            onPlaylistClick = { playlistId, playlistName ->
-                                                backStack.add(Screen.PlaylistDetail(playlistId, playlistName))
-                                            },
-                                            onOpenDrawer = { scope.launch { drawerState.open() } }
                                         )
                                     }
                                     is Screen.Alarms -> {

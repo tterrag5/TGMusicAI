@@ -26,7 +26,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CloudDownload
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadDone
+import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
@@ -91,7 +93,9 @@ fun HomeScreen(
     onSelectTheme: (String) -> Unit = {},
     currentTheme: String = "YT_DARK",
     onOpenDrawer: () -> Unit = {},
-    onOpenSettings: () -> Unit = {}
+    onOpenSettings: () -> Unit = {},
+    onPlayCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {},
+    onDownloadCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {}
 ) {
     val isOnline by homeViewModel.isOnline.collectAsState()
     val isDownloadedOnly by homeViewModel.isDownloadedOnly.collectAsState()
@@ -102,6 +106,7 @@ fun HomeScreen(
     val listenAgainSongs by homeViewModel.listenAgainSongs.collectAsState()
     val mostPlayedSongs by homeViewModel.mostPlayedSongs.collectAsState()
     val recommendedSongs by homeViewModel.recommendedSongs.collectAsState()
+    val cloudRecommendations by homeViewModel.cloudRecommendations.collectAsState()
     val isBackupLoading by homeViewModel.isBackupLoading.collectAsState()
 
     var songPendingRemoveDownload by remember { mutableStateOf<Song?>(null) }
@@ -344,6 +349,31 @@ fun HomeScreen(
                                     onPlay = { playerViewModel.playSong(song, queue = recommendedSongs) },
                                     onPinToggle = { homeViewModel.togglePinSong(song) },
                                     onRemoveDownload = { songPendingRemoveDownload = song }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Section 2c: RECOMMENDED FOR YOU (cloud)
+                // Music the library does not hold yet, found from the artists the user has been
+                // playing. Absent rather than empty for the same reason "Made for you" is: on a
+                // new install, offline, or when YouTube Music answers with nothing, there is no
+                // row at all instead of a heading over blank space.
+                if (cloudRecommendations.size >= MIN_RECOMMENDATIONS_TO_SHOW) {
+                    item {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        SectionTitle(title = "Recommended for you", icon = Icons.Rounded.Explore)
+
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            items(cloudRecommendations, key = { it.videoId }) { result ->
+                                CloudSongCardItem(
+                                    result = result,
+                                    onPlay = { onPlayCloudResult(result) },
+                                    onDownload = { onDownloadCloudResult(result) }
                                 )
                             }
                         }
@@ -671,6 +701,101 @@ fun PinnedSongCard(
             )
             Text(
                 text = "📌 Song • ${song.artist}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/**
+ * One recommended cloud track, styled to match [SongCardItem] so the row reads as part of Home
+ * rather than as a YouTube widget dropped into it. The corner action downloads instead of opening
+ * a menu: nothing else in that menu (pin, remove download) applies to a track that is not in the
+ * library yet.
+ */
+@Composable
+fun CloudSongCardItem(
+    result: com.example.tgmusicai.data.youtube.YouTubeSearchResult,
+    onPlay: () -> Unit,
+    onDownload: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .width(150.dp)
+            .clickable(onClick = onPlay),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                if (result.thumbnailUri.isNotBlank()) {
+                    AsyncImage(
+                        model = result.thumbnailUri,
+                        contentDescription = result.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Rounded.MusicNote,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(40.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(Color.Black.copy(alpha = 0.5f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = "Play",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(4.dp),
+                    contentAlignment = Alignment.TopEnd
+                ) {
+                    IconButton(onClick = onDownload, modifier = Modifier.size(28.dp)) {
+                        Icon(
+                            imageVector = Icons.Rounded.Download,
+                            contentDescription = "Download",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = result.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = result.uploader,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
                 maxLines = 1,

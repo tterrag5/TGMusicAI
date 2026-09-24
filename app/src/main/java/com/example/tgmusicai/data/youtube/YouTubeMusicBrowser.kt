@@ -200,10 +200,14 @@ class YouTubeMusicBrowser(
     suspend fun searchArtists(query: String): List<YouTubeArtistRef> {
         val root = search(query, SEARCH_PARAMS_ARTISTS) ?: return emptyList()
         return try {
-            parseSearchRows(root).mapNotNull { (browseId, title, _) ->
+            parseSearchRows(root).mapNotNull { row ->
                 // Artist browse ids all start with UC; anything else in this shelf is a different
                 // kind of result that slipped through the filter.
-                if (!browseId.startsWith("UC")) null else YouTubeArtistRef(browseId, title, null)
+                if (!row.browseId.startsWith("UC")) {
+                    null
+                } else {
+                    YouTubeArtistRef(row.browseId, row.title, row.thumbnailUrl)
+                }
             }
         } catch (e: Throwable) {
             Log.e(TAG, "Could not parse artist search results", e)
@@ -215,8 +219,12 @@ class YouTubeMusicBrowser(
     suspend fun searchAlbums(query: String): List<YouTubeAlbumRef> {
         val root = search(query, SEARCH_PARAMS_ALBUMS) ?: return emptyList()
         return try {
-            parseSearchRows(root).mapNotNull { (browseId, title, subtitle) ->
-                if (!browseId.startsWith("MPRE")) null else YouTubeAlbumRef(browseId, title, subtitle, null)
+            parseSearchRows(root).mapNotNull { row ->
+                if (!row.browseId.startsWith("MPRE")) {
+                    null
+                } else {
+                    YouTubeAlbumRef(row.browseId, row.title, row.subtitle, row.thumbnailUrl)
+                }
             }
         } catch (e: Throwable) {
             Log.e(TAG, "Could not parse album search results", e)
@@ -224,8 +232,41 @@ class YouTubeMusicBrowser(
         }
     }
 
-    /** Pulls (browseId, title, subtitle) out of each result row in a search response. */
-    private fun parseSearchRows(root: JSONObject): List<Triple<String, String, String>> {
+    /**
+     * Playlists and mixes matching [query] -- YouTube Music's own "Mix", "Radio" and user
+     * playlists, not albums.
+     *
+     * Results are kept by browse id prefix rather than trusted from the search filter. A playlist
+     * of any kind is addressed by a `VL`-prefixed browse id, so that prefix is what actually
+     * distinguishes one from the album and artist rows YouTube mixes into the same response when
+     * it decides the filter token is stale.
+     */
+    suspend fun searchPlaylists(query: String): List<YouTubeAlbumRef> {
+        val root = search(query, SEARCH_PARAMS_PLAYLISTS) ?: return emptyList()
+        return try {
+            parseSearchRows(root).mapNotNull { row ->
+                if (!row.browseId.startsWith("VL")) {
+                    null
+                } else {
+                    YouTubeAlbumRef(row.browseId, row.title, row.subtitle, row.thumbnailUrl)
+                }
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "Could not parse playlist search results", e)
+            emptyList()
+        }
+    }
+
+    /** One row of a search response: what it is, what it is called, and what it looks like. */
+    private data class SearchRow(
+        val browseId: String,
+        val title: String,
+        val subtitle: String,
+        val thumbnailUrl: String?
+    )
+
+    /** Pulls the identifying fields out of each result row in a search response. */
+    private fun parseSearchRows(root: JSONObject): List<SearchRow> {
         val rows = mutableListOf<JSONObject>()
         collectRenderers(root, "musicResponsiveListItemRenderer", rows)
         val seen = mutableSetOf<String>()
@@ -238,7 +279,9 @@ class YouTubeMusicBrowser(
                 ?: return@mapNotNull null
             if (!seen.add(browseId)) return@mapNotNull null
             val title = flexColumnText(row, 0).takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            Triple(browseId, title, flexColumnText(row, 1))
+            // Taken per row rather than per page: results are drawn as artwork tiles now, and a
+            // tile with no artwork is a grey square with no way to tell one apart from the next.
+            SearchRow(browseId, title, flexColumnText(row, 1), findThumbnailUrl(row))
         }
     }
 
@@ -512,6 +555,12 @@ class YouTubeMusicBrowser(
          */
         private const val SEARCH_PARAMS_ARTISTS = "EgWKAQIgAWoKEAkQChAFEAMQBA=="
         private const val SEARCH_PARAMS_ALBUMS = "EgWKAQIYAWoKEAkQChAFEAMQBA=="
+
+        /**
+         * The "playlists" search filter. Longer than the others because the playlist filter is
+         * expressed as a nested option group rather than a single type byte.
+         */
+        private const val SEARCH_PARAMS_PLAYLISTS = "Eg-KAQwIABAAGAAgACgBMABqChAEEAMQCRAFEAo="
 
         private val HEADER_RENDERER_KEYS = listOf(
             "musicImmersiveHeaderRenderer",

@@ -4,11 +4,14 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -16,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -36,6 +40,7 @@ import androidx.compose.material.icons.automirrored.rounded.ViewList
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,6 +50,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.CircularProgressIndicator
@@ -69,13 +77,15 @@ import androidx.compose.ui.unit.dp
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.ui.components.AddToPlaylistDialog
+import com.example.tgmusicai.data.repository.LibraryTag
+import com.example.tgmusicai.ui.components.CloudTile
 import com.example.tgmusicai.ui.components.SongGridItem
 import com.example.tgmusicai.ui.components.YouTubeSearchResultItem
-import com.example.tgmusicai.data.repository.MusicFolderTree
 import com.example.tgmusicai.ui.components.RecognizeSongDialog
 import com.example.tgmusicai.ui.components.SongItem
 import com.example.tgmusicai.ui.components.TagEditorDialog
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
+import com.example.tgmusicai.ui.viewmodel.LibraryView
 import com.example.tgmusicai.ui.viewmodel.LibraryViewModel
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
 import kotlinx.coroutines.flow.firstOrNull
@@ -92,6 +102,10 @@ fun LibraryScreen(
     libraryViewModel: LibraryViewModel,
     playerViewModel: PlayerViewModel,
     recognitionViewModel: com.example.tgmusicai.ui.viewmodel.RecognitionViewModel? = null,
+    discoverViewModel: com.example.tgmusicai.ui.viewmodel.DiscoverViewModel? = null,
+    playlistViewModel: com.example.tgmusicai.ui.viewmodel.PlaylistViewModel? = null,
+    onPlaylistClick: (playlistId: Long, playlistName: String) -> Unit = { _, _ -> },
+    onOpenYouTubeImport: (() -> Unit)? = null,
     downloadMap: Map<String, com.example.tgmusicai.data.youtube.DownloadProgressState> = emptyMap(),
     onOpenDrawer: () -> Unit = {},
     onPlayCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {},
@@ -117,9 +131,13 @@ fun LibraryScreen(
     val cloudArtists by libraryViewModel.cloudArtists.collectAsState()
     val cloudAlbums by libraryViewModel.cloudAlbums.collectAsState()
     val songForTagEdit by libraryViewModel.songForTagEdit.collectAsState()
-    val folderBrowsingEnabled by libraryViewModel.folderBrowsingEnabled.collectAsState()
-    val currentFolder by libraryViewModel.currentFolder.collectAsState()
-    val canNavigateUpFolder by libraryViewModel.canNavigateUp.collectAsState()
+    val libraryView by libraryViewModel.libraryView.collectAsState()
+    val tagsEnabled = libraryView == LibraryView.TAGS
+    val discoverEnabled = libraryView == LibraryView.DISCOVER
+    val playlistsEnabled = libraryView == LibraryView.PLAYLISTS
+    val visibleTags by libraryViewModel.visibleTags.collectAsState()
+    val selectedTag by libraryViewModel.selectedTag.collectAsState()
+    val songsForSelectedTag by libraryViewModel.songsForSelectedTag.collectAsState()
     var showRecognizeDialog by remember { mutableStateOf(false) }
     val tagWriteConsentRequest by libraryViewModel.tagWriteConsentRequest.collectAsState()
 
@@ -248,19 +266,7 @@ fun LibraryScreen(
                                 )
                             }
                         }
-                        IconButton(
-                            onClick = { libraryViewModel.setFolderBrowsingEnabled(!folderBrowsingEnabled) }
-                        ) {
-                            Icon(
-                                imageVector = if (folderBrowsingEnabled) Icons.Rounded.LibraryMusic else Icons.Rounded.Folder,
-                                contentDescription = if (folderBrowsingEnabled) {
-                                    "Show all songs"
-                                } else {
-                                    "Browse by folder"
-                                }
-                            )
-                        }
-                        if (!folderBrowsingEnabled) {
+                        if (libraryView == LibraryView.SONGS) {
                             IconButton(onClick = libraryViewModel::toggleGridView) {
                                 Icon(
                                     imageVector = if (isGridView) Icons.AutoMirrored.Rounded.ViewList else Icons.Rounded.GridView,
@@ -282,6 +288,41 @@ fun LibraryScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            // Songs / Folders / Discover. A segmented control rather than a fourth toolbar
+            // icon: the bar already carries three, and an icon does not say what the current view
+            // is -- with three views that matters, because two of them look nothing like a song
+            // list.
+            SingleChoiceSegmentedButtonRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                val views = listOf(
+                    LibraryView.SONGS to "Songs",
+                    LibraryView.TAGS to "Tags",
+                    LibraryView.PLAYLISTS to "Playlists",
+                    LibraryView.DISCOVER to "Discover"
+                )
+                views.forEachIndexed { index, (view, label) ->
+                    SegmentedButton(
+                        selected = libraryView == view,
+                        onClick = { libraryViewModel.setLibraryView(view) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = views.size),
+                        // A view is only reachable with the model behind it; without one the
+                        // segment would open a permanently empty page.
+                        enabled = when (view) {
+                            LibraryView.DISCOVER -> discoverViewModel != null
+                            LibraryView.PLAYLISTS -> playlistViewModel != null
+                            else -> true
+                        },
+                        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    )
+                }
+            }
+
+            // Search and the downloaded-only filter act on the local song list, so they are
+            // hidden in the views that have nothing for them to filter.
+            if (!discoverEnabled && !playlistsEnabled) {
             // Search Input Field
             OutlinedTextField(
                 value = searchQuery,
@@ -352,39 +393,57 @@ fun LibraryScreen(
                     onCheckedChange = libraryViewModel::setDownloadedOnly
                 )
             }
+            }
 
             // While searching, local and cloud results share one scrolling list so YouTube hits
             // read as a continuation of the library rather than a separate place to go. Browsing
             // (no query) keeps the grid/list layout.
-            if (folderBrowsingEnabled) {
-                FolderBrowser(
-                    folder = currentFolder,
-                    canNavigateUp = canNavigateUpFolder,
+            if (playlistsEnabled && playlistViewModel != null) {
+                PlaylistsContent(
+                    playlistViewModel = playlistViewModel,
+                    onPlaylistClick = onPlaylistClick,
+                    onOpenYouTubeImport = onOpenYouTubeImport
+                )
+            } else if (discoverEnabled && discoverViewModel != null) {
+                DiscoverContent(
+                    discoverViewModel = discoverViewModel,
+                    onPlayTrack = onPlayCloudResult,
+                    onDownloadTrack = onDownloadCloudResult,
+                    onOpenAlbum = onOpenAlbum,
+                    onOpenArtist = onOpenArtist
+                )
+            } else if (tagsEnabled) {
+                TagBrowser(
+                    tags = visibleTags,
+                    selectedTag = selectedTag,
+                    songsForSelectedTag = songsForSelectedTag,
                     currentSongId = currentSong?.id,
-                    onNavigateUp = libraryViewModel::navigateUpFolder,
-                    onOpenFolder = libraryViewModel::openFolder,
+                    onSelectTag = libraryViewModel::selectTag,
                     onPlaySong = { song ->
-                        playerViewModel.playSong(
-                            song = song,
-                            queue = libraryViewModel.songsInFolderRecursively(currentFolder)
-                        )
+                        playerViewModel.playSong(song = song, queue = songsForSelectedTag)
                     },
-                    onAddToPlaylist = libraryViewModel::openAddToPlaylistDialog,
-                    onEditTags = { song ->
-                        if (libraryViewModel.canEditTags(song)) libraryViewModel.openTagEditor(song)
+                    onPlayTag = {
+                        songsForSelectedTag.firstOrNull()?.let { first ->
+                            playerViewModel.playSong(song = first, queue = songsForSelectedTag)
+                        }
                     },
-                    onPlayFolder = { folder ->
-                        val queue = libraryViewModel.songsInFolderRecursively(folder)
-                        queue.firstOrNull()?.let { playerViewModel.playSong(song = it, queue = queue) }
-                    }
+                    onAddToPlaylist = libraryViewModel::openAddToPlaylistDialog
                 )
             } else if (searchQuery.isNotBlank() && !downloadedOnly) {
-                LazyColumn(
+                // Results are tiles, in the same three-column grid the library browses in, so a
+                // search does not change the shape of the screen under the user. Local matches
+                // come first, then the artists and albums that match, then YouTube's tracks.
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 96.dp)
+                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 96.dp)
                 ) {
+                    fun fullWidthItem(key: String, content: @Composable () -> Unit) {
+                        item(key = key, span = { GridItemSpan(maxLineSpan) }) { content() }
+                    }
+
                     items(songs, key = { "local_${it.id}" }) { song ->
-                        SongItem(
+                        SongGridItem(
                             song = song,
                             isPlaying = currentSong?.id == song.id,
                             isSelected = song.id in selectedSongIds,
@@ -400,86 +459,43 @@ fun LibraryScreen(
                             onScrapeClicked = { libraryViewModel.scrapeArtworkAndLyrics(song) },
                             onStartRadioClicked = { playerViewModel.startRadio(song) },
                             onAnalyzeWithAiClicked = { libraryViewModel.analyzeSongWithAi(song) },
-                            onEditTagsClicked = if (libraryViewModel.canEditTags(song)) {
-                                { libraryViewModel.openTagEditor(song) }
-                            } else {
-                                null
-                            },
-                            onSwipeToQueue = { playerViewModel.addToQueue(song) },
-                            onSwipeToLike = { libraryViewModel.toggleLikeSong(song) },
+                            onAddToQueueClicked = { playerViewModel.addToQueue(song) },
+                            onToggleLikeClicked = { libraryViewModel.toggleLikeSong(song) },
                             liveDownloadStatus = song.youtubeId?.let { downloadMap[it]?.status }
                         )
                     }
 
                     if (cloudArtists.isNotEmpty()) {
-                        item {
-                            Text(
-                                text = "Artists",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-                            )
-                        }
+                        fullWidthItem("heading_artists") { SearchSectionHeading("Artists") }
                         items(cloudArtists, key = { "artist_${it.browseId}" }) { artist ->
-                            Surface(
-                                onClick = { onOpenArtist(artist) },
-                                color = MaterialTheme.colorScheme.surface,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(
-                                    text = artist.name,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)
-                                )
-                            }
+                            CloudTile(
+                                title = artist.name,
+                                subtitle = "Artist",
+                                artworkUrl = artist.thumbnailUrl,
+                                onClick = { onOpenArtist(artist) }
+                            )
                         }
                     }
 
                     if (cloudAlbums.isNotEmpty()) {
-                        item {
-                            Text(
-                                text = "Albums",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-                            )
-                        }
+                        fullWidthItem("heading_albums") { SearchSectionHeading("Albums") }
                         items(cloudAlbums, key = { "cloudalbum_${it.browseId}" }) { album ->
-                            Surface(
-                                onClick = { onOpenAlbum(album) },
-                                color = MaterialTheme.colorScheme.surface,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
-                                    Text(
-                                        text = album.title,
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (album.subtitle.isNotBlank()) {
-                                        Text(
-                                            text = album.subtitle,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-                            }
+                            CloudTile(
+                                title = album.title,
+                                subtitle = album.subtitle,
+                                artworkUrl = album.thumbnailUrl,
+                                onClick = { onOpenAlbum(album) }
+                            )
                         }
                     }
 
                     if (isSearchingCloud || cloudResults.isNotEmpty()) {
-                        item {
+                        fullWidthItem("heading_youtube") {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                                    .padding(horizontal = 8.dp, vertical = 12.dp)
                             ) {
                                 Text(
                                     text = "From YouTube",
@@ -496,13 +512,13 @@ fun LibraryScreen(
                             }
                         }
                         items(cloudResults, key = { "cloud_${it.videoId}" }) { result ->
-                            YouTubeSearchResultItem(
-                                result = result,
-                                isExtracting = false,
-                                downloadState = downloadMap[result.videoId],
-                                onPlayClick = { onPlayCloudResult(result) },
-                                onDownloadClick = { onDownloadCloudResult(result) },
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            CloudTile(
+                                title = result.title,
+                                subtitle = result.uploader,
+                                artworkUrl = result.thumbnailUri,
+                                onClick = { onPlayCloudResult(result) },
+                                showPlayOverlay = true,
+                                onDownload = { onDownloadCloudResult(result) }
                             )
                         }
                     }
@@ -675,6 +691,17 @@ fun LibraryScreen(
 
 
 @Preview(showBackground = true)
+/** A section label inside the search results grid ("Artists", "Albums", "From YouTube"). */
+@Composable
+private fun SearchSectionHeading(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp)
+    )
+}
+
 @Composable
 fun LibraryScreenEmptyPreview() {
     TGMusicAITheme {
@@ -685,35 +712,98 @@ fun LibraryScreenEmptyPreview() {
 }
 
 /**
- * Browses the library the way it is laid out on disk: subfolders first, then the tracks sitting
- * directly in the folder that is open.
+ * Browses the library by tag: the genres the files declare, and what on-device analysis heard in
+ * the audio or read in the lyrics.
  *
- * Useful for a library organised by folder rather than by tags -- bootlegs, live sets, anything
- * ripped without clean metadata -- where "which folder did I put it in" is the only thing the user
- * actually remembers about a track.
+ * Tags are chips rather than a list because a library has far more of them than folders, most
+ * carrying only a few songs, and a chip says its whole name and count in a fraction of a row. The
+ * Library's own search box filters them, so finding a tag uses the same control as finding a song
+ * instead of introducing a second search.
+ *
+ * Opening a tag shows its songs in the same grid the library browses in, so a tag reads as another
+ * way of looking at the library rather than as a separate place.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun FolderBrowser(
-    folder: MusicFolderTree.FolderNode,
-    canNavigateUp: Boolean,
+private fun TagBrowser(
+    tags: List<LibraryTag>,
+    selectedTag: String?,
+    songsForSelectedTag: List<Song>,
     currentSongId: Long?,
-    onNavigateUp: () -> Unit,
-    onOpenFolder: (String) -> Unit,
-    onPlaySong: (com.example.tgmusicai.data.local.entity.Song) -> Unit,
-    onAddToPlaylist: (com.example.tgmusicai.data.local.entity.Song) -> Unit,
-    onEditTags: (com.example.tgmusicai.data.local.entity.Song) -> Unit,
-    onPlayFolder: (MusicFolderTree.FolderNode) -> Unit
+    onSelectTag: (String?) -> Unit,
+    onPlaySong: (Song) -> Unit,
+    onPlayTag: () -> Unit,
+    onAddToPlaylist: (Song) -> Unit
 ) {
-    if (folder.subfolders.isEmpty() && folder.songs.isEmpty()) {
+    if (selectedTag != null) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                IconButton(onClick = { onSelectTag(null) }) {
+                    Icon(
+                        Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Back to all tags"
+                    )
+                }
+                Text(
+                    text = selectedTag,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (songsForSelectedTag.isNotEmpty()) {
+                    TextButton(onClick = onPlayTag) { Text("Play all") }
+                }
+            }
+
+            if (songsForSelectedTag.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Nothing under this tag right now.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(32.dp)
+                    )
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 96.dp)
+                ) {
+                    items(songsForSelectedTag, key = { "tagsong_${it.id}" }) { song ->
+                        SongGridItem(
+                            song = song,
+                            isPlaying = currentSongId == song.id,
+                            onClick = { onPlaySong(song) },
+                            onAddToPlaylistClicked = { onAddToPlaylist(song) }
+                        )
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    if (tags.isEmpty()) {
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
             Text(
-                // The folder of a track is recorded when it is scanned, and filled in for older
-                // tracks by a background pass, so an empty tree usually means that pass has not
-                // finished rather than that there is nothing on the device.
-                text = "No folders yet. Local tracks appear here once they've been scanned.",
+                // Genres are read from each file when it is scanned and filled in for older tracks
+                // by a background pass, so an empty list usually means that pass has not finished
+                // -- or that nothing in the library carries a genre tag at all, which is common for
+                // tracks downloaded from YouTube.
+                text = "No tags yet. They appear as your tracks are scanned and analysed.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(32.dp)
@@ -726,81 +816,40 @@ private fun FolderBrowser(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 96.dp)
     ) {
-        item {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                if (canNavigateUp) {
-                    IconButton(onClick = onNavigateUp) {
-                        Icon(
-                            Icons.AutoMirrored.Rounded.ArrowBack,
-                            contentDescription = "Go to the parent folder"
-                        )
-                    }
-                }
+        val grouped = tags.groupBy { it.kind }
+        // Genres first: they are the user's own labels, written into the files by whoever tagged
+        // them. What the model inferred comes after, under headings that say so.
+        listOf(
+            LibraryTag.Kind.GENRE to "Genres",
+            LibraryTag.Kind.SOUND to "How it sounds",
+            LibraryTag.Kind.THEME to "What it's about"
+        ).forEach { (kind, heading) ->
+            val group = grouped[kind].orEmpty()
+            if (group.isEmpty()) return@forEach
+            item(key = "tagheading_$kind") {
                 Text(
-                    text = folder.name.ifBlank { "All folders" },
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    text = heading,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
                 )
-                if (folder.totalSongCount > 0) {
-                    TextButton(onClick = { onPlayFolder(folder) }) {
-                        Text("Play all")
-                    }
-                }
             }
-        }
-
-        items(folder.subfolders, key = { "folder_${it.path}" }) { child ->
-            Surface(
-                onClick = { onOpenFolder(child.path) },
-                color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
+            item(key = "taggroup_$kind") {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 14.dp)
+                        .padding(horizontal = 16.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Folder,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.size(16.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = child.name,
-                            style = MaterialTheme.typography.bodyLarge,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            // Counts everything beneath, not just what sits directly inside --
-                            // a folder of subfolders would otherwise read as empty.
-                            text = "${child.totalSongCount} ${if (child.totalSongCount == 1) "song" else "songs"}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                    group.forEach { tag ->
+                        AssistChip(
+                            onClick = { onSelectTag(tag.name) },
+                            label = { Text("${tag.name} · ${tag.songCount}") }
                         )
                     }
                 }
             }
-        }
-
-        items(folder.songs, key = { "song_${it.id}" }) { song ->
-            SongItem(
-                song = song,
-                isPlaying = currentSongId == song.id,
-                onClick = { onPlaySong(song) },
-                onAddToPlaylistClicked = { onAddToPlaylist(song) },
-                onEditTagsClicked = { onEditTags(song) }
-            )
         }
     }
 }
