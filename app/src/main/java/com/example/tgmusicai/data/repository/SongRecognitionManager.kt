@@ -266,8 +266,12 @@ class SongRecognitionManager(
         /**
          * Hashes per lookup query. SQLite refuses a statement with more than 999 bound parameters
          * by default, and a recognition attempt produces several times that.
+         *
+         * Not private so the instrumented test can chunk by the same number the production lookup
+         * uses. A test that hardcoded its own would keep passing if this one were raised past the
+         * limit it exists to respect.
          */
-        private const val SQL_PARAMETER_LIMIT = 900
+        internal const val SQL_PARAMETER_LIMIT = 900
 
         /**
          * Tried in order. UNPROCESSED bypasses the noise suppression and automatic gain control

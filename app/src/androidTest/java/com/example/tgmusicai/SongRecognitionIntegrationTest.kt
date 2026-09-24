@@ -7,6 +7,7 @@ import com.example.tgmusicai.ai.AudioFingerprinter
 import com.example.tgmusicai.ai.PcmDecoder
 import com.example.tgmusicai.data.local.AppDatabase
 import com.example.tgmusicai.data.local.entity.SongFingerprint
+import com.example.tgmusicai.data.repository.SongRecognitionManager
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -136,27 +137,51 @@ class SongRecognitionIntegrationTest {
 
     @Test
     fun hashLookupSurvivesMoreHashesThanSqliteWillBindAtOnce() = runBlocking {
-        // SQLite refuses a statement with more than 999 bound parameters. A few seconds of audio
-        // produces several times that, so the production path chunks them. If that chunking were
-        // wrong this would throw rather than fail an assertion -- which is the point of testing it
-        // against a real database rather than a map.
+        // SQLite refuses a statement with more than 999 bound parameters by default, so the
+        // production lookup chunks its hashes. This test drives that same chunk size against the
+        // real database and checks every row comes back.
+        //
+        // The hashes are part real and part synthetic, on purpose. Fingerprinting 30 seconds of
+        // this file's synthetic music yields thousands of landmarks but only ~660 *distinct*
+        // hashes: the fixture cycles a ten-note scale over two octaves, so its landmark pairs
+        // repeat constantly in a way real music's do not. Seeding the table from decoded audio
+        // alone would therefore never reach the limit this test exists to cross -- it would prove
+        // only that a sub-limit query works. The real landmarks keep the decode-and-fingerprint
+        // path covered; the synthetic hashes take the count past the limit.
+        val dao = database.songFingerprintDao()
         val pcm = PcmDecoder.decodeToMonoPcm16k(
             writeWav("chunking.wav", seconds = 30.0, seed = 41).absolutePath,
             240
         )!!
-        database.songFingerprintDao().insertAll(
-            AudioFingerprinter.fingerprint(pcm)
-                .map { SongFingerprint(songId = 9L, hash = it.hash, frameIndex = it.frameIndex) }
-        )
+        val realRows = AudioFingerprinter.fingerprint(pcm)
+            .map { SongFingerprint(songId = 9L, hash = it.hash, frameIndex = it.frameIndex) }
+            .distinctBy { it.hash }
+        assertTrue("Decoding produced no landmarks at all", realRows.isNotEmpty())
 
-        val distinctHashes = AudioFingerprinter.fingerprint(pcm).map { it.hash }.distinct()
-        assertTrue(
-            "Test audio produced only ${distinctHashes.size} distinct hashes, too few to exercise chunking",
-            distinctHashes.size > 999
-        )
+        val target = SongRecognitionManager.SQL_PARAMETER_LIMIT * 3
+        val usedHashes = realRows.map { it.hash }.toMutableSet()
+        val syntheticRows = mutableListOf<SongFingerprint>()
+        var candidate = Int.MIN_VALUE / 2
+        while (realRows.size + syntheticRows.size < target) {
+            if (usedHashes.add(candidate)) {
+                syntheticRows += SongFingerprint(songId = 9L, hash = candidate, frameIndex = syntheticRows.size)
+            }
+            candidate++
+        }
 
-        val found = distinctHashes.chunked(900).flatMap { database.songFingerprintDao().findByHashes(it) }
-        assertTrue("Chunked lookup returned nothing", found.isNotEmpty())
+        val allRows = realRows + syntheticRows
+        dao.insertAll(allRows)
+
+        val hashes = allRows.map { it.hash }
+        assertTrue("Fewer hashes than SQLite's parameter limit; nothing would be chunked", hashes.size > 999)
+
+        val found = hashes
+            .chunked(SongRecognitionManager.SQL_PARAMETER_LIMIT)
+            .flatMap { dao.findByHashes(it) }
+
+        // Every row, not merely a non-empty result: a chunking bug that dropped the last partial
+        // chunk would still return plenty of rows.
+        assertEquals("Chunked lookup lost rows", allRows.size, found.size)
     }
 
     @Test
