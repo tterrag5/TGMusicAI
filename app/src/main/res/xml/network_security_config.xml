@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext HTTP is blocked by default from Android 9 onward, and it stays blocked here for every
+  real destination. The single exception is the loopback interface.
+
+  LocalMediaHttpServer serves local audio over plain HTTP so a Cast device can fetch it. That does
+  not need this exception in production, because the Cast device is a separate machine making its
+  own request and this app's network policy has no bearing on what it may connect to. The exception
+  exists so the server can be exercised from inside the app's own process: instrumented tests
+  connect to it over loopback, and without this they fail with UnknownServiceException rather than
+  testing anything.
+
+  Scoped to localhost deliberately. Permitting cleartext app wide would weaken every other request
+  the app makes, including YouTube and SponsorBlock, just to make one local socket testable.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>
