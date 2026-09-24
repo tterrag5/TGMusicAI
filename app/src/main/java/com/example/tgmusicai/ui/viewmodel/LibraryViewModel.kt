@@ -39,6 +39,13 @@ import kotlinx.coroutines.launch
 private const val CLOUD_ENTITY_RESULT_LIMIT = 5
 
 /**
+ * How many tag chips to offer at once. The whole list can run to hundreds on an analysed library,
+ * which is a wall of chips rather than a filter; the most-used ones plus whatever the search box
+ * matches is what a person actually reaches for.
+ */
+private const val TAG_FILTER_CHIP_LIMIT = 12
+
+/**
  * The ways the Library screen can show itself.
  *
  * Discover and Playlists are views here rather than destinations of their own. Browsing YouTube
@@ -47,7 +54,7 @@ private const val CLOUD_ENTITY_RESULT_LIMIT = 5
  * Both used to sit elsewhere in the navigation (Discover in the drawer, Playlists in the bottom
  * bar), which split one idea across three places.
  */
-enum class LibraryView { SONGS, TAGS, PLAYLISTS, DISCOVER }
+enum class LibraryView { SONGS, PLAYLISTS, DISCOVER }
 
 class LibraryViewModel(
     private val repository: MusicRepository,
@@ -164,20 +171,98 @@ class LibraryViewModel(
         }
     }
 
+    // --- Tag filtering ---
+
+    /**
+     * Which of the library's views is showing. Deliberately not persisted: it is a way of looking
+     * for something right now, not a standing preference like grid-vs-list.
+     */
+    private val _libraryView = MutableStateFlow(LibraryView.SONGS)
+    val libraryView: StateFlow<LibraryView> = _libraryView.asStateFlow()
+
+    /** Tags the song list is currently narrowed to. Empty means no tag filter. */
+    private val _selectedTagFilters = MutableStateFlow<Set<String>>(emptySet())
+    val selectedTagFilters: StateFlow<Set<String>> = _selectedTagFilters.asStateFlow()
+
+    /**
+     * Every tag in the library: what the on-device models heard in the audio and read in the
+     * lyrics, plus the genres the files themselves declare. Rebuilt whenever the library or the
+     * analysis table changes, so a newly scanned or newly analysed track becomes filterable with
+     * no refresh button.
+     */
+    val libraryTags: StateFlow<List<LibraryTag>> = combine(
+        repository.allSongs,
+        aiSongTagsDao?.observeAll() ?: MutableStateFlow(emptyList())
+    ) { songs, aiTags ->
+        MusicTagIndex.build(songs, aiTags)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
+
+    /**
+     * The tag chips to offer above the song list: the most-used tags, narrowed by whatever is
+     * typed in the search box, with anything already selected kept in view so a filter can always
+     * be switched back off.
+     */
+    val visibleTags: StateFlow<List<LibraryTag>> = combine(
+        libraryTags,
+        _searchQuery,
+        _selectedTagFilters
+    ) { tags, query, selected ->
+        val matching = MusicTagIndex.matching(tags, query).take(TAG_FILTER_CHIP_LIMIT)
+        val selectedTags = tags.filter { it.name in selected }
+        (selectedTags + matching).distinctBy { it.name }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
+
+    /** Switches views. */
+    fun setLibraryView(view: LibraryView) {
+        _libraryView.value = view
+    }
+
+    /** Adds or removes one tag from the filter. */
+    fun toggleTagFilter(tag: String) {
+        _selectedTagFilters.update { current ->
+            if (tag in current) current - tag else current + tag
+        }
+    }
+
+    /** Drops every tag filter, showing the whole library again. */
+    fun clearTagFilters() {
+        _selectedTagFilters.value = emptySet()
+    }
+
     // Filtered song list based on search query and the downloaded-only toggle.
     val filteredSongs: StateFlow<List<Song>> = combine(
         repository.allSongs,
         _searchQuery,
-        downloadedOnly
-    ) { songsList, query, localOnly ->
-        val base = if (localOnly) songsList.filter { it.isDownloaded } else songsList
+        downloadedOnly,
+        _selectedTagFilters,
+        libraryTags
+    ) { songsList, query, localOnly, tagFilters, tags ->
+        val downloaded = if (localOnly) songsList.filter { it.isDownloaded } else songsList
+        // Selected chips narrow rather than widen: each one added means "and this too", which is
+        // what makes combining two tags useful instead of producing a longer list than either.
+        val base = if (tagFilters.isEmpty()) {
+            downloaded
+        } else {
+            val required = tagFilters.map { name ->
+                tags.firstOrNull { it.name.equals(name, ignoreCase = true) }?.songIds.orEmpty()
+            }
+            downloaded.filter { song -> required.all { song.id in it } }
+        }
         if (query.isBlank()) {
             base
         } else {
             // Tags count as something to search by, so typing "jazz" finds the tracks tagged jazz
-            // as well as the ones with it in a title. Read from the already-built index rather
-            // than re-derived, so the two views never disagree about what carries a tag.
-            val taggedIds = MusicTagIndex.songIdsMatching(libraryTags.value, query)
+            // as well as the ones with it in a title -- the chips are the deliberate version of
+            // the same idea, this is the one that works without knowing a tag exists.
+            val taggedIds = MusicTagIndex.songIdsMatching(tags, query)
             base.filter { song ->
                 song.id in taggedIds ||
                 song.title.contains(query, ignoreCase = true) ||
@@ -368,83 +453,6 @@ class LibraryViewModel(
         viewModelScope.launch {
             appPreferences?.setLibraryGridView(!isGridView.value)
         }
-    }
-
-    // --- Tag browsing ---
-
-    /**
-     * Which of the library's views is showing. Deliberately not persisted: it is a way of looking
-     * for something right now, not a standing preference like grid-vs-list.
-     */
-    private val _libraryView = MutableStateFlow(LibraryView.SONGS)
-    val libraryView: StateFlow<LibraryView> = _libraryView.asStateFlow()
-
-    /** The tag the browser has open, or null while showing the whole tag list. */
-    private val _selectedTag = MutableStateFlow<String?>(null)
-    val selectedTag: StateFlow<String?> = _selectedTag.asStateFlow()
-
-    /**
-     * Every tag in the library: the genres the files declare, plus what on-device analysis has
-     * inferred. Rebuilt whenever the library or the analysis table changes, which is what makes a
-     * newly scanned or newly analysed track appear under its tags with no refresh button.
-     */
-    val libraryTags: StateFlow<List<LibraryTag>> = combine(
-        repository.allSongs,
-        aiSongTagsDao?.observeAll() ?: MutableStateFlow(emptyList())
-    ) { songs, aiTags ->
-        MusicTagIndex.build(songs, aiTags)
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = emptyList()
-    )
-
-    /**
-     * The tags to show, narrowed by whatever is typed in the search box -- so the search bar
-     * filters tags while the tag view is open, the same way it filters songs elsewhere.
-     */
-    val visibleTags: StateFlow<List<LibraryTag>> = combine(
-        libraryTags,
-        _searchQuery
-    ) { tags, query ->
-        MusicTagIndex.matching(tags, query)
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = emptyList()
-    )
-
-    /** The songs carrying the open tag, in library order. Empty while no tag is open. */
-    val songsForSelectedTag: StateFlow<List<Song>> = combine(
-        repository.allSongs,
-        libraryTags,
-        _selectedTag,
-        downloadedOnly
-    ) { songs, tags, selected, localOnly ->
-        if (selected == null) {
-            emptyList()
-        } else {
-            val ids = tags.firstOrNull { it.name.equals(selected, ignoreCase = true) }?.songIds.orEmpty()
-            songs.filter { it.id in ids && (!localOnly || it.isDownloaded) }
-        }
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = emptyList()
-    )
-
-    /**
-     * Switches views. Leaving the tag browser closes the open tag, so coming back to it later
-     * starts at the tag list rather than wherever the user last stopped.
-     */
-    fun setLibraryView(view: LibraryView) {
-        _libraryView.value = view
-        if (view != LibraryView.TAGS) _selectedTag.value = null
-    }
-
-    /** Opens one tag, or goes back to the tag list when [tag] is null. */
-    fun selectTag(tag: String?) {
-        _selectedTag.value = tag
     }
 
     // Multi-select: a non-empty set means selection mode is active. Long-pressing a song starts

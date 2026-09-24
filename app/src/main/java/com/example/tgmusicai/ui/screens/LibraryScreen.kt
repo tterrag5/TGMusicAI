@@ -10,14 +10,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -40,7 +39,6 @@ import androidx.compose.material.icons.automirrored.rounded.ViewList
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -56,6 +54,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -132,12 +131,10 @@ fun LibraryScreen(
     val cloudAlbums by libraryViewModel.cloudAlbums.collectAsState()
     val songForTagEdit by libraryViewModel.songForTagEdit.collectAsState()
     val libraryView by libraryViewModel.libraryView.collectAsState()
-    val tagsEnabled = libraryView == LibraryView.TAGS
     val discoverEnabled = libraryView == LibraryView.DISCOVER
     val playlistsEnabled = libraryView == LibraryView.PLAYLISTS
     val visibleTags by libraryViewModel.visibleTags.collectAsState()
-    val selectedTag by libraryViewModel.selectedTag.collectAsState()
-    val songsForSelectedTag by libraryViewModel.songsForSelectedTag.collectAsState()
+    val selectedTagFilters by libraryViewModel.selectedTagFilters.collectAsState()
     var showRecognizeDialog by remember { mutableStateOf(false) }
     val tagWriteConsentRequest by libraryViewModel.tagWriteConsentRequest.collectAsState()
 
@@ -299,7 +296,6 @@ fun LibraryScreen(
             ) {
                 val views = listOf(
                     LibraryView.SONGS to "Songs",
-                    LibraryView.TAGS to "Tags",
                     LibraryView.PLAYLISTS to "Playlists",
                     LibraryView.DISCOVER to "Discover"
                 )
@@ -393,6 +389,42 @@ fun LibraryScreen(
                     onCheckedChange = libraryViewModel::setDownloadedOnly
                 )
             }
+
+            // Filter chips: what the on-device models heard in each track, plus the genres the
+            // files declare. They narrow the list below rather than opening a section of their
+            // own -- a tag is a way of asking "which of my songs are like this", which is the
+            // same question the search box answers.
+            if (visibleTags.isNotEmpty()) {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (selectedTagFilters.isNotEmpty()) {
+                        item(key = "cleartags") {
+                            FilterChip(
+                                selected = false,
+                                onClick = libraryViewModel::clearTagFilters,
+                                label = { Text("Clear") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Clear,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            )
+                        }
+                    }
+                    items(visibleTags, key = { "tag_${it.name}" }) { tag ->
+                        FilterChip(
+                            selected = tag.name in selectedTagFilters,
+                            onClick = { libraryViewModel.toggleTagFilter(tag.name) },
+                            label = { Text("${tag.name} · ${tag.songCount}") }
+                        )
+                    }
+                }
+            }
             }
 
             // While searching, local and cloud results share one scrolling list so YouTube hits
@@ -411,23 +443,6 @@ fun LibraryScreen(
                     onDownloadTrack = onDownloadCloudResult,
                     onOpenAlbum = onOpenAlbum,
                     onOpenArtist = onOpenArtist
-                )
-            } else if (tagsEnabled) {
-                TagBrowser(
-                    tags = visibleTags,
-                    selectedTag = selectedTag,
-                    songsForSelectedTag = songsForSelectedTag,
-                    currentSongId = currentSong?.id,
-                    onSelectTag = libraryViewModel::selectTag,
-                    onPlaySong = { song ->
-                        playerViewModel.playSong(song = song, queue = songsForSelectedTag)
-                    },
-                    onPlayTag = {
-                        songsForSelectedTag.firstOrNull()?.let { first ->
-                            playerViewModel.playSong(song = first, queue = songsForSelectedTag)
-                        }
-                    },
-                    onAddToPlaylist = libraryViewModel::openAddToPlaylistDialog
                 )
             } else if (searchQuery.isNotBlank() && !downloadedOnly) {
                 // Results are tiles, in the same three-column grid the library browses in, so a
@@ -707,149 +722,6 @@ fun LibraryScreenEmptyPreview() {
     TGMusicAITheme {
         Box(modifier = Modifier.fillMaxSize()) {
             Text("Library Preview")
-        }
-    }
-}
-
-/**
- * Browses the library by tag: the genres the files declare, and what on-device analysis heard in
- * the audio or read in the lyrics.
- *
- * Tags are chips rather than a list because a library has far more of them than folders, most
- * carrying only a few songs, and a chip says its whole name and count in a fraction of a row. The
- * Library's own search box filters them, so finding a tag uses the same control as finding a song
- * instead of introducing a second search.
- *
- * Opening a tag shows its songs in the same grid the library browses in, so a tag reads as another
- * way of looking at the library rather than as a separate place.
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun TagBrowser(
-    tags: List<LibraryTag>,
-    selectedTag: String?,
-    songsForSelectedTag: List<Song>,
-    currentSongId: Long?,
-    onSelectTag: (String?) -> Unit,
-    onPlaySong: (Song) -> Unit,
-    onPlayTag: () -> Unit,
-    onAddToPlaylist: (Song) -> Unit
-) {
-    if (selectedTag != null) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            ) {
-                IconButton(onClick = { onSelectTag(null) }) {
-                    Icon(
-                        Icons.AutoMirrored.Rounded.ArrowBack,
-                        contentDescription = "Back to all tags"
-                    )
-                }
-                Text(
-                    text = selectedTag,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                if (songsForSelectedTag.isNotEmpty()) {
-                    TextButton(onClick = onPlayTag) { Text("Play all") }
-                }
-            }
-
-            if (songsForSelectedTag.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Nothing under this tag right now.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(32.dp)
-                    )
-                }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 96.dp)
-                ) {
-                    items(songsForSelectedTag, key = { "tagsong_${it.id}" }) { song ->
-                        SongGridItem(
-                            song = song,
-                            isPlaying = currentSongId == song.id,
-                            onClick = { onPlaySong(song) },
-                            onAddToPlaylistClicked = { onAddToPlaylist(song) }
-                        )
-                    }
-                }
-            }
-        }
-        return
-    }
-
-    if (tags.isEmpty()) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                // Genres are read from each file when it is scanned and filled in for older tracks
-                // by a background pass, so an empty list usually means that pass has not finished
-                // -- or that nothing in the library carries a genre tag at all, which is common for
-                // tracks downloaded from YouTube.
-                text = "No tags yet. They appear as your tracks are scanned and analysed.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(32.dp)
-            )
-        }
-        return
-    }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 96.dp)
-    ) {
-        val grouped = tags.groupBy { it.kind }
-        // Genres first: they are the user's own labels, written into the files by whoever tagged
-        // them. What the model inferred comes after, under headings that say so.
-        listOf(
-            LibraryTag.Kind.GENRE to "Genres",
-            LibraryTag.Kind.SOUND to "How it sounds",
-            LibraryTag.Kind.THEME to "What it's about"
-        ).forEach { (kind, heading) ->
-            val group = grouped[kind].orEmpty()
-            if (group.isEmpty()) return@forEach
-            item(key = "tagheading_$kind") {
-                Text(
-                    text = heading,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-                )
-            }
-            item(key = "taggroup_$kind") {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
-                ) {
-                    group.forEach { tag ->
-                        AssistChip(
-                            onClick = { onSelectTag(tag.name) },
-                            label = { Text("${tag.name} · ${tag.songCount}") }
-                        )
-                    }
-                }
-            }
         }
     }
 }
