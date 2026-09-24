@@ -300,6 +300,14 @@ private class FakeSongDao : SongDao {
     override suspend fun getSongsMissingFolderPath(limit: Int): List<Song> =
         songs.filter { it.folderPath == null && it.isDownloaded }.take(limit)
 
+    override suspend fun updateGenre(id: Long, genre: String?) {
+        val index = songs.indexOfFirst { it.id == id }
+        if (index >= 0) songs[index] = songs[index].copy(genre = genre)
+    }
+
+    override suspend fun getSongsMissingGenre(limit: Int): List<Song> =
+        songs.filter { it.genre == null && it.isDownloaded }.take(limit)
+
     override fun getSongsWithFolder(): Flow<List<Song>> =
         flowOf(songs.filter { it.folderPath != null && it.isDownloaded })
 

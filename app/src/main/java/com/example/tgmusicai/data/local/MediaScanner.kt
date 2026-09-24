@@ -109,6 +109,20 @@ object MediaScanner {
                             }
                         }
 
+                        // The file's own genre, taken from the same tag parse the loudness read
+                        // above already pays for. MediaStore exposes a genre column too, but only
+                        // from API 30, and it reports the genre of the *album* for many files --
+                        // the file's own tag is both older-device-safe and the more accurate of
+                        // the two.
+                        val genre = path?.let { filePath ->
+                            try {
+                                AudioTagIo.readTags(java.io.File(filePath))?.genre
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Could not read the genre tag from $filePath", e)
+                                null
+                            }
+                        }
+
                         songDao.insertSong(
                             Song(
                                 title = cleaned.cleanTitle,
@@ -119,6 +133,7 @@ object MediaScanner {
                                 producer = cleaned.producer,
                                 replayGainDb = replayGain?.trackGainDb,
                                 replayPeak = replayGain?.trackPeak,
+                                genre = genre?.takeIf { it.isNotBlank() },
                                 // Recorded now, while the real path is in hand from MediaStore's
                                 // DATA column. Recovering it later from the content:// URI costs
                                 // a provider query per song.

@@ -56,7 +56,7 @@ import com.example.tgmusicai.data.local.entity.SongStats
         ListeningHistory::class,
         SongFingerprint::class
     ],
-    version = 17,
+    version = 18,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -269,6 +269,20 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Adds `songs.genre`, which backs browsing and searching the library by tag.
+         *
+         * Additive and nullable, so every existing row stays valid and simply reads as untagged
+         * until the scanner fills it in. Back-filling here was rejected: the value has to come out
+         * of each file's own tags, and parsing the whole library inside a migration would block
+         * the first launch after an update for as long as the library is large.
+         */
+        private val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE songs ADD COLUMN genre TEXT")
+            }
+        }
+
+        /**
          * Returns the app-wide singleton [AppDatabase], creating it on first call.
          * Double-checked locking (`synchronized` + null check twice) avoids building the
          * database twice if two threads race to call this before [INSTANCE] is set.
@@ -287,6 +301,7 @@ abstract class AppDatabase : RoomDatabase() {
                 .addMigrations(
                     MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
                     MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
+                    MIGRATION_17_18,
                 )
                 .fallbackToDestructiveMigration()
                 .build()

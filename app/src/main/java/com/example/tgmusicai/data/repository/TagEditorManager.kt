@@ -87,6 +87,10 @@ class TagEditorManager(
                     // as it was instead of clearing it.
                     producer = song.producer
                 )
+                // Genre is stored on the song as well as in the file, because the tag browser
+                // groups the whole library by it. Writing only the file would leave the browser
+                // showing the old genre until a rescan.
+                songDao.updateGenre(song.id, tags.genre?.takeIf { it.isNotBlank() } ?: song.genre)
             } catch (e: Throwable) {
                 Log.e(TAG, "Wrote tags to ${file.name} but could not update the library row", e)
                 return@withContext Result.Failed("Saved to the file, but the library didn't update.")

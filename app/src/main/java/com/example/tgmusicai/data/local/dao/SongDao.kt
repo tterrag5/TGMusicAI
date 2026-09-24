@@ -149,6 +149,16 @@ interface SongDao {
     @Query("UPDATE songs SET folder_path = :folderPath WHERE id = :id")
     suspend fun updateFolderPath(id: Long, folderPath: String?)
 
+    @Query("UPDATE songs SET genre = :genre WHERE id = :id")
+    suspend fun updateGenre(id: Long, genre: String?)
+
+    /**
+     * Downloaded tracks whose genre has not been read yet, so the backfill can work through the
+     * library a batch at a time instead of parsing every file at once.
+     */
+    @Query("SELECT * FROM songs WHERE genre IS NULL AND is_downloaded = 1 LIMIT :limit")
+    suspend fun getSongsMissingGenre(limit: Int): List<Song>
+
     /** Local tracks whose folder is not known yet, for the background backfill pass. */
     @Query("SELECT * FROM songs WHERE folder_path IS NULL AND is_downloaded = 1 LIMIT :limit")
     suspend fun getSongsMissingFolderPath(limit: Int): List<Song>

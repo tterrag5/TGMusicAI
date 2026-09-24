@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.example.tgmusicai.data.local.entity.AiSongTags
+import kotlinx.coroutines.flow.Flow
 
 /**
  * DAO for [AiSongTags]. Entirely owned by the `ai` package's containment layer -- nothing else in
@@ -23,6 +24,14 @@ interface AiSongTagsDao {
     /** Reads every AI analysis row in the table, e.g. for radio-mode similarity search across the whole library. */
     @Query("SELECT * FROM ai_song_tags")
     suspend fun getAll(): List<AiSongTags>
+
+    /**
+     * The same rows, observed, so the Library's tag browser picks up newly analysed songs without
+     * being told to refresh. Read-only: the containment rule that only the `ai` package writes
+     * this table is unaffected by anything watching it.
+     */
+    @Query("SELECT * FROM ai_song_tags")
+    fun observeAll(): Flow<List<AiSongTags>>
 
     /** Removes the AI analysis row for one song, e.g. so it gets re-analyzed after the song's audio/lyrics change. */
     @Query("DELETE FROM ai_song_tags WHERE songId = :songId")

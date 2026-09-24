@@ -108,5 +108,17 @@ data class Song(
      * the backfill fills them in.
      */
     @ColumnInfo(name = "folder_path")
-    val folderPath: String? = null
+    val folderPath: String? = null,
+
+    /**
+     * The track's genre, as its own file or MediaStore entry says it is -- "Hip-Hop", "Shoegaze",
+     * whatever the tagger wrote. Null when the file carries no genre tag, which is common enough
+     * that the tag browser treats an untagged track as untagged rather than guessing.
+     *
+     * Stored on the song rather than derived on demand because the tag browser groups the whole
+     * library by it, and re-reading one tag per file to draw a list of chips would mean parsing
+     * every file in the library every time that view opens.
+     */
+    @ColumnInfo(name = "genre")
+    val genre: String? = null
 )
