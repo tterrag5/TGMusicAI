@@ -10,6 +10,7 @@ import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricLine
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.scrobble.ListenBrainzScrobbler
 import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.playback.SleepTimerManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -283,6 +284,73 @@ class PlayerViewModel(
             val current = sponsorBlockCategories.value
             val updated = if (enabled) current + category else current - category
             appPreferences?.setSponsorBlockCategories(updated)
+        }
+    }
+
+    // --- Scrobbling ---
+
+    /** Whether finished tracks are submitted to the user's ListenBrainz listening history. */
+    val scrobblingEnabled: StateFlow<Boolean> = appPreferences?.scrobblingEnabledFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    /** The account the stored token resolved to, or null when no working token is stored. */
+    val listenBrainzUsername: StateFlow<String?> = appPreferences?.listenBrainzUsernameFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+        ?: MutableStateFlow<String?>(null).asStateFlow()
+
+    val listenBrainzServer: StateFlow<String> = appPreferences?.listenBrainzServerFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppPreferences.DEFAULT_LISTENBRAINZ_SERVER)
+        ?: MutableStateFlow(AppPreferences.DEFAULT_LISTENBRAINZ_SERVER).asStateFlow()
+
+    private val _scrobbleConnectionStatus = MutableStateFlow<String?>(null)
+
+    /** Result of the last connection attempt, shown once and then cleared by the screen. */
+    val scrobbleConnectionStatus: StateFlow<String?> = _scrobbleConnectionStatus.asStateFlow()
+
+    private val _isConnectingScrobbler = MutableStateFlow(false)
+    val isConnectingScrobbler: StateFlow<Boolean> = _isConnectingScrobbler.asStateFlow()
+
+    fun clearScrobbleConnectionStatus() {
+        _scrobbleConnectionStatus.value = null
+    }
+
+    fun setScrobblingEnabled(enabled: Boolean) {
+        viewModelScope.launch { appPreferences?.setScrobblingEnabled(enabled) }
+    }
+
+    /**
+     * Verifies [token] against the server before storing it, and only turns scrobbling on if it
+     * works.
+     *
+     * Checking first matters because the alternative fails invisibly: a mistyped token stores
+     * cleanly, and the user then finds out weeks later that nothing was ever submitted.
+     */
+    fun connectListenBrainz(token: String, server: String) {
+        val preferences = appPreferences ?: return
+        viewModelScope.launch {
+            _isConnectingScrobbler.value = true
+            try {
+                val resolvedServer = server.ifBlank { AppPreferences.DEFAULT_LISTENBRAINZ_SERVER }
+                val username = ListenBrainzScrobbler().validateToken(token.trim(), resolvedServer)
+                if (username == null) {
+                    _scrobbleConnectionStatus.value =
+                        "That token didn't work. Check it against your ListenBrainz profile page."
+                    return@launch
+                }
+                preferences.setListenBrainzCredentials(token.trim(), resolvedServer, username)
+                preferences.setScrobblingEnabled(true)
+                _scrobbleConnectionStatus.value = "Connected as $username."
+            } finally {
+                _isConnectingScrobbler.value = false
+            }
+        }
+    }
+
+    fun disconnectListenBrainz() {
+        viewModelScope.launch {
+            appPreferences?.clearListenBrainzCredentials()
+            _scrobbleConnectionStatus.value = "Disconnected."
         }
     }
 

@@ -36,6 +36,9 @@ class AppPreferences(private val context: Context) {
         val DEFAULT_SPONSORBLOCK_CATEGORIES = setOf(
             "music_offtopic", "sponsor", "selfpromo", "intro", "outro", "interaction"
         )
+
+        /** Hosted ListenBrainz, duplicated here to keep this class free of network dependencies. */
+        const val DEFAULT_LISTENBRAINZ_SERVER = "https://api.listenbrainz.org"
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
         val SELECTED_THEME = stringPreferencesKey("selected_theme")
         // Light/dark selection and Material You opt-in, kept separate from SELECTED_THEME so
@@ -77,6 +80,58 @@ class AppPreferences(private val context: Context) {
         val VOLUME_NORMALIZATION_ENABLED = booleanPreferencesKey("volume_normalization_enabled")
         val SPONSORBLOCK_ENABLED = booleanPreferencesKey("sponsorblock_enabled")
         val SPONSORBLOCK_CATEGORIES = stringPreferencesKey("sponsorblock_categories")
+        val SCROBBLING_ENABLED = booleanPreferencesKey("scrobbling_enabled")
+        val LISTENBRAINZ_TOKEN = stringPreferencesKey("listenbrainz_token")
+        val LISTENBRAINZ_SERVER = stringPreferencesKey("listenbrainz_server")
+        val LISTENBRAINZ_USERNAME = stringPreferencesKey("listenbrainz_username")
+    }
+
+    /**
+     * Whether finished tracks are submitted to the user's ListenBrainz account.
+     *
+     * Off until the user supplies a token, which is the only thing that could make it work anyway.
+     * The token is one the user generates on their own profile page -- this app embeds no
+     * credentials of its own, which is why ListenBrainz was chosen over services whose API
+     * requires a developer key baked into the build.
+     */
+    val scrobblingEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[SCROBBLING_ENABLED] ?: false }
+
+    suspend fun setScrobblingEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[SCROBBLING_ENABLED] = enabled }
+    }
+
+    /** The user's own ListenBrainz token; null until they paste one in. */
+    val listenBrainzTokenFlow: Flow<String?> = context.dataStore.data
+        .map { preferences -> preferences[LISTENBRAINZ_TOKEN]?.takeIf { it.isNotBlank() } }
+
+    /** API root, so a self-hosted ListenBrainz-compatible server works as well as the hosted one. */
+    val listenBrainzServerFlow: Flow<String> = context.dataStore.data
+        .map { preferences -> preferences[LISTENBRAINZ_SERVER]?.takeIf { it.isNotBlank() } ?: DEFAULT_LISTENBRAINZ_SERVER }
+
+    /** Account name the token resolved to, shown in Settings so the user can see it took effect. */
+    val listenBrainzUsernameFlow: Flow<String?> = context.dataStore.data
+        .map { preferences -> preferences[LISTENBRAINZ_USERNAME]?.takeIf { it.isNotBlank() } }
+
+    suspend fun setListenBrainzCredentials(token: String, server: String, username: String?) {
+        context.dataStore.edit { preferences ->
+            preferences[LISTENBRAINZ_TOKEN] = token
+            preferences[LISTENBRAINZ_SERVER] = server.ifBlank { DEFAULT_LISTENBRAINZ_SERVER }
+            if (username != null) {
+                preferences[LISTENBRAINZ_USERNAME] = username
+            } else {
+                preferences.remove(LISTENBRAINZ_USERNAME)
+            }
+        }
+    }
+
+    /** Forgets the stored token and turns scrobbling off, since one cannot work without the other. */
+    suspend fun clearListenBrainzCredentials() {
+        context.dataStore.edit { preferences ->
+            preferences.remove(LISTENBRAINZ_TOKEN)
+            preferences.remove(LISTENBRAINZ_USERNAME)
+            preferences[SCROBBLING_ENABLED] = false
+        }
     }
 
     /**

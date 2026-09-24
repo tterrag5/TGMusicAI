@@ -31,6 +31,7 @@ import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.ListeningHistory
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.scrobble.ListenBrainzScrobbler
 import com.example.tgmusicai.data.sponsorblock.SponsorBlockManager
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
 import com.example.tgmusicai.widget.NowPlayingWidgetState
@@ -68,6 +69,20 @@ class PlaybackService : MediaLibraryService() {
     private val replayGainProcessor = ReplayGainAudioProcessor()
     private lateinit var loudnessNormalization: LoudnessNormalizationManager
     private val sponsorBlock by lazy { SponsorBlockManager() }
+    private val scrobbler by lazy { ListenBrainzScrobbler() }
+
+    /**
+     * Scrobbling settings, mirrored into fields for the same reason the others are: they are read
+     * on the playback ticker and on media item transitions, which cannot suspend on DataStore.
+     */
+    @Volatile
+    private var scrobblingEnabled: Boolean = false
+
+    @Volatile
+    private var listenBrainzToken: String? = null
+
+    @Volatile
+    private var listenBrainzServer: String = AppPreferences.DEFAULT_LISTENBRAINZ_SERVER
 
     /**
      * SponsorBlock settings, mirrored into fields for the same reason
@@ -342,6 +357,22 @@ class PlaybackService : MediaLibraryService() {
                 }
         }
 
+        // Scrobbling settings. A token that is removed takes effect immediately rather than at the
+        // next track, so turning it off really does stop submissions.
+        serviceScope.launch(Dispatchers.Main) {
+            val preferences = AppPreferences(applicationContext)
+            combine(
+                preferences.scrobblingEnabledFlow,
+                preferences.listenBrainzTokenFlow,
+                preferences.listenBrainzServerFlow
+            ) { enabled, token, server -> Triple(enabled, token, server) }
+                .collect { (enabled, token, server) ->
+                    scrobblingEnabled = enabled
+                    listenBrainzToken = token
+                    listenBrainzServer = server
+                }
+        }
+
         // Work through the library's unmeasured tracks in the background, so normalization applies
         // to songs the user has not played yet rather than only correcting each track from its
         // second play onward.
@@ -545,8 +576,70 @@ class PlaybackService : MediaLibraryService() {
     private var lastTickPositionMs: Long = 0L
     private var telemetryTickerJob: Job? = null
 
+    // Scrobbling state for the track currently playing, reset on every transition so a listen can
+    // never be attributed to the wrong track.
+    private var scrobbleSubmittedForCurrentItem = false
+    private var currentItemStartedAtEpochSeconds = 0L
+
+    /**
+     * Submits the track that is playing to the user's listening history once it has played far
+     * enough to count.
+     *
+     * The threshold -- half the track, or four minutes -- is the one every scrobbler has used
+     * since the practice existed, so history recorded here looks like history recorded anywhere
+     * else. Deliberately separate from the in-app play counter above, which uses a shorter
+     * threshold suited to a personal library rather than to a shared record.
+     */
+    private fun maybeScrobble(positionMs: Long, durationMs: Long) {
+        if (!scrobblingEnabled || scrobbleSubmittedForCurrentItem) return
+        if (durationMs in 1 until ListenBrainzScrobbler.MIN_TRACK_LENGTH_MS) return
+        if (positionMs < ListenBrainzScrobbler.scrobbleThresholdMs(durationMs)) return
+
+        val token = listenBrainzToken ?: return
+        val item = player.currentMediaItem ?: return
+        val listen = buildListen(item, durationMs) ?: return
+        scrobbleSubmittedForCurrentItem = true
+
+        serviceScope.launch {
+            when (val result = scrobbler.submitListen(token, listenBrainzServer, listen)) {
+                is ListenBrainzScrobbler.Result.Success ->
+                    android.util.Log.d("PlaybackService", "Scrobbled ${listen.title}")
+                is ListenBrainzScrobbler.Result.InvalidToken ->
+                    // Retrying cannot help, and the user has to fix it in Settings, so stop trying
+                    // for this session rather than failing once per track for the rest of it.
+                    android.util.Log.w("PlaybackService", "ListenBrainz rejected the token; scrobbling is paused")
+                is ListenBrainzScrobbler.Result.Transient ->
+                    android.util.Log.d("PlaybackService", "Scrobble failed (${result.reason})")
+            }
+        }
+    }
+
+    /** Sends the "now playing" indicator, which is not stored as history and is fine to lose. */
+    private fun submitNowPlaying(mediaItem: MediaItem?) {
+        if (!scrobblingEnabled || mediaItem == null) return
+        val token = listenBrainzToken ?: return
+        val listen = buildListen(mediaItem, 0L) ?: return
+        serviceScope.launch { scrobbler.submitNowPlaying(token, listenBrainzServer, listen) }
+    }
+
+    private fun buildListen(item: MediaItem, durationMs: Long): ListenBrainzScrobbler.Listen? {
+        val metadata = item.mediaMetadata
+        val title = metadata.title?.toString()?.takeIf { it.isNotBlank() } ?: return null
+        val artist = metadata.artist?.toString()?.takeIf { it.isNotBlank() } ?: return null
+        return ListenBrainzScrobbler.Listen(
+            title = title,
+            artist = artist,
+            album = metadata.albumTitle?.toString(),
+            durationMs = durationMs.coerceAtLeast(0L),
+            startedAtEpochSeconds = currentItemStartedAtEpochSeconds
+        )
+    }
+
     private fun resetListenTracking(mediaItem: MediaItem?) {
         flushPendingListenTime()
+        scrobbleSubmittedForCurrentItem = false
+        currentItemStartedAtEpochSeconds = System.currentTimeMillis() / 1000
+        submitNowPlaying(mediaItem)
         trackedMediaId = mediaItem?.mediaId
         val extras = mediaItem?.mediaMetadata?.extras
         trackedSongId = SongMediaExtras.songId(extras)
@@ -564,6 +657,7 @@ class PlaybackService : MediaLibraryService() {
                 val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
                 val dur = exoPlayer.duration.let { if (it > 0) it else 0L }
                 maybeSkipSponsorSegment(pos)
+                maybeScrobble(pos, dur)
                 val delta = (pos - lastTickPositionMs).coerceIn(0L, 2000L)
                 lastTickPositionMs = pos
                 if (delta > 0) {

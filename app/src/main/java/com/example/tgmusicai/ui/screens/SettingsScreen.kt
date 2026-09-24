@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Restore
@@ -39,6 +40,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -100,6 +102,13 @@ fun SettingsScreen(
     val volumeNormalizationEnabled by playerViewModel.volumeNormalizationEnabled.collectAsState()
     val sponsorBlockEnabled by playerViewModel.sponsorBlockEnabled.collectAsState()
     val sponsorBlockCategories by playerViewModel.sponsorBlockCategories.collectAsState()
+    val scrobblingEnabled by playerViewModel.scrobblingEnabled.collectAsState()
+    val listenBrainzUsername by playerViewModel.listenBrainzUsername.collectAsState()
+    val listenBrainzServer by playerViewModel.listenBrainzServer.collectAsState()
+    val scrobbleConnectionStatus by playerViewModel.scrobbleConnectionStatus.collectAsState()
+    val isConnectingScrobbler by playerViewModel.isConnectingScrobbler.collectAsState()
+    var listenBrainzTokenInput by remember { mutableStateOf("") }
+    var listenBrainzServerInput by remember(listenBrainzServer) { mutableStateOf(listenBrainzServer) }
     val crossfadeEnabled by playerViewModel.crossfadeEnabled.collectAsState()
     val crossfadeDurationSec by playerViewModel.crossfadeDurationSec.collectAsState()
     var draggedCrossfadeDurationSec by remember(crossfadeDurationSec) { mutableStateOf(crossfadeDurationSec.toFloat()) }
@@ -137,6 +146,13 @@ fun SettingsScreen(
             if (inputStream != null) {
                 homeViewModel.importBackup(context, inputStream)
             }
+        }
+    }
+
+    LaunchedEffect(scrobbleConnectionStatus) {
+        scrobbleConnectionStatus?.let {
+            Toast.makeText(context, it, Toast.LENGTH_LONG).show()
+            playerViewModel.clearScrobbleConnectionStatus()
         }
     }
 
@@ -291,6 +307,80 @@ fun SettingsScreen(
                                             onCheckedChange = { playerViewModel.toggleSponsorBlockCategory(category, it) }
                                         )
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                SettingsSection(
+                    sectionId = SettingsSectionId.SCROBBLING,
+                    title = "Listening history",
+                    icon = Icons.Rounded.History,
+                    summary = when {
+                        scrobblingEnabled && listenBrainzUsername != null -> "Scrobbling as $listenBrainzUsername"
+                        listenBrainzUsername != null -> "Connected, but paused"
+                        else -> "Not connected"
+                    },
+                    expanded = expandedSection == SettingsSectionId.SCROBBLING,
+                    onToggle = { expandedSection = it }
+                ) {
+                    Card(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                // Says outright why this is ListenBrainz rather than the service
+                                // most people would expect, so its absence does not read as an
+                                // oversight.
+                                "Submit finished tracks to your ListenBrainz account. ListenBrainz needs only a token from your own profile page, so the app carries no service credentials of its own -- which is why Last.fm, whose API requires a developer key built into the app, isn't offered here.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            if (listenBrainzUsername != null) {
+                                SettingsToggleContent(
+                                    title = "Scrobble to ListenBrainz",
+                                    subtitle = "Connected as $listenBrainzUsername",
+                                    checked = scrobblingEnabled,
+                                    onCheckedChange = playerViewModel::setScrobblingEnabled
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TextButton(onClick = playerViewModel::disconnectListenBrainz) {
+                                    Text("Disconnect")
+                                }
+                            } else {
+                                OutlinedTextField(
+                                    value = listenBrainzTokenInput,
+                                    onValueChange = { listenBrainzTokenInput = it },
+                                    label = { Text("User token") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = listenBrainzServerInput,
+                                    onValueChange = { listenBrainzServerInput = it },
+                                    label = { Text("Server") },
+                                    supportingText = { Text("Leave as-is unless you run your own ListenBrainz-compatible server.") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TextButton(
+                                    enabled = listenBrainzTokenInput.isNotBlank() && !isConnectingScrobbler,
+                                    onClick = {
+                                        playerViewModel.connectListenBrainz(
+                                            listenBrainzTokenInput,
+                                            listenBrainzServerInput
+                                        )
+                                    }
+                                ) {
+                                    Text(if (isConnectingScrobbler) "Checking..." else "Connect")
                                 }
                             }
                         }
