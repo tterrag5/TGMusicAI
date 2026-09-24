@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -40,10 +41,37 @@ class PlayerViewModel(
         const val SLEEP_FADE_WINDOW_MS = 30_000L
     }
 
-    val currentSong: StateFlow<Song?> = mediaControllerManager.currentSong
+    /**
+     * What the player is showing: the track actually playing, or the one the user just asked for
+     * while its stream is still being resolved. Without the second case, tapping a cloud track
+     * opened Now Playing on the previous song for the length of a network round trip.
+     */
+    val currentSong: StateFlow<Song?> = combine(
+        mediaControllerManager.currentSong,
+        mediaControllerManager.pendingSong
+    ) { playing, pending ->
+        pending ?: playing
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
     val isPlaying: StateFlow<Boolean> = mediaControllerManager.isPlaying
-    val currentPositionMs: StateFlow<Long> = mediaControllerManager.currentPositionMs
-    val durationMs: StateFlow<Long> = mediaControllerManager.durationMs
+    // While a track is still being resolved, the player is still reporting the *previous* track's
+    // position and length. Showing those under the new title is the same confusion the pending
+    // song fixes, one line further down the screen: the progress bar reads as though the track had
+    // already been playing for a minute.
+    val currentPositionMs: StateFlow<Long> = combine(
+        mediaControllerManager.currentPositionMs,
+        mediaControllerManager.pendingSong
+    ) { position, pending ->
+        if (pending != null) 0L else position
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0L)
+
+    val durationMs: StateFlow<Long> = combine(
+        mediaControllerManager.durationMs,
+        mediaControllerManager.pendingSong
+    ) { duration, pending ->
+        // The search result knows how long the track is, so the bar can be the right length
+        // before a single byte of it has been fetched.
+        pending?.durationMs?.takeIf { it > 0L } ?: duration
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0L)
     val playlist: StateFlow<List<Song>> = mediaControllerManager.playlist
     val shuffleMode: StateFlow<Boolean> = mediaControllerManager.shuffleMode
     val repeatMode: StateFlow<Int> = mediaControllerManager.repeatMode
@@ -185,23 +213,48 @@ class PlayerViewModel(
         initialValue = emptyList()
     )
 
+    /**
+     * Songs whose automatic lyrics lookup has already come back empty in this session.
+     *
+     * A found set of lyrics is cached on the song row, but a *miss* was recorded nowhere, so every
+     * play of a track LrcLib has never heard of re-ran the whole chain -- an LrcLib request, a tag
+     * parse, and a YouTube caption fetch -- for a result already known to be nothing. Keyed by
+     * video id where there is one, so a cloud track is not re-attempted when its stream URL
+     * changes between plays.
+     *
+     * Deliberately only for this session, and deliberately not consulted by the manual "get
+     * lyrics" action: a track missing from LrcLib today may be there next week, and the user
+     * asking for it directly is exactly when to look again.
+     */
+    private val emptyLyricsLookups = mutableSetOf<String>()
+
+    private fun lyricsLookupKey(song: Song): String =
+        song.youtubeId?.takeIf { it.isNotBlank() } ?: song.mediaUri
+
     init {
         viewModelScope.launch {
-            currentSong.collect { song ->
-                if (song != null) {
-                    val clean = sanitizeLyrics(song.lyrics)
-                    _lyrics.value = clean
-                    if (clean == null && lyricsRepository != null) {
-                        fetchLyrics(song)
+            // Keyed rather than raw, so the same track does not re-trigger this when its row is
+            // rewritten -- a cloud track is announced before resolution and again once its real
+            // stream URL is known, which is the same song twice.
+            currentSong
+                .distinctUntilChangedBy { it?.let(::lyricsLookupKey) }
+                .collect { song ->
+                    if (song != null) {
+                        val clean = sanitizeLyrics(song.lyrics)
+                        _lyrics.value = clean
+                        if (clean == null && lyricsRepository != null &&
+                            lyricsLookupKey(song) !in emptyLyricsLookups
+                        ) {
+                            fetchLyrics(song, isAutomatic = true)
+                        }
+                        if (repository != null) {
+                            _isCurrentSongLiked.value = repository.isSongLikedSync(song.id)
+                        }
+                    } else {
+                        _lyrics.value = null
+                        _isCurrentSongLiked.value = false
                     }
-                    if (repository != null) {
-                        _isCurrentSongLiked.value = repository.isSongLikedSync(song.id)
-                    }
-                } else {
-                    _lyrics.value = null
-                    _isCurrentSongLiked.value = false
                 }
-            }
         }
     }
 
@@ -410,7 +463,16 @@ class PlayerViewModel(
         return song.copy(id = persistedId)
     }
 
-    fun fetchLyrics(song: Song? = currentSong.value, forceFetch: Boolean = false) {
+    /**
+     * Looks up lyrics for [song]. [isAutomatic] marks the lookup that happens on its own when a
+     * track starts, as opposed to the user asking: a miss on an automatic lookup is remembered so
+     * the same fruitless chain of requests is not repeated on every play.
+     */
+    fun fetchLyrics(
+        song: Song? = currentSong.value,
+        forceFetch: Boolean = false,
+        isAutomatic: Boolean = false
+    ) {
         val target = song ?: return
         if (lyricsRepository == null) return
 
@@ -418,7 +480,11 @@ class PlayerViewModel(
             _isScraping.value = true
             val persistedTarget = ensurePersistedTarget(target)
             val fetched = lyricsRepository.fetchAndSaveLyrics(persistedTarget, forceFetch = forceFetch)
-            _lyrics.value = sanitizeLyrics(fetched)
+            val clean = sanitizeLyrics(fetched)
+            if (isAutomatic && clean == null) {
+                emptyLyricsLookups += lyricsLookupKey(target)
+            }
+            _lyrics.value = clean
             _isScraping.value = false
         }
     }
