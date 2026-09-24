@@ -98,6 +98,7 @@ fun MainScreen(
     youTubeViewModel: YouTubeViewModel,
     googleSyncViewModel: GoogleSyncViewModel,
     discoverViewModel: com.example.tgmusicai.ui.viewmodel.DiscoverViewModel,
+    recognitionViewModel: com.example.tgmusicai.ui.viewmodel.RecognitionViewModel,
     mediaControllerManager: MediaControllerManager,
     modifier: Modifier = Modifier,
     currentTheme: String = "YT_DARK",
@@ -566,6 +567,7 @@ fun MainScreen(
                                         SettingsScreen(
                                             homeViewModel = homeViewModel,
                                             playerViewModel = playerViewModel,
+                                            recognitionViewModel = recognitionViewModel,
                                             onBackClick = {
                                                 if (backStack.size > 1) {
                                                     backStack.removeAt(backStack.lastIndex)
@@ -577,6 +579,7 @@ fun MainScreen(
                                         LibraryScreen(
                                             libraryViewModel = libraryViewModel,
                                             playerViewModel = playerViewModel,
+                                            recognitionViewModel = recognitionViewModel,
                                             downloadMap = downloadMap,
                                             onOpenDrawer = { scope.launch { drawerState.open() } },
                                             onPlayCloudResult = { result ->

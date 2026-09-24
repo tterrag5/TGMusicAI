@@ -24,6 +24,10 @@ import kotlinx.coroutines.withTimeoutOrNull
  * the state the widget's play button exists to leave. Going through a controller makes the platform
  * start the service the supported way, so the same button works whether or not music is already on.
  */
+// Opts in to Media3's unstable API surface, which PlaybackService is now marked with: referencing
+// it from here counts as using it. The annotation is an acknowledgement, not a suppression -- a
+// Media3 upgrade may change what it points at.
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 private suspend fun withController(context: Context, action: (MediaController) -> Unit) {
     val token = SessionToken(
         context.applicationContext,

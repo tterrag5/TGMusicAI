@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.LibraryMusic
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.automirrored.rounded.ViewList
@@ -71,6 +72,7 @@ import com.example.tgmusicai.ui.components.AddToPlaylistDialog
 import com.example.tgmusicai.ui.components.SongGridItem
 import com.example.tgmusicai.ui.components.YouTubeSearchResultItem
 import com.example.tgmusicai.data.repository.MusicFolderTree
+import com.example.tgmusicai.ui.components.RecognizeSongDialog
 import com.example.tgmusicai.ui.components.SongItem
 import com.example.tgmusicai.ui.components.TagEditorDialog
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
@@ -89,6 +91,7 @@ import kotlinx.coroutines.launch
 fun LibraryScreen(
     libraryViewModel: LibraryViewModel,
     playerViewModel: PlayerViewModel,
+    recognitionViewModel: com.example.tgmusicai.ui.viewmodel.RecognitionViewModel? = null,
     downloadMap: Map<String, com.example.tgmusicai.data.youtube.DownloadProgressState> = emptyMap(),
     onOpenDrawer: () -> Unit = {},
     onPlayCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {},
@@ -117,6 +120,7 @@ fun LibraryScreen(
     val folderBrowsingEnabled by libraryViewModel.folderBrowsingEnabled.collectAsState()
     val currentFolder by libraryViewModel.currentFolder.collectAsState()
     val canNavigateUpFolder by libraryViewModel.canNavigateUp.collectAsState()
+    var showRecognizeDialog by remember { mutableStateOf(false) }
     val tagWriteConsentRequest by libraryViewModel.tagWriteConsentRequest.collectAsState()
 
     val context = LocalContext.current
@@ -154,6 +158,14 @@ fun LibraryScreen(
         tagWriteConsentRequest?.let { request ->
             tagWriteConsentLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
         }
+    }
+
+    if (showRecognizeDialog && recognitionViewModel != null) {
+        RecognizeSongDialog(
+            recognitionViewModel = recognitionViewModel,
+            onDismiss = { showRecognizeDialog = false },
+            onPlaySong = { song -> playerViewModel.playSong(song = song, queue = listOf(song)) }
+        )
     }
 
     songForTagEdit?.let { song ->
@@ -228,6 +240,14 @@ fun LibraryScreen(
                     }
                 },
                     actions = {
+                        if (recognitionViewModel != null) {
+                            IconButton(onClick = { showRecognizeDialog = true }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Mic,
+                                    contentDescription = "Identify what's playing"
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = { libraryViewModel.setFolderBrowsingEnabled(!folderBrowsingEnabled) }
                         ) {

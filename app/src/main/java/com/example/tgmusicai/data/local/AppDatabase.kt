@@ -12,6 +12,7 @@ import com.example.tgmusicai.data.local.dao.ListeningHistoryDao
 import com.example.tgmusicai.data.local.dao.PendingDownloadDao
 import com.example.tgmusicai.data.local.dao.PlaylistDao
 import com.example.tgmusicai.data.local.dao.SongDao
+import com.example.tgmusicai.data.local.dao.SongFingerprintDao
 import com.example.tgmusicai.data.local.dao.SongStatsDao
 import com.example.tgmusicai.data.local.entity.Alarm
 import com.example.tgmusicai.data.local.entity.AiSongTags
@@ -20,6 +21,7 @@ import com.example.tgmusicai.data.local.entity.PendingDownload
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.PlaylistSongCrossRef
 import com.example.tgmusicai.data.local.entity.Song
+import com.example.tgmusicai.data.local.entity.SongFingerprint
 import com.example.tgmusicai.data.local.entity.SongStats
 
 /**
@@ -39,6 +41,8 @@ import com.example.tgmusicai.data.local.entity.SongStats
  * Version = 14 added ai_song_tags.lyricThemes/lyricsLanguage.
  * Version = 15 added songs.replay_gain_db/replay_peak, backing per-track volume normalization.
  * Version = 16 added songs.folder_path, backing the library's folder browser.
+ * Version = 17 added song_fingerprints -- another standalone table, owned by the opt-in song
+ * recognition feature, kept out of the core schema for the same reason ai_song_tags is.
  */
 @Database(
     entities = [
@@ -49,9 +53,10 @@ import com.example.tgmusicai.data.local.entity.SongStats
         Alarm::class,
         PendingDownload::class,
         AiSongTags::class,
-        ListeningHistory::class
+        ListeningHistory::class,
+        SongFingerprint::class
     ],
-    version = 16,
+    version = 17,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -70,6 +75,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun aiSongTagsDao(): AiSongTagsDao
     /** DAO for `listening_history`: per-session listening-duration log used for stats trends. */
     abstract fun listeningHistoryDao(): ListeningHistoryDao
+    /** DAO for `song_fingerprints`: the opt-in acoustic index behind recognising a song by listening. */
+    abstract fun songFingerprintDao(): SongFingerprintDao
 
     companion object {
         @Volatile
@@ -235,6 +242,33 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Creates `song_fingerprints`, the acoustic index behind recognising a song by listening.
+         *
+         * Standalone, with no foreign key to `songs`, for the same reason `ai_song_tags` is: it
+         * backs an optional feature the user switches on, and nothing about it should be able to
+         * cascade into the core library. The table starts empty and stays that way unless the user
+         * asks for the index to be built, so this migration costs an existing install nothing.
+         */
+        private val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS song_fingerprints (
+                        songId INTEGER NOT NULL,
+                        hash INTEGER NOT NULL,
+                        frameIndex INTEGER NOT NULL,
+                        PRIMARY KEY(songId, hash, frameIndex)
+                    )
+                    """.trimIndent()
+                )
+                // Recognition looks up thousands of hashes per attempt; without this index that is
+                // a full scan of a multi-million-row table and the feature is unusable.
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_song_fingerprints_hash ON song_fingerprints(hash)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_song_fingerprints_songId ON song_fingerprints(songId)")
+            }
+        }
+
+        /**
          * Returns the app-wide singleton [AppDatabase], creating it on first call.
          * Double-checked locking (`synchronized` + null check twice) avoids building the
          * database twice if two threads race to call this before [INSTANCE] is set.
@@ -252,7 +286,7 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 .addMigrations(
                     MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                    MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
+                    MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
                 )
                 .fallbackToDestructiveMigration()
                 .build()

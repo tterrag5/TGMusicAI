@@ -11,6 +11,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.audio.SonicAudioProcessor
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -61,7 +62,14 @@ import kotlinx.coroutines.withContext
  * Exposes a hierarchical, browsable media tree (Root -> automotive categories -> Songs) for head
  * units and media browsers, plus car-screen custom actions (Like / Repeat), Google Assistant
  * voice search, and safe-driving audio focus handling.
+ *
+ * Marked [UnstableApi] because it builds on Media3 APIs Google has not frozen -- the renderers
+ * factory and audio sink that per-track volume normalization is inserted into, the Cast players,
+ * and the caching data source. Declaring that here rather than opting in at each call site is the
+ * documented way to acknowledge it, and keeps the acknowledgement in one place where a future
+ * Media3 upgrade will look for it.
  */
+@UnstableApi
 class PlaybackService : MediaLibraryService() {
 
     private var mediaLibrarySession: MediaLibrarySession? = null

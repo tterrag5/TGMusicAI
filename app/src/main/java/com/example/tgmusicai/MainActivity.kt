@@ -30,6 +30,7 @@ import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
 import com.example.tgmusicai.data.repository.FolderPathBackfill
+import com.example.tgmusicai.data.repository.SongRecognitionManager
 import com.example.tgmusicai.data.repository.TagEditorManager
 import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.playback.MediaControllerManager
@@ -44,6 +45,7 @@ import com.example.tgmusicai.ui.viewmodel.HomeViewModel
 import com.example.tgmusicai.ui.viewmodel.LibraryViewModel
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
 import com.example.tgmusicai.ui.viewmodel.PlaylistViewModel
+import com.example.tgmusicai.ui.viewmodel.RecognitionViewModel
 import com.example.tgmusicai.ui.viewmodel.StatsViewModel
 import com.example.tgmusicai.ui.viewmodel.YouTubeViewModel
 import kotlinx.coroutines.flow.first
@@ -54,6 +56,10 @@ import kotlinx.coroutines.launch
  * Sets up edge-to-edge layout, initializes database, repository layers, lyrics/cover scrapers, network observer,
  * binds to the background [MediaControllerManager], dynamically applies soft color themes, and presents the Compose UI tree.
  */
+// Opts in to Media3's unstable API surface, which PlaybackService is now marked with: referencing
+// it from here counts as using it. The annotation is an acknowledgement, not a suppression -- a
+// Media3 upgrade may change what it points at.
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class MainActivity : ComponentActivity() {
 
     private lateinit var mediaControllerManager: MediaControllerManager
@@ -107,6 +113,13 @@ class MainActivity : ComponentActivity() {
         // Fills in where each already-known track lives on disk, so the Library's folder browser
         // works for a library that predates the column rather than only for newly scanned tracks.
         val folderPathBackfill = FolderPathBackfill(this, database.songDao())
+        // Identifies a track playing nearby against an index built from this library. Opt-in: the
+        // index is only built when the user asks for it in Settings.
+        val songRecognitionManager = SongRecognitionManager(
+            context = this,
+            songDao = database.songDao(),
+            fingerprintDao = database.songFingerprintDao()
+        )
 
         mediaControllerManager = MediaControllerManager(this)
 
@@ -219,6 +232,9 @@ class MainActivity : ComponentActivity() {
                         val discoverViewModel: DiscoverViewModel = viewModel(
                             factory = remember { DiscoverViewModel.Factory(youTubeMusicBrowser) }
                         )
+                        val recognitionViewModel: RecognitionViewModel = viewModel(
+                            factory = remember { RecognitionViewModel.Factory(songRecognitionManager) }
+                        )
                         val googleSyncViewModel: GoogleSyncViewModel = viewModel(
                             factory = remember {
                                 GoogleSyncViewModel.Factory(
@@ -241,6 +257,7 @@ class MainActivity : ComponentActivity() {
                             youTubeViewModel = youTubeViewModel,
                             googleSyncViewModel = googleSyncViewModel,
                             discoverViewModel = discoverViewModel,
+                            recognitionViewModel = recognitionViewModel,
                             mediaControllerManager = mediaControllerManager,
                             currentTheme = selectedTheme,
                             onSelectTheme = { themeKey ->

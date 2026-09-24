@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Restore
@@ -85,6 +86,7 @@ import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
 fun SettingsScreen(
     homeViewModel: HomeViewModel,
     playerViewModel: PlayerViewModel,
+    recognitionViewModel: com.example.tgmusicai.ui.viewmodel.RecognitionViewModel? = null,
     onBackClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -314,6 +316,70 @@ fun SettingsScreen(
                 }
             }
 
+            if (recognitionViewModel != null) {
+                item {
+                    val indexedCount by recognitionViewModel.indexedSongCount.collectAsState()
+                    val isIndexing by recognitionViewModel.isIndexing.collectAsState()
+                    SettingsSection(
+                        sectionId = SettingsSectionId.RECOGNITION,
+                        title = "Song recognition",
+                        icon = Icons.Rounded.Mic,
+                        summary = when {
+                            isIndexing -> "Indexing... $indexedCount tracks so far"
+                            indexedCount > 0 -> "$indexedCount tracks indexed"
+                            else -> "Not set up"
+                        },
+                        expanded = expandedSection == SettingsSectionId.RECOGNITION,
+                        onToggle = { expandedSection = it }
+                    ) {
+                        Card(
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    // States the scope up front. This identifies tracks the user
+                                    // already owns, not any song in the world -- doing the latter
+                                    // needs a commercial fingerprinting service and a paid key.
+                                    "Hold the phone up to music and the app will tell you which of your own tracks it is. It matches against an index built from your library, so it only recognises music you already have -- but it works offline and nothing is sent anywhere.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    "Indexed: $indexedCount tracks",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    // The honest cost, stated before they commit to it.
+                                    "Building the index reads through each track once and stores a few thousand rows per song, so it takes a while and uses real storage. It's why this is off until you ask for it.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row {
+                                    if (isIndexing) {
+                                        TextButton(onClick = recognitionViewModel::cancelIndexing) {
+                                            Text("Stop indexing")
+                                        }
+                                    } else {
+                                        TextButton(onClick = recognitionViewModel::buildIndex) {
+                                            Text(if (indexedCount > 0) "Index new tracks" else "Build index")
+                                        }
+                                    }
+                                    if (indexedCount > 0) {
+                                        TextButton(onClick = recognitionViewModel::clearIndex) {
+                                            Text("Clear index")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             item {
                 SettingsSection(
                     sectionId = SettingsSectionId.SCROBBLING,
@@ -443,7 +509,7 @@ fun SettingsScreen(
  * matching on the title meant renaming a heading silently re-pointed it at another section's
  * expand state, and every new section defaulted into whichever branch the `else` happened to name.
  */
-private enum class SettingsSectionId { APPEARANCE, PLAYBACK, SCROBBLING, BACKUP }
+private enum class SettingsSectionId { APPEARANCE, PLAYBACK, RECOGNITION, SCROBBLING, BACKUP }
 
 /**
  * A collapsible Settings group: a tappable header showing the section name and its current state,

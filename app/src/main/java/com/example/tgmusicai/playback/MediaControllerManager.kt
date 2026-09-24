@@ -32,7 +32,12 @@ import kotlinx.coroutines.withContext
  * Singleton or application-scoped manager that binds to [PlaybackService] via a [MediaController].
  * It exposes reactive [StateFlow] properties for the currently playing song, playback state,
  * position, duration, queue, and playback control functions.
+ *
+ * Opts in to Media3's unstable API surface, which [PlaybackService] is marked with: binding to it
+ * from here counts as using it. The annotation is an acknowledgement rather than a suppression --
+ * a Media3 upgrade may change what it points at.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class MediaControllerManager(
     private val context: Context
 ) {
