@@ -2,6 +2,8 @@ package com.example.tgmusicai.ui.screens
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,12 +15,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Button
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -57,6 +63,7 @@ fun ArtistDetailScreen(
     discoverViewModel: DiscoverViewModel,
     onBack: () -> Unit,
     onPlayTrack: (YouTubeSearchResult) -> Unit,
+    onPlayAll: (List<YouTubeSearchResult>, Boolean) -> Unit = { _, _ -> },
     onDownloadTrack: (YouTubeSearchResult) -> Unit,
     onOpenAlbum: (YouTubeAlbumRef) -> Unit,
     onOpenArtist: (YouTubeArtistRef) -> Unit,
@@ -122,6 +129,29 @@ fun ArtistDetailScreen(
                     }
 
                     if (page.topTracks.isNotEmpty()) {
+                        item {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            ) {
+                                Button(onClick = { onPlayAll(page.topTracks, false) }) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PlayArrow,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text("Play all", modifier = Modifier.padding(start = 6.dp))
+                                }
+                                OutlinedButton(onClick = { onPlayAll(page.topTracks, true) }) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Shuffle,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text("Shuffle", modifier = Modifier.padding(start = 6.dp))
+                                }
+                            }
+                        }
                         item { DetailSectionHeading("Top songs") }
                         items(page.topTracks, key = { "top_${it.videoId}" }) { track ->
                             YouTubeSearchResultItem(
@@ -178,6 +208,7 @@ fun AlbumDetailScreen(
     onBack: () -> Unit,
     onPlayTrack: (YouTubeSearchResult) -> Unit,
     onDownloadTrack: (YouTubeSearchResult) -> Unit,
+    onPlayAll: (List<YouTubeSearchResult>, Boolean) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val album by discoverViewModel.album.collectAsState()
@@ -231,6 +262,33 @@ fun AlbumDetailScreen(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+
+                            // A playlist or mix is a thing you put on, not a list to pick one
+                            // song out of. Without these the only way to hear it was to tap a
+                            // single track and get a queue of one.
+                            if (page.tracks.isNotEmpty()) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    modifier = Modifier.padding(top = 16.dp)
+                                ) {
+                                    Button(onClick = { onPlayAll(page.tracks, false) }) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.PlayArrow,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Text("Play all", modifier = Modifier.padding(start = 6.dp))
+                                    }
+                                    OutlinedButton(onClick = { onPlayAll(page.tracks, true) }) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Shuffle,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Text("Shuffle", modifier = Modifier.padding(start = 6.dp))
+                                    }
+                                }
+                            }
                         }
                     }
 

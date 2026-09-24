@@ -125,6 +125,11 @@ class YouTubeViewModel(application: Application) : AndroidViewModel(application)
             _extractingVideoId.value = item.videoId
             Log.d(LOG_TAG, "playTrack requested for video ID: ${item.videoId}, title: '${item.title}'")
             try {
+                // Announce the tapped track before resolving it. Resolution is a network round
+                // trip, and until it lands the player still reports the previous song -- which is
+                // what made tapping a cloud track open Now Playing on whatever was already
+                // playing and appear to hang there.
+                mediaControllerManager.setPendingSong(pendingSongFor(item))
                 val audioStream = youtubeExtractor.extractAudioStream(item.videoId)
                 if (audioStream != null && audioStream.url.isNotBlank()) {
                     Log.d(LOG_TAG, "Stream resolved for video ID '${item.videoId}': URL=${audioStream.url}, format=${audioStream.format}, bitrate=${audioStream.bitrate}")
@@ -151,6 +156,7 @@ class YouTubeViewModel(application: Application) : AndroidViewModel(application)
                     backfillCloudArtwork(persistedId, item.thumbnailUri)
                     mediaControllerManager.playSong(streamSong.copy(id = persistedId))
                 } else {
+                    mediaControllerManager.setPendingSong(null)
                     val failureMsg = "Failed to resolve audio stream for video ID '${item.videoId}': No working stream endpoints found"
                     Log.e(LOG_TAG, failureMsg)
                     withContext(Dispatchers.Main) {
@@ -162,6 +168,7 @@ class YouTubeViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
             } catch (e: Exception) {
+                mediaControllerManager.setPendingSong(null)
                 val failureMsg = "Playback error for video ID '${item.videoId}': ${e.message}"
                 Log.e(LOG_TAG, failureMsg, e)
                 withContext(Dispatchers.Main) {
@@ -174,6 +181,61 @@ class YouTubeViewModel(application: Application) : AndroidViewModel(application)
             } finally {
                 _extractingVideoId.value = null
             }
+        }
+    }
+
+    /**
+     * A stand-in [Song] for a search result that has not been resolved yet, so the player has
+     * something real to show -- title, artist and artwork -- during the seconds a stream lookup
+     * takes. Its `mediaUri` is the watch URL, which is never handed to the player: this object
+     * exists only to be displayed.
+     */
+    private fun pendingSongFor(item: YouTubeSearchResult): com.example.tgmusicai.data.local.entity.Song {
+        val cleaned = com.example.tgmusicai.data.local.AiMetadataCleaner.cleanOffline(item.title, item.uploader)
+        return com.example.tgmusicai.data.local.entity.Song(
+            id = 0,
+            title = cleaned.cleanTitle,
+            artist = cleaned.artist ?: item.uploader,
+            album = "YouTube Cloud",
+            durationMs = item.durationSeconds * 1000L,
+            mediaUri = "https://www.youtube.com/watch?v=" + item.videoId,
+            producer = cleaned.producer,
+            youtubeId = item.videoId,
+            artworkUri = item.thumbnailUri,
+            isDownloaded = false
+        )
+    }
+
+    /**
+     * Plays a whole playlist, mix or album, starting at [startIndex].
+     *
+     * The tracks are queued as unresolved watch URLs and handed to [MediaControllerManager], which
+     * resolves the starting one and then works through the rest in the background -- the same path
+     * a playlist of cloud tracks already takes. Resolving all of them up front would mean waiting
+     * roughly as long as the mix takes to play before hearing anything.
+     *
+     * Every track is persisted first (deduped by video id), because a transient id=0 song can
+     * never be attributed to a play-count row, so a mix played this way would leave no trace in
+     * Stats.
+     */
+    fun playAll(
+        items: List<YouTubeSearchResult>,
+        mediaControllerManager: MediaControllerManager,
+        startIndex: Int = 0
+    ) {
+        if (items.isEmpty()) return
+        viewModelScope.launch {
+            val start = startIndex.coerceIn(0, items.lastIndex)
+            // Shown immediately: building and persisting the queue takes a moment, and resolving
+            // the first track takes longer still.
+            mediaControllerManager.setPendingSong(pendingSongFor(items[start]))
+            val songs = withContext(Dispatchers.IO) {
+                items.map { item ->
+                    val song = pendingSongFor(item)
+                    song.copy(id = musicRepository.ensurePersisted(song))
+                }
+            }
+            mediaControllerManager.playSong(songs[start], songs)
         }
     }
 

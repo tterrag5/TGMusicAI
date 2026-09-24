@@ -509,6 +509,11 @@ fun MainScreen(
                                                 playerViewModel.expandNowPlaying()
                                             },
                                             onDownloadTrack = { result -> youTubeViewModel.downloadTrack(result) },
+                                            onPlayAll = { tracks, shuffled ->
+                                                val queue = if (shuffled) tracks.shuffled() else tracks
+                                                youTubeViewModel.playAll(queue, mediaControllerManager)
+                                                playerViewModel.expandNowPlaying()
+                                            },
                                             onOpenAlbum = { album ->
                                                 backStack.add(Screen.AlbumDetail(album.browseId, album.title))
                                             },
@@ -529,7 +534,12 @@ fun MainScreen(
                                                 youTubeViewModel.playTrack(result, mediaControllerManager)
                                                 playerViewModel.expandNowPlaying()
                                             },
-                                            onDownloadTrack = { result -> youTubeViewModel.downloadTrack(result) }
+                                            onDownloadTrack = { result -> youTubeViewModel.downloadTrack(result) },
+                                            onPlayAll = { tracks, shuffled ->
+                                                val queue = if (shuffled) tracks.shuffled() else tracks
+                                                youTubeViewModel.playAll(queue, mediaControllerManager)
+                                                playerViewModel.expandNowPlaying()
+                                            },
                                         )
                                     }
                                     is Screen.Settings -> {
