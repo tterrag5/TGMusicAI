@@ -3,6 +3,14 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        Casting to a device on the local network needs all three: ACCESS_NETWORK_STATE and
+        ACCESS_WIFI_STATE for the Cast framework's own discovery, and a listening socket
+        (LocalMediaHttpServer) so a Cast device can fetch local files, which it cannot read from
+        this phone's storage.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -29,6 +37,15 @@
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/automotive_app_desc" />
+
+        <!--
+            Cast configuration. The Play Services Cast framework finds this class by name, which is
+            why it is referenced as a string rather than a class reference and must not be
+            obfuscated away.
+        -->
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.example.tgmusicai.cast.CastOptionsProvider" />
 
         <activity
             android:name=".MainActivity"

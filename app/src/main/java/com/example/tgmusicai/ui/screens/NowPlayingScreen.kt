@@ -102,6 +102,7 @@ import androidx.compose.ui.unit.dp
 import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import com.example.tgmusicai.ui.components.AddToPlaylistDialog
+import com.example.tgmusicai.ui.components.CastButton
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
 import com.example.tgmusicai.ui.util.FormatUtils
 import com.example.tgmusicai.ui.util.rememberArtworkColors
@@ -327,6 +328,13 @@ fun NowPlayingScreen(
                     }
                 },
                 actions = {
+                    // Renders nothing where Cast is unusable, so a device without Play Services
+                    // sees no dead control.
+                    CastButton(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .padding(12.dp)
+                    )
                     IconButton(onClick = onOpenQueue) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Rounded.QueueMusic,

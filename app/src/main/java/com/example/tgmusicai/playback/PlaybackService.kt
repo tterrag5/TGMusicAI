@@ -26,6 +26,11 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import com.example.tgmusicai.R
+import androidx.media3.cast.CastPlayer
+import androidx.media3.cast.RemoteCastPlayer
+import com.example.tgmusicai.cast.CastAvailability
+import com.example.tgmusicai.cast.CastMediaItemConverter
+import com.example.tgmusicai.cast.LocalMediaHttpServer
 import com.example.tgmusicai.data.local.AppDatabase
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.ListeningHistory
@@ -70,6 +75,11 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var loudnessNormalization: LoudnessNormalizationManager
     private val sponsorBlock by lazy { SponsorBlockManager() }
     private val scrobbler by lazy { ListenBrainzScrobbler() }
+
+    // Cast, when the device supports it. Both stay null on a device without Play Services, which
+    // leaves the session running on the plain ExoPlayer.
+    private var castPlayer: CastPlayer? = null
+    private var mediaServer: LocalMediaHttpServer? = null
 
     /**
      * Scrobbling settings, mirrored into fields for the same reason the others are: they are read
@@ -400,7 +410,17 @@ class PlaybackService : MediaLibraryService() {
         )
 
         // Build the MediaLibrarySession with custom callback for Android Auto browsing & media resolution
-        mediaLibrarySession = MediaLibrarySession.Builder(this, player, CustomMediaLibrarySessionCallback())
+        //
+        // The session is given the Cast-aware wrapper rather than the ExoPlayer directly, where
+        // Cast is usable. That wrapper forwards to whichever of the two is active and moves the
+        // queue and position across when a Cast session starts or ends, so everything above it --
+        // the session, Android Auto, the UI, the widget -- keeps talking to one player and needs
+        // to know nothing about casting.
+        mediaLibrarySession = MediaLibrarySession.Builder(
+            this,
+            buildCastAwarePlayerOrNull() ?: player,
+            CustomMediaLibrarySessionCallback()
+        )
             .setSessionActivity(sessionActivityPendingIntent)
             .build()
 
@@ -456,6 +476,48 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
         return mediaLibrarySession
+    }
+
+    /**
+     * Builds the player that hands playback to a Cast device when one is connected, or null if
+     * Cast cannot be used here.
+     *
+     * Cast rides on Google Play Services, which a meaningful share of devices do not have --
+     * de-Googled ROMs, some OEM builds, emulators without Play. On those, initialising it throws
+     * rather than returning nothing, so a failure here has to leave the service running on the
+     * plain ExoPlayer instead of taking playback down with it.
+     *
+     * The local HTTP server exists because a Cast device fetches media by URL and cannot see this
+     * phone's storage. Without it only cloud tracks could be cast, which for a library that is
+     * mostly local files would make the feature close to useless.
+     */
+    private fun buildCastAwarePlayerOrNull(): Player? {
+        if (CastAvailability.castContext(this) == null) {
+            android.util.Log.d("PlaybackService", "Cast is unavailable on this device")
+            return null
+        }
+
+        return try {
+            val server = LocalMediaHttpServer(this).also { mediaServer = it }
+            if (!server.start()) {
+                android.util.Log.w("PlaybackService", "Local media server did not start; casting local files will not work")
+            }
+
+            val remotePlayer = RemoteCastPlayer.Builder(this)
+                .setMediaItemConverter(CastMediaItemConverter(server))
+                .build()
+
+            CastPlayer.Builder(this)
+                .setLocalPlayer(player)
+                .setRemotePlayer(remotePlayer)
+                .build()
+                .also { castPlayer = it }
+        } catch (e: Throwable) {
+            android.util.Log.w("PlaybackService", "Could not set up Cast; staying on local playback", e)
+            mediaServer?.close()
+            mediaServer = null
+            null
+        }
     }
 
     /**
@@ -870,6 +932,13 @@ class PlaybackService : MediaLibraryService() {
         stopTelemetryTicker()
         loudnessEnhancer?.release()
         loudnessEnhancer = null
+        // Released before the session, since the session's player is the Cast wrapper around it.
+        // Closing the media server drops every registration with it, so nothing stays reachable on
+        // the network once playback is over.
+        castPlayer?.release()
+        castPlayer = null
+        mediaServer?.close()
+        mediaServer = null
         mediaLibrarySession?.run {
             player.release()
             release()
