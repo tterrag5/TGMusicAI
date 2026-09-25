@@ -75,7 +75,7 @@ fun TagEditorDialog(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        "Changes are written into the audio file itself, so they follow it to other apps and survive a re-scan.",
+                        "Changes are written into the audio file.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

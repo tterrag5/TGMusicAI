@@ -117,9 +117,8 @@ fun RecognizeSongDialog(
                             style = MaterialTheme.typography.bodyMedium
                         )
                         Text(
-                            // Explains the two quite different reasons for a miss, so the user
-                            // knows whether trying again is worth it.
-                            "This matches against the $indexedCount tracks in your own indexed library, not every song ever released. Either it isn't one of yours, or there was too much noise to hear it.",
+                            // Which of the two reasons applies decides whether trying again helps.
+                            "No match among your $indexedCount indexed tracks. Either it isn't one of yours, or it was too noisy to hear.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

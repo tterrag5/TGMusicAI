@@ -232,7 +232,7 @@ fun SettingsScreen(
                 ) {
                     SettingsToggleRow(
                         title = "Normalize volume",
-                        subtitle = "Play every track at the same loudness, so a quiet local file and a loud YouTube stream don't jump in volume.",
+                        subtitle = "Play every track at the same loudness.",
                         checked = volumeNormalizationEnabled,
                         onCheckedChange = playerViewModel::setVolumeNormalizationEnabled
                     )
@@ -251,7 +251,7 @@ fun SettingsScreen(
                         Column(modifier = Modifier.padding(16.dp)) {
                             SettingsToggleContent(
                                 title = "Crossfade",
-                                subtitle = "Fade a track out as it ends and fade the next one in, instead of cutting abruptly.",
+                                subtitle = "Fade between tracks.",
                                 checked = crossfadeEnabled,
                                 onCheckedChange = playerViewModel::setCrossfadeEnabled
                             )
@@ -282,7 +282,7 @@ fun SettingsScreen(
                         Column(modifier = Modifier.padding(16.dp)) {
                             SettingsToggleContent(
                                 title = "Skip non-music sections",
-                                subtitle = "Use the community SponsorBlock database to jump past intros, sponsor reads and talking in YouTube tracks. Sends an anonymised lookup per track.",
+                                subtitle = "Jump past intros, sponsor reads and talking in YouTube tracks. Sends an anonymised lookup per track.",
                                 checked = sponsorBlockEnabled,
                                 onCheckedChange = playerViewModel::setSponsorBlockEnabled
                             )
@@ -338,10 +338,9 @@ fun SettingsScreen(
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
                                 Text(
-                                    // States the scope up front. This identifies tracks the user
-                                    // already owns, not any song in the world -- doing the latter
-                                    // needs a commercial fingerprinting service and a paid key.
-                                    "Hold the phone up to music and the app will tell you which of your own tracks it is. It matches against an index built from your library, so it only recognises music you already have -- but it works offline and nothing is sent anywhere.",
+                                    // Scope, not rationale: it matters to the user that this
+                                    // recognises their own library and nothing else.
+                                    "Identifies tracks from your own library by listening. Works offline.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -352,13 +351,8 @@ fun SettingsScreen(
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    // The honest cost, stated before they commit to it.
-                                    // Measured on-device rather than estimated: the fingerprinter
-                                    // produces about 120 landmarks per second of audio, so a
-                                    // typical song costs roughly 25,000 rows and 1-2 MB. Worth
-                                    // stating concretely -- this is the kind of cost a user should
-                                    // be able to decline knowingly.
-                                    "Building the index reads through each track once. Expect roughly 1-2 MB per song, so a large library can run to several hundred megabytes. It's why this is off until you ask for it, and you can clear it again at any time.",
+                                    // A storage cost the user should be able to decline knowingly.
+                                    "Roughly 1-2 MB per song. Can be cleared at any time.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -404,10 +398,7 @@ fun SettingsScreen(
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text(
-                                // Says outright why this is ListenBrainz rather than the service
-                                // most people would expect, so its absence does not read as an
-                                // oversight.
-                                "Submit finished tracks to your ListenBrainz account. ListenBrainz needs only a token from your own profile page, so the app carries no service credentials of its own -- which is why Last.fm, whose API requires a developer key built into the app, isn't offered here.",
+                                "Submit finished tracks to your ListenBrainz account.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -437,7 +428,7 @@ fun SettingsScreen(
                                     value = listenBrainzServerInput,
                                     onValueChange = { listenBrainzServerInput = it },
                                     label = { Text("Server") },
-                                    supportingText = { Text("Leave as-is unless you run your own ListenBrainz-compatible server.") },
+                                    supportingText = { Text("Leave as-is unless you run your own server.") },
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth()
                                 )

@@ -83,7 +83,7 @@ fun ArtistDetailScreen(
             isLoading -> LoadingBody(innerPadding)
             artist == null -> UnavailableBody(
                 innerPadding,
-                "Couldn't load this artist. YouTube Music's internal pages change often, and this one didn't come back in a shape the app understands."
+                "Couldn't load this artist."
             )
             else -> {
                 val page = artist!!
@@ -225,7 +225,7 @@ fun AlbumDetailScreen(
             isLoading -> LoadingBody(innerPadding)
             album == null -> UnavailableBody(
                 innerPadding,
-                "Couldn't load this album. YouTube Music's internal pages change often, and this one didn't come back in a shape the app understands."
+                "Couldn't load this album."
             )
             else -> {
                 val page = album!!
