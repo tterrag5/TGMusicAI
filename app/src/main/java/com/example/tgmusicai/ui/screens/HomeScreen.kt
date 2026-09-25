@@ -76,6 +76,7 @@ import coil.compose.AsyncImage
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.ui.components.PlaylistCoverArt
 import com.example.tgmusicai.ui.util.FormatUtils
 import com.example.tgmusicai.ui.viewmodel.HomeViewModel
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
@@ -102,7 +103,7 @@ fun HomeScreen(
     val pinnedSongs by homeViewModel.pinnedSongs.collectAsState()
     val pinnedPlaylists by homeViewModel.pinnedPlaylists.collectAsState()
     val smartPlaylists by homeViewModel.smartPlaylists.collectAsState()
-    val playlistTopArtwork by homeViewModel.playlistTopArtwork.collectAsState()
+    val playlistCoverArtwork by homeViewModel.playlistCoverArtwork.collectAsState()
     val listenAgainSongs by homeViewModel.listenAgainSongs.collectAsState()
     val mostPlayedSongs by homeViewModel.mostPlayedSongs.collectAsState()
     val recommendedSongs by homeViewModel.recommendedSongs.collectAsState()
@@ -253,7 +254,7 @@ fun HomeScreen(
                                                             onPlaylistClick(cellItem.playlist.playlistId, cellItem.playlist.name)
                                                         },
                                                         onUnpin = { homeViewModel.togglePinPlaylist(cellItem.playlist) },
-                                                        topSongArtworkUri = playlistTopArtwork[cellItem.playlist.playlistId],
+                                                        coverArtworkUris = playlistCoverArtwork[cellItem.playlist.playlistId].orEmpty(),
                                                         modifier = Modifier.fillMaxWidth()
                                                     )
                                                     is SpeedDialItem.SongItem -> PinnedSongCard(
@@ -422,7 +423,7 @@ fun HomeScreen(
                         items(smartPlaylists) { playlist ->
                             SmartPlaylistCard(
                                 playlist = playlist,
-                                topSongArtworkUri = playlistTopArtwork[playlist.playlistId],
+                                coverArtworkUris = playlistCoverArtwork[playlist.playlistId].orEmpty(),
                                 onClick = { onPlaylistClick(playlist.playlistId, playlist.name) }
                             )
                         }
@@ -489,7 +490,7 @@ fun PinnedPlaylistCard(
     playlist: Playlist,
     onClick: () -> Unit,
     onUnpin: () -> Unit,
-    topSongArtworkUri: String? = null,
+    coverArtworkUris: List<String> = emptyList(),
     modifier: Modifier = Modifier.width(150.dp)
 ) {
     val isLikedMusic = playlist.isSmart && playlist.name == MusicRepository.LIKED_MUSIC_NAME
@@ -522,19 +523,11 @@ fun PinnedPlaylistCard(
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(48.dp)
                     )
-                } else if (!topSongArtworkUri.isNullOrBlank()) {
-                    AsyncImage(
-                        model = topSongArtworkUri,
-                        contentDescription = playlist.name,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
                 } else {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.QueueMusic,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(48.dp)
+                    PlaylistCoverArt(
+                        artworkUris = coverArtworkUris,
+                        placeholderIconSize = 48.dp,
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
 
@@ -931,7 +924,7 @@ fun SongCardItem(
 fun SmartPlaylistCard(
     playlist: Playlist,
     onClick: () -> Unit,
-    topSongArtworkUri: String? = null
+    coverArtworkUris: List<String> = emptyList()
 ) {
     val isLikedMusic = playlist.isSmart && playlist.name == MusicRepository.LIKED_MUSIC_NAME
 
@@ -964,19 +957,12 @@ fun SmartPlaylistCard(
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(48.dp)
                     )
-                } else if (!topSongArtworkUri.isNullOrBlank()) {
-                    AsyncImage(
-                        model = topSongArtworkUri,
-                        contentDescription = playlist.name,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
                 } else {
-                    Icon(
-                        imageVector = Icons.Rounded.AutoAwesome,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(48.dp)
+                    PlaylistCoverArt(
+                        artworkUris = coverArtworkUris,
+                        placeholderIcon = Icons.Rounded.AutoAwesome,
+                        placeholderIconSize = 48.dp,
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
 

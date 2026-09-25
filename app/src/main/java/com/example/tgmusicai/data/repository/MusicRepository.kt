@@ -84,6 +84,14 @@ class MusicRepository(
     val pinnedSongs: Flow<List<Song>> = songDao.getPinnedSongs()
 
     /**
+     * Every recorded per-playlist play tally, behind the playlist cover mosaic. Empty when no
+     * database was supplied, which is the case in unit tests that build the repository from fake
+     * DAOs alone.
+     */
+    val playlistPlayCounts: Flow<List<com.example.tgmusicai.data.local.entity.PlaylistPlayCount>> =
+        database?.playlistPlayCountDao()?.observeAll() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+
+    /**
      * Every playlist, real and smart. Deduplicated by a kind-aware key (smart playlists by
      * name, normal playlists by ID) rather than by row ID alone, since the racy
      * check-then-insert pattern this class used to have around smart-playlist creation could

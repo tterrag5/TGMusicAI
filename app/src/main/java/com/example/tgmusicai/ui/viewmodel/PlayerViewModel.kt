@@ -682,16 +682,16 @@ class PlayerViewModel(
         }
     }
 
-    fun playSong(song: Song, queue: List<Song> = listOf(song)) {
+    fun playSong(song: Song, queue: List<Song> = listOf(song), fromPlaylistId: Long? = null) {
         // Deferred until playback actually starts (see MediaControllerManager.playSong's
         // onStarted callback) -- expanding immediately used to show the full-screen player with
         // the *previous* song's cover/title still in it for however long the new song took to
         // resolve, which looked like the app had glitched into the wrong screen.
-        mediaControllerManager.playSong(song, queue, onStarted = { expandNowPlaying() })
+        mediaControllerManager.playSong(song, queue, fromPlaylistId, onStarted = { expandNowPlaying() })
     }
 
-    fun playQueue(queue: List<Song>, startIndex: Int = 0) {
-        mediaControllerManager.playQueue(queue, startIndex, onStarted = { expandNowPlaying() })
+    fun playQueue(queue: List<Song>, startIndex: Int = 0, fromPlaylistId: Long? = null) {
+        mediaControllerManager.playQueue(queue, startIndex, fromPlaylistId, onStarted = { expandNowPlaying() })
     }
 
     /** Appends [song] to the end of the live "Up Next" queue (e.g. from a swipe-right gesture). */

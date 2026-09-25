@@ -38,8 +38,9 @@ import com.example.tgmusicai.ui.util.FormatUtils
 
 /**
  * Material 3 Expressive grid-cell Card representing a playlist item, for the Playlists tab's
- * grid layout. Displays playlist cover art (Thumbs Up for Liked Music, top song artwork, or
- * default icon), name, song count, and pin/delete actions (delete hidden for immutable Liked Music).
+ * grid layout. Displays playlist cover art (Thumbs Up for Liked Music, otherwise a mosaic of up to
+ * four member songs -- see [PlaylistCoverArt]), name, song count, and pin/delete actions (delete
+ * hidden for immutable Liked Music).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -48,7 +49,7 @@ fun PlaylistCard(
     onClick: () -> Unit,
     onDeleteClick: () -> Unit,
     modifier: Modifier = Modifier,
-    topSongArtworkUri: String? = null,
+    coverArtworkUris: List<String> = emptyList(),
     songCount: Int = 0,
     onPinToggleClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
@@ -100,19 +101,11 @@ fun PlaylistCard(
                         tint = MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.size(placeholderIconSize)
                     )
-                } else if (!topSongArtworkUri.isNullOrBlank()) {
-                    AsyncImage(
-                        model = FormatUtils.cacheBustedArtworkUri(topSongArtworkUri),
-                        contentDescription = playlist.name,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
                 } else {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.QueueMusic,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                        modifier = Modifier.size(placeholderIconSize)
+                    PlaylistCoverArt(
+                        artworkUris = coverArtworkUris,
+                        placeholderIconSize = placeholderIconSize,
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
 

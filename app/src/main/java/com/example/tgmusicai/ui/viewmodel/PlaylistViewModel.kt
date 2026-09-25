@@ -11,11 +11,13 @@ import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.PlaylistWithSongs
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.PlaylistCoverArtwork
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -51,6 +53,21 @@ class PlaylistViewModel(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = emptyList()
+        )
+
+    /**
+     * The artwork each playlist's cover mosaic is built from, keyed by playlist id. The choosing is
+     * [PlaylistCoverArtwork]'s, so the Playlists grid and the Home rows cannot disagree about the
+     * same playlist.
+     */
+    val playlistCoverArtwork: StateFlow<Map<Long, List<String>>> = combine(
+        repository.allPlaylistsWithSongs,
+        repository.playlistPlayCounts
+    ) { playlists, counts -> PlaylistCoverArtwork.build(playlists, counts) }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyMap()
         )
 
     val playlistsWithSongs: StateFlow<List<PlaylistWithSongs>> = repository.allPlaylistsWithSongs

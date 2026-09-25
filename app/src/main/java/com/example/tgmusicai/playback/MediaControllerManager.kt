@@ -310,7 +310,13 @@ class MediaControllerManager(
      * Cloud songs whose [Song.mediaUri] is an unresolved YouTube watch URL (e.g. added to a
      * playlist from search without downloading) are re-resolved to a direct stream URL first.
      */
-    fun playSong(song: Song, queue: List<Song> = listOf(song), onStarted: () -> Unit = {}) {
+    fun playSong(
+        song: Song,
+        queue: List<Song> = listOf(song),
+        fromPlaylistId: Long? = null,
+        onStarted: () -> Unit = {}
+    ) {
+        originPlaylistId = fromPlaylistId
         val activeQueue = if (queue.isEmpty()) listOf(song) else queue
         val startId = song.mediaUri
 
@@ -355,7 +361,13 @@ class MediaControllerManager(
      * Plays an entire queue of songs starting from a specific index. Cloud songs whose
      * [Song.mediaUri] is an unresolved YouTube watch URL are re-resolved to a direct stream URL first.
      */
-    fun playQueue(queue: List<Song>, startIndex: Int = 0, onStarted: () -> Unit = {}) {
+    fun playQueue(
+        queue: List<Song>,
+        startIndex: Int = 0,
+        fromPlaylistId: Long? = null,
+        onStarted: () -> Unit = {}
+    ) {
+        originPlaylistId = fromPlaylistId
         if (queue.isEmpty()) return
         playQueueProgressively(queue, startIndex.coerceIn(0, queue.lastIndex), onStarted)
     }
@@ -870,6 +882,13 @@ class MediaControllerManager(
         }
     }
 
+    /**
+     * The playlist the loaded queue was started from, stamped onto every item so the service can
+     * attribute a play to it. Set by the play entry points and cleared by any queue that did not
+     * come from a playlist, so attribution can never be inherited by the next thing played.
+     */
+    private var originPlaylistId: Long? = null
+
     private fun buildMediaItem(song: Song): MediaItem {
         return MediaItem.Builder()
             .setMediaId(song.mediaUri)
@@ -880,7 +899,7 @@ class MediaControllerManager(
                     .setArtist(song.artist)
                     .setAlbumTitle(song.album)
                     .setIsPlayable(true)
-                    .setExtras(SongMediaExtras.fromSong(song))
+                    .setExtras(SongMediaExtras.fromSong(song, originPlaylistId))
                     .build()
             )
             .build()

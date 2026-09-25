@@ -13,6 +13,7 @@ import com.example.tgmusicai.data.local.dao.PendingDownloadDao
 import com.example.tgmusicai.data.local.dao.PlaylistDao
 import com.example.tgmusicai.data.local.dao.SongDao
 import com.example.tgmusicai.data.local.dao.SongFingerprintDao
+import com.example.tgmusicai.data.local.dao.PlaylistPlayCountDao
 import com.example.tgmusicai.data.local.dao.SongStatsDao
 import com.example.tgmusicai.data.local.entity.Alarm
 import com.example.tgmusicai.data.local.entity.AiSongTags
@@ -22,6 +23,7 @@ import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.PlaylistSongCrossRef
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.local.entity.SongFingerprint
+import com.example.tgmusicai.data.local.entity.PlaylistPlayCount
 import com.example.tgmusicai.data.local.entity.SongStats
 
 /**
@@ -43,6 +45,9 @@ import com.example.tgmusicai.data.local.entity.SongStats
  * Version = 16 added songs.folder_path, backing the library's folder browser.
  * Version = 17 added song_fingerprints -- another standalone table, owned by the opt-in song
  * recognition feature, kept out of the core schema for the same reason ai_song_tags is.
+ * Version = 18 added songs.genre, backing the library's tag filter chips.
+ * Version = 19 added playlist_play_counts, which records plays per playlist rather than only per
+ * song, so a playlist's cover can show what that playlist is actually played for.
  */
 @Database(
     entities = [
@@ -54,9 +59,10 @@ import com.example.tgmusicai.data.local.entity.SongStats
         PendingDownload::class,
         AiSongTags::class,
         ListeningHistory::class,
-        SongFingerprint::class
+        SongFingerprint::class,
+        PlaylistPlayCount::class
     ],
-    version = 18,
+    version = 19,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -77,6 +83,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun listeningHistoryDao(): ListeningHistoryDao
     /** DAO for `song_fingerprints`: the opt-in acoustic index behind recognising a song by listening. */
     abstract fun songFingerprintDao(): SongFingerprintDao
+    /** DAO for `playlist_play_counts`: per-playlist play tallies, behind the playlist cover mosaic. */
+    abstract fun playlistPlayCountDao(): PlaylistPlayCountDao
 
     companion object {
         @Volatile
@@ -283,6 +291,30 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Adds `playlist_play_counts`, which tallies plays per playlist instead of only per song.
+         *
+         * A new table rather than a column: the fact belongs to the pairing of a playlist and a
+         * song, and there is no row anywhere that a pairing could be stored on. Starts empty, which
+         * is correct -- there is no way to reconstruct which playlist a past play came from, and
+         * guessing would put wrong songs on a cover. Covers fall back to the playlist's own order
+         * until real plays accumulate.
+         */
+        private val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS playlist_play_counts (
+                        playlistId INTEGER NOT NULL,
+                        songId INTEGER NOT NULL,
+                        playCount INTEGER NOT NULL,
+                        PRIMARY KEY(playlistId, songId)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
          * Returns the app-wide singleton [AppDatabase], creating it on first call.
          * Double-checked locking (`synchronized` + null check twice) avoids building the
          * database twice if two threads race to call this before [INSTANCE] is set.
@@ -301,7 +333,7 @@ abstract class AppDatabase : RoomDatabase() {
                 .addMigrations(
                     MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
                     MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
-                    MIGRATION_17_18,
+                    MIGRATION_17_18, MIGRATION_18_19,
                 )
                 .fallbackToDestructiveMigration()
                 .build()

@@ -382,7 +382,7 @@ fun PlaylistDetailScreen(
                 ) {
                     Button(
                         onClick = {
-                            playerViewModel.playQueue(queue = songs, startIndex = 0)
+                            playerViewModel.playQueue(queue = songs, startIndex = 0, fromPlaylistId = playlistId)
                         },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.primary
@@ -480,7 +480,7 @@ fun PlaylistDetailScreen(
                                         if (isSelectionMode) {
                                             playlistViewModel.toggleSongSelected(song.id)
                                         } else {
-                                            playerViewModel.playSong(song = song, queue = songs)
+                                            playerViewModel.playSong(song = song, queue = songs, fromPlaylistId = playlistId)
                                         }
                                     },
                                     onLongClick = { playlistViewModel.startSelection(song.id) },

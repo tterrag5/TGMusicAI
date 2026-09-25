@@ -74,6 +74,7 @@ import com.example.tgmusicai.data.repository.MusicRepository
 import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.ui.components.CreatePlaylistDialog
 import com.example.tgmusicai.ui.components.MiniPlayer
+import com.example.tgmusicai.ui.components.PlaylistCoverArt
 import com.example.tgmusicai.ui.components.QueueSheet
 import com.example.tgmusicai.ui.navigation.Screen
 import com.example.tgmusicai.ui.viewmodel.AlarmViewModel
@@ -126,6 +127,7 @@ fun MainScreen(
     var showQueueSheet by remember { mutableStateOf(false) }
 
     val userPlaylists by playlistViewModel.playlists.collectAsState()
+    val playlistCoverArtwork by playlistViewModel.playlistCoverArtwork.collectAsState()
     val downloadMap by youTubeViewModel.downloadMap.collectAsState()
 
     val showNowPlayingFull by playerViewModel.isNowPlayingExpanded.collectAsState()
@@ -380,6 +382,7 @@ fun MainScreen(
                                 title = playlist.name,
                                 icon = Icons.AutoMirrored.Rounded.QueueMusic,
                                 iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                coverArtworkUris = playlistCoverArtwork[playlist.playlistId].orEmpty(),
                                 selected = currentDestination is Screen.PlaylistDetail &&
                                     (currentDestination as Screen.PlaylistDetail).playlistId == playlist.playlistId,
                                 onClick = {
@@ -712,7 +715,14 @@ fun DrawerPlaylistItem(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     iconTint: Color,
     selected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    /**
+     * The playlist's own cover artwork, scaled down in place of the icon. A drawer of identical
+     * music-note glyphs gave the reader nothing to aim at; a playlist's cover is how they recognise
+     * it in every other part of the app, so it should be what they see here too. Empty for rows
+     * that have no artwork, or for a playlist with its own dedicated icon like Liked Music.
+     */
+    coverArtworkUris: List<String> = emptyList()
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -723,13 +733,25 @@ fun DrawerPlaylistItem(
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = if (selected) MaterialTheme.colorScheme.primary else iconTint,
-            modifier = Modifier.size(20.dp)
-        )
-        Spacer(modifier = Modifier.width(16.dp))
+        if (coverArtworkUris.isNotEmpty()) {
+            PlaylistCoverArt(
+                artworkUris = coverArtworkUris,
+                placeholderIcon = icon,
+                placeholderIconSize = 14.dp,
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(6.dp))
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+        } else {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (selected) MaterialTheme.colorScheme.primary else iconTint,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(16.dp))
+        }
         Text(
             text = title,
             style = MaterialTheme.typography.bodyMedium,

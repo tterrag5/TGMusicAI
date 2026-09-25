@@ -9,6 +9,7 @@ import com.example.tgmusicai.data.network.NetworkObserver
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.repository.CloudRecommendationSource
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.PlaylistCoverArtwork
 import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.data.repository.SongWithStats
 import com.example.tgmusicai.data.local.entity.Playlist
@@ -77,12 +78,14 @@ class HomeViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Top-song artwork for every playlist shown on Home (pinned real playlists AND smart
-    // playlists), keyed by playlistId. Reuses MusicRepository's single shared definition of "the
-    // songs in this playlist" (real cross-ref join or the matching computed query for a smart
-    // playlist) instead of re-deriving it here, so pinned playlists get real cover art the same
-    // way the Playlists tab and PlaylistDetailScreen already do.
-    val playlistTopArtwork: StateFlow<Map<Long, String?>> = repository.allPlaylistsWithSongs
-        .map { list -> list.associate { it.playlist.playlistId to it.songs.firstOrNull()?.artworkUri } }
+    // Artwork for each playlist's cover mosaic, keyed by playlistId. Reuses MusicRepository's
+    // single shared definition of "the songs in this playlist" (real cross-ref join or the matching
+    // computed query for a smart playlist) and PlaylistCoverArtwork's single definition of which of
+    // them to show, so a playlist looks the same here as it does in the Library.
+    val playlistCoverArtwork: StateFlow<Map<Long, List<String>>> = combine(
+        repository.allPlaylistsWithSongs,
+        repository.playlistPlayCounts
+    ) { playlists, counts -> PlaylistCoverArtwork.build(playlists, counts) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
     // Listen Again (Recently Played)

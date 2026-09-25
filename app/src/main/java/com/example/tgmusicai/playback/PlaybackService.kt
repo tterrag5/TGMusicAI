@@ -817,6 +817,8 @@ class PlaybackService : MediaLibraryService() {
     private var trackedMediaId: String? = null
     private var trackedSongId: Long? = null
     private var trackedYoutubeId: String? = null
+    // The playlist the current item was queued from, if any, so a play can be counted against it.
+    private var trackedOriginPlaylistId: Long? = null
     private var accumulatedListenMs: Long = 0L
     private var pendingFlushMs: Long = 0L
     private var playRecordedForCurrentItem: Boolean = false
@@ -891,6 +893,7 @@ class PlaybackService : MediaLibraryService() {
         val extras = mediaItem?.mediaMetadata?.extras
         trackedSongId = SongMediaExtras.songId(extras)
         trackedYoutubeId = SongMediaExtras.youtubeId(extras)
+        trackedOriginPlaylistId = SongMediaExtras.originPlaylistId(extras)
         accumulatedListenMs = 0L
         pendingFlushMs = 0L
         playRecordedForCurrentItem = false
@@ -947,6 +950,10 @@ class PlaybackService : MediaLibraryService() {
             val songId = resolveTrackedSongId() ?: return@launch
             trackedSongId = songId
             database.songStatsDao().incrementPlayCount(songId)
+            // Counted against the playlist as well when the queue came from one. What a playlist is
+            // played for is not the same question as what a song is played, and the cover mosaic
+            // asks the first one.
+            trackedOriginPlaylistId?.let { database.playlistPlayCountDao().incrementPlay(it, songId) }
         }
     }
 

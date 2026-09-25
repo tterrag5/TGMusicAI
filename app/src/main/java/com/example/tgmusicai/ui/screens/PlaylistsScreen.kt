@@ -71,6 +71,7 @@ fun PlaylistsContent(
     modifier: Modifier = Modifier
 ) {
     val playlistsWithSongs by playlistViewModel.playlistsWithSongs.collectAsState()
+    val coverArtwork by playlistViewModel.playlistCoverArtwork.collectAsState()
     val showCreateDialog by playlistViewModel.showCreateDialog.collectAsState()
     var playlistPendingDelete by remember { mutableStateOf<Playlist?>(null) }
     val context = LocalContext.current
@@ -199,7 +200,7 @@ fun PlaylistsContent(
                     val isSelectable = !MusicRepository.isProtectedSmartPlaylist(playlist)
                     PlaylistCard(
                         playlist = playlist,
-                        topSongArtworkUri = pws.songs.firstOrNull()?.artworkUri,
+                        coverArtworkUris = coverArtwork[playlist.playlistId].orEmpty(),
                         songCount = pws.songs.size,
                         isSelected = playlist.playlistId in selectedPlaylistIds,
                         compact = compact,
