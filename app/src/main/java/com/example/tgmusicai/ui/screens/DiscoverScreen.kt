@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +40,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +60,13 @@ import com.example.tgmusicai.ui.viewmodel.DiscoverViewModel
 
 /** Columns in the Discover grid, matching the Library's own song grid. */
 private const val DISCOVER_GRID_COLUMNS = 3
+
+/**
+ * How close to the end of the grid the user has to get before the next page is fetched. Two rows'
+ * worth: enough that the page usually lands before they reach the gap, not so much that pages are
+ * fetched for positions they never scroll to.
+ */
+private const val FEED_LOAD_AHEAD_ITEMS = 6
 
 /**
  * Discovery for the cloud half of the library: a search for playlists and mixes, YouTube Music's
@@ -95,13 +105,38 @@ fun DiscoverContent(
     val artistResults by discoverViewModel.artistResults.collectAsState()
     val albumResults by discoverViewModel.albumResults.collectAsState()
     val isSearching by discoverViewModel.isSearching.collectAsState()
+    val feedTracks by discoverViewModel.feedTracks.collectAsState()
+    val isLoadingFeed by discoverViewModel.isLoadingFeed.collectAsState()
+    val feedExhausted by discoverViewModel.feedExhausted.collectAsState()
 
     LaunchedEffect(Unit) { discoverViewModel.loadDiscover() }
 
     val searching = searchQuery.isNotBlank()
+    val gridState = rememberLazyGridState()
+
+    // Loads the next page only when the end of what is rendered comes within reach, and never for
+    // anywhere else in the list. derivedStateOf is what keeps this cheap: the flag recomputes as the
+    // grid scrolls but only *changes* at the threshold, so the effect below runs once per page
+    // instead of once per frame. Scrolling back up changes nothing -- those tiles already exist.
+    val shouldLoadMore by remember {
+        derivedStateOf {
+            val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+            lastVisible >= gridState.layoutInfo.totalItemsCount - FEED_LOAD_AHEAD_ITEMS
+        }
+    }
+
+    // Keyed on the feed's length as well as the flag. The flag goes true near the end and *stays*
+    // true while the page loads, so on its own it fires exactly once and the feed stops growing
+    // after one page. Appending a page changes the length, which re-runs this; the appended items
+    // then push the end far enough away that the flag goes false on its own, so a user who stops
+    // scrolling stops loading.
+    LaunchedEffect(shouldLoadMore, feedTracks.size, searching) {
+        if (shouldLoadMore && !searching) discoverViewModel.loadMoreFeed()
+    }
 
     LazyVerticalGrid(
         columns = GridCells.Fixed(DISCOVER_GRID_COLUMNS),
+        state = gridState,
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 120.dp)
     ) {
@@ -274,6 +309,29 @@ fun DiscoverContent(
                 fullWidth {
                     EmptyNote("Couldn't reach YouTube Music just now. Check your connection, then switch away from this tab and back.")
                 }
+            }
+
+            // The endless part, deliberately last: the sections above are finite and have a shape
+            // the user can get to the bottom of. A feed that never ends has to come after them or
+            // nothing above it is ever reachable again.
+            if (feedTracks.isNotEmpty()) {
+                fullWidth(key = "heading_for_you") { SectionHeading("For you") }
+                items(feedTracks, key = { "feed_${it.videoId}" }) { track ->
+                    CloudTile(
+                        title = track.title,
+                        subtitle = track.uploader,
+                        artworkUrl = track.thumbnailUri,
+                        onClick = { onPlayTrack(track) },
+                        showPlayOverlay = true,
+                        onDownload = { onDownloadTrack(track) }
+                    )
+                }
+            }
+
+            if (isLoadingFeed) {
+                fullWidth(key = "feed_loading") { LoadingRow() }
+            } else if (feedExhausted && feedTracks.isNotEmpty()) {
+                fullWidth(key = "feed_end") { EmptyNote("That's everything for now.") }
             }
         }
     }

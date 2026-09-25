@@ -241,7 +241,13 @@ class MainActivity : ComponentActivity() {
 
                         val youTubeViewModel: YouTubeViewModel = viewModel()
                         val discoverViewModel: DiscoverViewModel = viewModel(
-                            factory = remember { DiscoverViewModel.Factory(youTubeMusicBrowser) }
+                            factory = remember {
+                                DiscoverViewModel.Factory(
+                                    youTubeMusicBrowser,
+                                    database.songDao(),
+                                    recommendationEngine
+                                )
+                            }
                         )
                         val recognitionViewModel: RecognitionViewModel = viewModel(
                             factory = remember { RecognitionViewModel.Factory(songRecognitionManager) }

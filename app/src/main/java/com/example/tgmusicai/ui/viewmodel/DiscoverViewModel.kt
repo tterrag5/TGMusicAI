@@ -9,6 +9,7 @@ import com.example.tgmusicai.data.youtube.YouTubeArtistPage
 import com.example.tgmusicai.data.youtube.YouTubeArtistRef
 import com.example.tgmusicai.data.youtube.YouTubeHomeShelf
 import com.example.tgmusicai.data.youtube.YouTubeMoodCategory
+import com.example.tgmusicai.data.repository.CloudFeedPager
 import com.example.tgmusicai.data.youtube.YouTubeMusicBrowser
 import com.example.tgmusicai.data.youtube.YouTubeSearchResult
 import kotlinx.coroutines.Job
@@ -28,7 +29,11 @@ import kotlinx.coroutines.launch
  * failure the user can do nothing about is not worth interrupting them with.
  */
 class DiscoverViewModel(
-    private val browser: YouTubeMusicBrowser
+    private val browser: YouTubeMusicBrowser,
+    // Both optional: the feed is the only thing that needs them, and a Discover screen with no feed
+    // is still a working Discover screen.
+    private val songDao: com.example.tgmusicai.data.local.dao.SongDao? = null,
+    private val recommendationEngine: com.example.tgmusicai.data.repository.RecommendationEngine? = null
 ) : ViewModel() {
 
     private val _moods = MutableStateFlow<List<YouTubeMoodCategory>>(emptyList())
@@ -62,6 +67,7 @@ class DiscoverViewModel(
     // quick succession would otherwise let the slower response land last and overwrite the page
     // the user is actually looking at.
     private var discoverJob: Job? = null
+    private var feedJob: Job? = null
     private var searchJob: Job? = null
     private var moodJob: Job? = null
     private var detailJob: Job? = null
@@ -80,6 +86,59 @@ class DiscoverViewModel(
                 _charts.value = browser.fetchTopChart()
             } finally {
                 _isLoadingDiscover.value = false
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // The endless "For you" feed.
+    //
+    // Pages are appended as the user approaches the end of what is already rendered, and never
+    // ahead of that: the grid composes only what is near the viewport, so a page loaded for a
+    // position the user has not scrolled to is work spent on tiles nobody is looking at. Scrolling
+    // back up loads nothing at all -- those tiles are already in the list, and their images come
+    // back from the image cache.
+    // ---------------------------------------------------------------------------------------------
+
+    private val feedPager: CloudFeedPager? =
+        songDao?.let { CloudFeedPager(browser, it, recommendationEngine) }
+
+    private val _feedTracks = MutableStateFlow<List<YouTubeSearchResult>>(emptyList())
+
+    /** Recommended tracks, growing as the user scrolls. Empty when there is no feed to show. */
+    val feedTracks: StateFlow<List<YouTubeSearchResult>> = _feedTracks.asStateFlow()
+
+    private val _isLoadingFeed = MutableStateFlow(false)
+    val isLoadingFeed: StateFlow<Boolean> = _isLoadingFeed.asStateFlow()
+
+    private val _feedExhausted = MutableStateFlow(false)
+    val feedExhausted: StateFlow<Boolean> = _feedExhausted.asStateFlow()
+
+    /**
+     * Appends the next page of the feed. Safe to call repeatedly -- while a page is in flight, or
+     * once the feed has run out, the call does nothing, so the scroll listener can fire as often as
+     * it likes.
+     */
+    fun loadMoreFeed() {
+        val pager = feedPager ?: return
+        if (_isLoadingFeed.value || _feedExhausted.value) return
+        if (_feedTracks.value.size >= MAX_FEED_TRACKS) {
+            _feedExhausted.value = true
+            return
+        }
+        feedJob?.cancel()
+        feedJob = viewModelScope.launch {
+            _isLoadingFeed.value = true
+            try {
+                val page = pager.nextPage()
+                if (page.isNotEmpty()) {
+                    _feedTracks.value = _feedTracks.value + page
+                }
+                // An empty page is not the end on its own -- a page can lose everything it found to
+                // the library filter. The pager says when the walk itself has nowhere left to go.
+                if (pager.exhausted) _feedExhausted.value = true
+            } finally {
+                _isLoadingFeed.value = false
             }
         }
     }
@@ -189,10 +248,22 @@ class DiscoverViewModel(
     private companion object {
         /** Quiet time after the last keystroke before a search is issued. */
         const val SEARCH_DEBOUNCE_MS = 350L
+
+        /**
+         * Where the feed stops. "Endless" in practice means "further than anyone scrolls"; an
+         * actually unbounded list would keep every tile's model in memory for a session, and a
+         * thousand recommendations nobody reached is not worth that.
+         */
+        const val MAX_FEED_TRACKS = 600
     }
 
-    class Factory(private val browser: YouTubeMusicBrowser) : ViewModelProvider.Factory {
+    class Factory(
+        private val browser: YouTubeMusicBrowser,
+        private val songDao: com.example.tgmusicai.data.local.dao.SongDao? = null,
+        private val recommendationEngine: com.example.tgmusicai.data.repository.RecommendationEngine? = null
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T = DiscoverViewModel(browser) as T
+        override fun <T : ViewModel> create(modelClass: Class<T>): T =
+            DiscoverViewModel(browser, songDao, recommendationEngine) as T
     }
 }
