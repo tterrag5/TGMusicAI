@@ -17,17 +17,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.automirrored.rounded.ViewList
 import androidx.compose.material.icons.rounded.FileUpload
-import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Close
@@ -58,7 +53,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.repository.MusicRepository
-import com.example.tgmusicai.ui.components.ReorderDragHandle
 import com.example.tgmusicai.data.local.entity.PlaylistWithSongs
 import com.example.tgmusicai.ui.components.CreatePlaylistDialog
 import com.example.tgmusicai.ui.components.PlaylistCard
@@ -81,7 +75,6 @@ fun PlaylistsContent(
     var playlistPendingDelete by remember { mutableStateOf<Playlist?>(null) }
     val context = LocalContext.current
 
-    val isGridView by playlistViewModel.isGridView.collectAsState()
     val selectedPlaylistIds by playlistViewModel.selectedPlaylistIds.collectAsState()
     val isSelectionMode = selectedPlaylistIds.isNotEmpty()
     var showBulkDeleteConfirm by remember { mutableStateOf(false) }
@@ -118,7 +111,7 @@ fun PlaylistsContent(
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Playlist-only controls live here rather than in the Library's top bar. That bar is
-            // shared with the Songs, Folders and Discover views, and piling view-specific actions
+            // shared with the Songs and Discover views, and piling view-specific actions
             // into it was how it ended up crowded enough to need this switcher in the first place.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -140,20 +133,6 @@ fun PlaylistsContent(
                     }
                 } else {
                     Spacer(modifier = Modifier.weight(1f))
-                    IconButton(onClick = playlistViewModel::toggleGridView) {
-                        Icon(
-                            imageVector = if (isGridView) {
-                                Icons.AutoMirrored.Rounded.ViewList
-                            } else {
-                                Icons.Rounded.GridView
-                            },
-                            contentDescription = if (isGridView) {
-                                "Switch to list view"
-                            } else {
-                                "Switch to grid view"
-                            }
-                        )
-                    }
                     IconButton(onClick = { importFileLauncher.launch("text/*") }) {
                         Icon(
                             imageVector = Icons.Rounded.FileUpload,
@@ -205,8 +184,6 @@ fun PlaylistsContent(
                 // jumping the boundary -- the pin is the stronger statement of the two.
                 val sortedPlaylists = playlistsWithSongs.sortedByDescending { it.playlist.isPinned }
 
-                val canReorderPlaylists = !isSelectionMode && sortedPlaylists.size > 1
-
                 // The extra bottom padding keeps the last row of cards clear of the FAB and of the
                 // mini player MainScreen draws over the bottom of this screen -- without it the
                 // final row's song count was clipped and the FAB sat on top of a card.
@@ -244,55 +221,17 @@ fun PlaylistsContent(
                     )
                 }
 
-                if (isGridView) {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = listContentPadding
-                    ) {
-                        items(sortedPlaylists, key = { it.playlist.playlistId }) { pws ->
-                            Box(modifier = Modifier.animateItem()) {
-                                playlistCardFor(pws, compact = true)
-                            }
-                        }
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = listContentPadding
-                    ) {
-                        itemsIndexed(
-                            sortedPlaylists,
-                            key = { _, pws -> pws.playlist.playlistId },
-                        ) { index, pws ->
-                            Row(
-                                modifier = Modifier.animateItem(),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                // List view only. A vertical drag on a three-column grid cell has
-                                // no unambiguous meaning, so the grid keeps the order the list
-                                // sets.
-                                if (canReorderPlaylists) {
-                                    ReorderDragHandle(
-                                        index = index,
-                                        itemCount = sortedPlaylists.size,
-                                        stableKey = pws.playlist.playlistId,
-                                        onMove = { from, to ->
-                                            playlistViewModel.movePlaylist(
-                                                sortedPlaylists.map { it.playlist.playlistId },
-                                                from,
-                                                to,
-                                            )
-                                        },
-                                        rowHeight = 88.dp,
-                                        contentDescription = "Drag to reorder playlists",
-                                        modifier = Modifier.padding(start = 8.dp),
-                                    )
-                                }
-                                Box(modifier = Modifier.weight(1f)) {
-                                    playlistCardFor(pws, compact = false)
-                                }
-                            }
+                // Always a grid. Artwork is how a playlist is recognised, and a row of text
+                // with a thumbnail made every playlist look the same; there is no reason to offer
+                // the weaker of the two.
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = listContentPadding
+                ) {
+                    items(sortedPlaylists, key = { it.playlist.playlistId }) { pws ->
+                        Box(modifier = Modifier.animateItem()) {
+                            playlistCardFor(pws, compact = true)
                         }
                     }
                 }
@@ -357,7 +296,7 @@ fun PlaylistsContent(
             text = {
                 Column {
                     Text(
-                        "Tracks already in your library are matched directly; anything else is looked up on YouTube, so this can take a moment.",
+                        "Anything not already in your library is looked up on YouTube. This can take a moment.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
