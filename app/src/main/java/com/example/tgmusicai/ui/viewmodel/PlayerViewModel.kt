@@ -13,6 +13,7 @@ import com.example.tgmusicai.data.repository.MusicRepository
 import com.example.tgmusicai.data.scrobble.ListenBrainzScrobbler
 import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.playback.SleepTimerManager
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -484,7 +485,7 @@ class PlayerViewModel(
             if (isAutomatic && clean == null) {
                 emptyLyricsLookups += lyricsLookupKey(target)
             }
-            _lyrics.value = clean
+            publishLyricsFor(persistedTarget, fetched)
             _isScraping.value = false
         }
     }
@@ -517,7 +518,11 @@ class PlayerViewModel(
             _transcribeError.value = "AI transcription isn't available right now."
             return
         }
-        viewModelScope.launch {
+        // One transcription at a time. Two running at once would fight over the same ORT session
+        // (the engine serialises them anyway, so the second merely waits) and would race to decide
+        // which one gets to clear the progress indicator.
+        transcribeJob?.cancel()
+        transcribeJob = viewModelScope.launch {
             if (!target.isDownloaded && target.youtubeId.isNullOrBlank()) {
                 _transcribeError.value = "This song has no audio available to transcribe."
                 return@launch
@@ -527,8 +532,9 @@ class PlayerViewModel(
                 val persistedTarget = ensurePersistedTarget(target)
                 val transcribed = repo.transcribeWithWhisper(persistedTarget)
                 if (transcribed != null) {
+                    // Always saved against the song that was asked for, never the one playing now.
                     repository?.updateSongLyrics(persistedTarget.id, transcribed)
-                    _lyrics.value = sanitizeLyrics(transcribed)
+                    publishLyricsFor(persistedTarget, transcribed)
                 } else {
                     _transcribeError.value = "AI transcription didn't return any lyrics for this song."
                 }
@@ -536,6 +542,24 @@ class PlayerViewModel(
                 _isTranscribing.value = false
             }
         }
+    }
+
+    private var transcribeJob: Job? = null
+
+    /**
+     * Shows [text] as the lyrics pane's contents, but only while [target] is still the song on
+     * screen.
+     *
+     * Transcription and scraping both take long enough for the user to have moved on, and both used
+     * to publish their result unconditionally -- so a transcription started on one song landed on
+     * whatever was playing when it finished, which read as the app pasting one song's lyrics onto
+     * another. The database write is unaffected and still goes to the song that was asked for; this
+     * only governs what the open screen displays.
+     */
+    private fun publishLyricsFor(target: Song, text: String?) {
+        val showing = currentSong.value ?: return
+        if (lyricsLookupKey(showing) != lyricsLookupKey(target)) return
+        _lyrics.value = sanitizeLyrics(text)
     }
 
     private val _translatedLyrics = MutableStateFlow<List<String>?>(null)
@@ -675,7 +699,7 @@ class PlayerViewModel(
             _isScraping.value = true
             val persistedTarget = ensurePersistedTarget(target)
             lyricsRepository?.fetchAndSaveLyrics(persistedTarget, forceFetch = true)?.let {
-                _lyrics.value = sanitizeLyrics(it)
+                publishLyricsFor(persistedTarget, it)
             }
             coverArtScraper?.scrapeAndSaveArtwork(persistedTarget)
             _isScraping.value = false

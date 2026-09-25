@@ -5,6 +5,7 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.util.Log
+import com.example.tgmusicai.ai.whisper.WhisperDecodeGuards
 import com.example.tgmusicai.ai.whisper.WhisperMelSpectrogram
 import com.example.tgmusicai.ai.whisper.WhisperTokenizer
 import java.nio.FloatBuffer
@@ -61,6 +62,9 @@ class WhisperTranscriptionEngine(private val context: Context) {
         // vocals is a common trigger) is Whisper hallucinating/looping on silence, not real lyrics
         // -- stop rather than let it run to MAX_NEW_TOKENS every time.
         private const val MAX_REPEATED_TOKEN_RUN = 8
+
+        /** Upper bound on ONNX Runtime worker threads, so transcription cannot starve playback. */
+        private const val MAX_ORT_THREADS = 4
     }
 
     @Volatile private var initFailed = false
@@ -72,6 +76,11 @@ class WhisperTranscriptionEngine(private val context: Context) {
 
     val isAvailable: Boolean get() = encoderSession != null && decoderSession != null
 
+    private fun sessionOptions(threads: Int) = OrtSession.SessionOptions().apply {
+        setIntraOpNumThreads(threads)
+        setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+    }
+
     private fun ensureInitialized(): Boolean {
         if (isAvailable) return true
         if (initFailed) return false
@@ -82,8 +91,14 @@ class WhisperTranscriptionEngine(private val context: Context) {
                 val env = OrtEnvironment.getEnvironment()
                 val encoderBytes = context.assets.open(ENCODER_ASSET).use { it.readBytes() }
                 val decoderBytes = context.assets.open(DECODER_ASSET).use { it.readBytes() }
-                encoderSession = env.createSession(encoderBytes, OrtSession.SessionOptions())
-                decoderSession = env.createSession(decoderBytes, OrtSession.SessionOptions())
+                // Defaults leave ONNX Runtime single-threaded here, which is most of why a song
+                // took minutes: the decoder is run once per generated token, hundreds of times per
+                // chunk. Capped rather than handed every core -- transcription is a background
+                // favour to the user and must not starve playback, which is the one thing on this
+                // device that cannot be allowed to stutter.
+                val threads = Runtime.getRuntime().availableProcessors().coerceIn(1, MAX_ORT_THREADS)
+                encoderSession = env.createSession(encoderBytes, sessionOptions(threads))
+                decoderSession = env.createSession(decoderBytes, sessionOptions(threads))
                 tokenizer = WhisperTokenizer.fromAsset(context, VOCAB_ASSET)
                 melFilters = WhisperMelSpectrogram.loadMelFilters(context)
                 true
@@ -125,16 +140,30 @@ class WhisperTranscriptionEngine(private val context: Context) {
                 val lines = mutableListOf<String>()
                 val chunkSamples = WhisperMelSpectrogram.N_SAMPLES
                 var chunkStart = 0
+                var previousText: String? = null
                 while (chunkStart < pcm.size) {
                     val chunkEnd = minOf(chunkStart + chunkSamples, pcm.size)
                     val chunk = pcm.copyOfRange(chunkStart, chunkEnd)
                     val chunkStartMs = (chunkStart.toLong() * 1000L) / 16_000L
-
-                    val text = transcribeChunk(chunk, filters, encoder, decoder, tok)
-                    if (text.isNotBlank()) {
-                        lines.add("[${formatLrcTimestamp(chunkStartMs)}]$text")
-                    }
                     chunkStart += chunkSamples
+
+                    // Near-silence is skipped without running the model at all. It is both the
+                    // cheapest speed-up available -- intros, outros and gaps cost nothing instead
+                    // of a full encode plus a 224-step decode -- and a correctness fix: Whisper is
+                    // famous for inventing confident text out of silence, and those inventions are
+                    // exactly the phantom lines that ended up repeated down a song.
+                    if (WhisperDecodeGuards.isEffectivelySilent(chunk)) continue
+
+                    val raw = transcribeChunk(chunk, filters, encoder, decoder, tok)
+                    val text = WhisperDecodeGuards.collapseRepeatedPhrases(raw)
+                    if (text.isBlank()) continue
+
+                    // A chunk that says exactly what the previous one said is the model looping,
+                    // not the song repeating a line 30 seconds later to the word.
+                    if (previousText != null && text.equals(previousText, ignoreCase = true)) continue
+                    previousText = text
+
+                    lines.add("[${formatLrcTimestamp(chunkStartMs)}]$text")
                 }
                 AiModelResult.Success(lines.joinToString("\n"))
             }
@@ -252,6 +281,11 @@ class WhisperTranscriptionEngine(private val context: Context) {
             repeatRun = if (bestId == lastToken) repeatRun + 1 else 0
             lastToken = bestId
             if (repeatRun >= MAX_REPEATED_TOKEN_RUN) break
+            // The single-token guard above only catches "aaaa". Greedy decoding on music gets
+            // stuck in *cycles* -- a phrase of several tokens repeated until the token budget runs
+            // out -- which is what filled the lyrics pane with the same line hundreds of times, and
+            // what made every chunk take the full 224 steps.
+            if (WhisperDecodeGuards.endsInRepeatedCycle(generated)) break
 
             nextInputIds = longArrayOf(bestId.toLong())
             useCache = true
