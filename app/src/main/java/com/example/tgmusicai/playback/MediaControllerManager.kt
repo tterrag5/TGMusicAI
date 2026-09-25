@@ -16,7 +16,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -173,8 +172,10 @@ class MediaControllerManager(
                 // them means nothing and the next "add to queue" starts a fresh run.
                 pendingQueueInsertions = 0
                 updateCurrentMediaItem(mediaItem)
-                resolveAheadIfNeeded()
-                prefetchAroundCurrent()
+                // One coalesced pass rather than a resolve and a prefetch per transition: holding
+                // "next" fires this dozens of times a second, and acting on each firing is what
+                // made the app fetch everything it was skipped past.
+                scheduleWindowRefresh()
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -403,7 +404,9 @@ class MediaControllerManager(
             playInternal(initialQueue, startIndex)
             _pendingSong.value = null
             onStarted()
-            resolveRemainingInBackground(initialQueue, startIndex)
+            // The rest of the queue is not resolved here. Only the window around the start
+            // track is, and it moves with playback.
+            scheduleWindowRefresh(immediate = true)
         }
     }
 
@@ -420,7 +423,7 @@ class MediaControllerManager(
         player.setMediaItems(mediaItems, validIndex, 0L)
         player.prepare()
         player.play()
-        prefetchAroundCurrent()
+        scheduleWindowRefresh(immediate = true)
     }
 
     /** Cloud tracks re-resolved after a playback failure, so one bad URL cannot loop forever. */
@@ -465,6 +468,15 @@ class MediaControllerManager(
 
         val generation = queueGeneration
         scope.launch {
+            // Let the skipping settle first. Skipping fast through cloud tracks whose streams the
+            // resolver has not reached yet produces one error per track passed, and re-resolving
+            // each of them spent the resolver's permits on songs the user was already past. If the
+            // player has moved on by the time this fires, the failure no longer matters.
+            delay(TRANSITION_SETTLE_MS)
+            if (queueGeneration != generation) return@launch
+            val stillHere = controller?.let { currentSongList.getOrNull(it.currentMediaItemIndex) }
+            if (stillHere?.youtubeId != videoId) return@launch
+
             // The cached URL is the one that just failed, so it has to go before re-resolving.
             withContext(Dispatchers.IO) { youtubeExtractor.invalidateCachedStream(videoId) }
             val resolved = resolveSongForPlayback(song.copy(mediaUri = "https://www.youtube.com/watch?v=$videoId"))
@@ -487,93 +499,133 @@ class MediaControllerManager(
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // The playback window: two tracks back, the playing track, two tracks ahead. Only those five
+    // are resolved and only those five are held in the audio cache.
+    //
+    // Deliberately a window and not the whole queue. Resolving every track of a cloud queue up
+    // front fanned out one coroutine per item, and because they acquired their permits roughly in
+    // launch order the resolver worked forwards from index 0 -- so skipping to track 20 left it
+    // still grinding through 1..19, fetching every song that had just been skipped past before it
+    // reached the one actually being waited on. On a long queue that also meant hundreds of live
+    // coroutines and as many half-finished cache writes, which is what turned a run of fast skips
+    // into lag and then into a dead queue.
+    // ---------------------------------------------------------------------------------------------
+
     /**
-     * Caches the playing track and the next one in full, and drops prefetches for anything else.
-     *
-     * Only these two: the point is to protect the track being heard and the handover to the one
-     * after it, not to download the whole queue. Local tracks are ignored by [StreamPrefetcher],
-     * and an unresolved cloud URL is skipped here because prefetching a watch page is pointless --
-     * it is picked up on the next transition, once resolution has patched a real URL in.
+     * Resolutions currently in flight, keyed by [windowKey] -- stable across resolution, which the
+     * media URI is not, since resolving is precisely what changes it. Keeping the jobs lets anything
+     * that leaves the window be cancelled rather than run to completion for a track the user has
+     * already gone past.
      */
-    private fun prefetchAroundCurrent() {
+    private val resolveJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+
+    /** Pending window pass, so a burst of transitions collapses into one. */
+    private var windowJob: Job? = null
+
+    /**
+     * Identifies a track across resolution. A cloud track keeps its video id while its URI is
+     * rewritten from a watch URL to a signed stream URL; a local track never resolves at all, so
+     * its URI is already stable.
+     */
+    private fun windowKey(song: Song): String = song.youtubeId?.takeIf { it.isNotBlank() } ?: song.mediaUri
+
+    /**
+     * Queue positions the window covers, ordered by how soon each is needed: the playing track
+     * first, then ahead, then behind. The resolver has only a couple of permits, so the order is
+     * what decides which track gets a permit first -- the one being waited on, always.
+     */
+    private fun windowIndices(current: Int, size: Int): List<Int> =
+        listOf(0, 1, 2, -1, -2)
+            .map { current + it }
+            .filter { it in 0 until size }
+            .distinct()
+
+    /**
+     * Asks for a window pass. Coalesced by default: a user holding down "next" produces a
+     * transition per track, and acting on each one is how the app ended up fetching everything it
+     * was skipped past. One pass, after the skipping settles, is both cheaper and more correct --
+     * it acts on where the user actually landed. [immediate] is for a freshly loaded queue, where
+     * there is nothing to settle and the first track is wanted now.
+     */
+    private fun scheduleWindowRefresh(immediate: Boolean = false) {
+        windowJob?.cancel()
+        windowJob = scope.launch {
+            if (!immediate) delay(TRANSITION_SETTLE_MS)
+            refreshPlaybackWindow()
+        }
+    }
+
+    /**
+     * Brings the window up to date: cancels resolutions and prefetches for tracks now outside it,
+     * and starts them, in parallel, for the tracks inside it that still need them.
+     */
+    private fun refreshPlaybackWindow() {
         val player = controller ?: return
-        val currentIndex = player.currentMediaItemIndex
+        if (currentSongList.isEmpty()) return
+        val indices = windowIndices(player.currentMediaItemIndex, currentSongList.size)
+        val window = indices.mapNotNull { currentSongList.getOrNull(it) }
 
-        val wanted = listOfNotNull(
-            currentSongList.getOrNull(currentIndex),
-            currentSongList.getOrNull(currentIndex + 1),
-        )
-            .map { it.mediaUri }
-            .filterNot { isUnresolvedCloudUri(it) }
+        // Anything that has fallen out of the window is dropped: the work is wasted now, and it is
+        // competing for the resolver's permits with the track being waited on.
+        val keep = window.map(::windowKey).toSet()
+        resolveJobs.keys.filterNot { it in keep }.forEach { resolveJobs.remove(it)?.cancel() }
 
-        prefetcher.retainOnly(wanted)
-        wanted.forEach(prefetcher::prefetch)
+        // Cache the window, and only the window. An unresolved watch URL is skipped -- there is
+        // nothing to cache until it has a real stream, and the resolution below will ask again.
+        val cacheable = window.map { it.mediaUri }.filterNot { isUnresolvedCloudUri(it) }
+        prefetcher.retainOnly(cacheable)
+        cacheable.forEach(prefetcher::prefetch)
+
+        for (index in indices) {
+            val song = currentSongList.getOrNull(index) ?: continue
+            if (!isUnresolvedCloudUri(song.mediaUri)) continue
+            val key = windowKey(song)
+            if (resolveJobs.containsKey(key)) continue
+            resolveJobs[key] = launchWindowResolve(song, key)
+        }
+    }
+
+    /**
+     * Resolves one windowed track and patches it into the live queue. Located by [windowKey] at
+     * patch time rather than by the index it started at, because the queue can be reordered or
+     * added to while a resolution is in the air.
+     */
+    private fun launchWindowResolve(song: Song, key: String): Job {
+        val generation = queueGeneration
+        return scope.launch(Dispatchers.IO) {
+            try {
+                val resolved = resolveSemaphore.withPermit { resolveSongForPlayback(song) }
+                if (resolved.mediaUri == song.mediaUri) return@launch
+                withContext(Dispatchers.Main) {
+                    if (queueGeneration != generation) return@withContext
+                    val livePlayer = controller ?: return@withContext
+                    val at = currentSongList.indexOfFirst { windowKey(it) == key }
+                    if (at < 0 || at >= livePlayer.mediaItemCount) return@withContext
+                    currentSongList = currentSongList.toMutableList().also { it[at] = resolved }
+                    _playlist.value = currentSongList
+                    livePlayer.replaceMediaItem(at, buildMediaItem(resolved))
+                    prefetcher.prefetch(resolved.mediaUri)
+                    // The player may be sitting on this very item, stalled because the watch URL it
+                    // was handed could never play. Now that there is a real stream, start it.
+                    if (at == livePlayer.currentMediaItemIndex) {
+                        livePlayer.prepare()
+                        livePlayer.play()
+                    }
+                }
+            } finally {
+                resolveJobs.remove(key)
+            }
+        }
     }
 
     // Caps how many cloud-stream resolutions run at once. Firing a dozen concurrent requests at
     // the same shared Piped/Invidious mirror the instant "Play All" is tapped on an all-cloud
     // playlist (e.g. Cloud Nine) looks a lot like hostile traffic to that mirror and was observed
     // live to trigger a wall of 401/403 responses across every candidate at once -- a self-inflicted
-    // rate-limit, not a real outage. Throttling to a couple at a time spreads the burst out and
-    // resolves in queue order (deferreds acquire the permit roughly in launch order), so the
-    // nearest-upcoming tracks still finish first.
-    private val resolveSemaphore = Semaphore(2)
-
-    /**
-     * Resolves every song in [queue] other than [alreadyResolvedIndex], patching each into the
-     * live player queue as soon as it's ready. Silently stops touching the queue if a newer
-     * [playInternal] call has since loaded a different one ([queueGeneration] changed).
-     */
-    private fun resolveRemainingInBackground(queue: List<Song>, alreadyResolvedIndex: Int) {
-        val generation = queueGeneration
-        scope.launch(Dispatchers.IO) {
-            val deferredByIndex = queue.withIndex()
-                .filter { it.index != alreadyResolvedIndex }
-                .map { (index, song) -> index to async { resolveSemaphore.withPermit { resolveSongForPlayback(song) } } }
-
-            for ((index, deferred) in deferredByIndex) {
-                val resolvedSong = deferred.await()
-                if (resolvedSong.mediaUri == queue[index].mediaUri) continue
-                withContext(Dispatchers.Main) {
-                    if (queueGeneration != generation) return@withContext
-                    val player = controller ?: return@withContext
-                    currentSongList = currentSongList.toMutableList().also {
-                        if (index < it.size) it[index] = resolvedSong
-                    }
-                    _playlist.value = currentSongList
-                    player.replaceMediaItem(index, buildMediaItem(resolvedSong))
-                }
-            }
-        }
-    }
-
-    /**
-     * Called on every track transition: if the *next* queue item is still an unresolved cloud
-     * watch URL (background resolution hasn't caught up to it yet, e.g. it was rate-limited or
-     * the queue was reordered), resolve it right away instead of waiting -- a just-in-time safety
-     * net so the player is never handed a raw watch URL for the track it's about to advance to.
-     */
-    private fun resolveAheadIfNeeded() {
-        val player = controller ?: return
-        val nextIndex = player.currentMediaItemIndex + 1
-        val song = currentSongList.getOrNull(nextIndex) ?: return
-        if (!isUnresolvedCloudUri(song.mediaUri)) return
-        val generation = queueGeneration
-        scope.launch(Dispatchers.IO) {
-            val resolved = resolveSemaphore.withPermit { resolveSongForPlayback(song) }
-            if (resolved.mediaUri == song.mediaUri) return@launch
-            withContext(Dispatchers.Main) {
-                if (queueGeneration != generation) return@withContext
-                val idx = currentSongList.indexOfFirst { it.mediaUri == song.mediaUri }
-                if (idx < 0) return@withContext
-                currentSongList = currentSongList.toMutableList().also { it[idx] = resolved }
-                _playlist.value = currentSongList
-                controller?.replaceMediaItem(idx, buildMediaItem(resolved))
-                // Now that this one has a real stream URL, it is worth caching ahead.
-                prefetchAroundCurrent()
-            }
-        }
-    }
+    // rate-limit, not a real outage. A window of five tracks is small enough that three at a time
+    // still fills it promptly while staying well short of that burst.
+    private val resolveSemaphore = Semaphore(3)
 
     /**
      * Re-resolves [song] if it's an unresolved cloud song (a raw YouTube watch URL, not yet
@@ -663,21 +715,12 @@ class MediaControllerManager(
         // reaches it. Resolve it in the background and swap the real stream in, the same way a
         // freshly loaded queue resolves everything after its first track.
         if (isUnresolvedCloudUri(song.mediaUri)) {
-            val generation = queueGeneration
-            scope.launch(Dispatchers.IO) {
-                val resolved = resolveSemaphore.withPermit { resolveSongForPlayback(song) }
-                if (resolved.mediaUri == song.mediaUri) return@launch
-                withContext(Dispatchers.Main) {
-                    if (queueGeneration != generation) return@withContext
-                    val livePlayer = controller ?: return@withContext
-                    // Located by media id rather than by the index it went in at: the user can
-                    // skip, reorder or queue something else while this resolves.
-                    val index = currentSongList.indexOfFirst { it.mediaUri == song.mediaUri }
-                    if (index < 0 || index >= livePlayer.mediaItemCount) return@withContext
-                    currentSongList = currentSongList.toMutableList().also { it[index] = resolved }
-                    _playlist.value = currentSongList
-                    livePlayer.replaceMediaItem(index, buildMediaItem(resolved))
-                }
+            // Resolved through the window resolver, which locates the track by key at patch time
+            // (the user can skip, reorder or queue something else meanwhile) and drops the work if
+            // the track falls outside the window before it lands.
+            val key = windowKey(song)
+            if (!resolveJobs.containsKey(key)) {
+                resolveJobs[key] = launchWindowResolve(song, key)
             }
         }
     }
@@ -808,6 +851,13 @@ class MediaControllerManager(
         private const val POSITION_TICK_INTERVAL_MS = 100L
 
         /**
+         * How long a burst of track transitions is allowed to settle before the window is acted on.
+         * Long enough that holding "next" costs one pass rather than one per track, short enough
+         * that a single deliberate skip still feels immediate.
+         */
+        private const val TRANSITION_SETTLE_MS = 250L
+
+        /**
          * Calculates the next repeat mode in the exact 3-state loop:
          * REPEAT_MODE_OFF -> REPEAT_MODE_ALL -> REPEAT_MODE_ONE -> REPEAT_MODE_OFF
          */
@@ -838,6 +888,9 @@ class MediaControllerManager(
 
     fun release() {
         stopPositionTicker()
+        windowJob?.cancel()
+        resolveJobs.values.forEach { it.cancel() }
+        resolveJobs.clear()
         prefetcher.cancelAll()
         controller?.release()
         controller = null

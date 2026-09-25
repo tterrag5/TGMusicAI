@@ -309,6 +309,22 @@ class PlaybackService : MediaLibraryService() {
                 addListener(object : Player.Listener {
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         android.util.Log.e("PlaybackService", "Playback error encountered: ${error.message}", error)
+
+                        // A track whose URI is still a raw YouTube watch URL has not failed -- it
+                        // has not been resolved yet, and MediaControllerManager's window resolver is
+                        // either working on it or about to be. Skipping past it is the wrong answer
+                        // twice over: it loses the track the user asked for, and it walks into the
+                        // next unresolved item, which fails the same way. Wait instead; the resolver
+                        // patches a real stream in and starts playback itself.
+                        val pendingResolution = currentMediaItem?.localConfiguration?.uri?.toString()
+                            ?.let { it.startsWith("https://www.youtube.com/watch?v=") || it.startsWith("https://youtu.be/") }
+                            ?: false
+                        if (pendingResolution) {
+                            android.util.Log.d("PlaybackService", "Holding: current item is not resolved yet")
+                            pause()
+                            return
+                        }
+
                         consecutivePlaybackErrors++
                         // Cascade guard: a queue of not-yet-resolved cloud tracks (e.g. "Cloud
                         // Nine", or any freshly-loaded queue whose background resolution hasn't
@@ -353,6 +369,13 @@ class PlaybackService : MediaLibraryService() {
                     }
 
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                        // A skip is the user starting again, so the cascade guard starts again too.
+                        // Without this, a run of fast skips through not-yet-resolved cloud tracks
+                        // left the counter over its limit, and the next genuine failure paused
+                        // playback outright -- "after so many songs it stops working".
+                        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
+                            consecutivePlaybackErrors = 0
+                        }
                         // Proactively extend the queue as soon as playback reaches what is
                         // currently the last item, so there's always a "next" track queued up
                         // well before the current one ends -- keeps music going seamlessly
