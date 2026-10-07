@@ -130,12 +130,23 @@ class DiscoverViewModel(
         feedJob = viewModelScope.launch {
             _isLoadingFeed.value = true
             try {
-                val page = pager.nextPage()
-                if (page.isNotEmpty()) {
-                    _feedTracks.value = _feedTracks.value + page
-                }
                 // An empty page is not the end on its own -- a page can lose everything it found to
-                // the library filter. The pager says when the walk itself has nowhere left to go.
+                // the library filter. Asking again is the only way past that, and it has to happen
+                // here: the scroll listener re-fires on what is rendered changing, which an empty
+                // page by definition does not do, so a single empty page would otherwise stall the
+                // feed until the user scrolled somewhere else entirely. Bounded, so a feed that is
+                // genuinely out of new music does not spin on the network.
+                var attempts = 0
+                while (attempts < EMPTY_PAGE_RETRIES) {
+                    attempts++
+                    val page = pager.nextPage()
+                    if (page.isNotEmpty()) {
+                        _feedTracks.value = _feedTracks.value + page
+                        break
+                    }
+                    if (pager.exhausted) break
+                }
+                // The pager says when the walk itself has nowhere left to go.
                 if (pager.exhausted) _feedExhausted.value = true
             } finally {
                 _isLoadingFeed.value = false
@@ -255,6 +266,13 @@ class DiscoverViewModel(
          * thousand recommendations nobody reached is not worth that.
          */
         const val MAX_FEED_TRACKS = 600
+
+        /**
+         * How many times a page that came back empty is retried before the feed gives up for this
+         * scroll. Each attempt is bounded work inside the pager, and three of them is enough to
+         * walk past a stretch of the artist graph the user already owns.
+         */
+        const val EMPTY_PAGE_RETRIES = 3
     }
 
     class Factory(
