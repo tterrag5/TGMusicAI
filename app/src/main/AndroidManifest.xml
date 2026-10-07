@@ -109,6 +109,13 @@
                     or Android Auto's resume tile) silently does nothing.
                 -->
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
+                <!--
+                    "Hey Google, play something on TGMusic". Assistant decides which app can play
+                    a spoken query by looking for this action, and PlaybackService already answers
+                    the call it then makes (the query arrives as a search-only MediaItem, handled
+                    in onSetMediaItems). Without the filter, that handler was never reached.
+                -->
+                <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
             </intent-filter>
         </service>
 
