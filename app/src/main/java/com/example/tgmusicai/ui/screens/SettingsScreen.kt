@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CloudSync
@@ -68,6 +69,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.text.selection.SelectionContainer
+import com.example.tgmusicai.BuildConfig
 import com.example.tgmusicai.data.sponsorblock.SponsorBlockManager
 import com.example.tgmusicai.ui.theme.AppTheme
 import com.example.tgmusicai.ui.theme.ThemeMode
@@ -492,11 +496,71 @@ fun SettingsScreen(
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                SettingsSection(
+                    sectionId = SettingsSectionId.ABOUT,
+                    title = "About",
+                    icon = Icons.Rounded.Info,
+                    summary = "Version ${BuildConfig.VERSION_NAME}",
+                    expanded = expandedSection == SettingsSectionId.ABOUT,
+                    onToggle = { expandedSection = it }
+                ) {
+                    Card(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            AboutRow("Version", BuildConfig.VERSION_NAME)
+                            AboutRow("Build", BuildConfig.VERSION_CODE.toString())
+                            AboutRow("Commit", BuildConfig.GIT_COMMIT)
+                            AboutRow("Built", formatBuildTime(BuildConfig.BUILD_TIME_MS))
+                            AboutRow("Android", "${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})")
+                            AboutRow("Device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
+                        }
+                    }
+                }
             }
 
         }
     }
 }
+
+/**
+ * One `label: value` line in the About card. Values are selectable because the reason to look at
+ * this screen is to quote a build to someone -- a commit that cannot be copied out has to be
+ * transcribed by eye.
+ */
+@Composable
+private fun AboutRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f)
+        )
+        SelectionContainer {
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.End
+            )
+        }
+    }
+}
+
+/** The build's timestamp in the reader's own locale and time zone. */
+private fun formatBuildTime(millis: Long): String =
+    java.text.SimpleDateFormat("d MMM yyyy, HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(millis))
 
 /**
  * The collapsible groups on the Settings screen.
@@ -505,7 +569,7 @@ fun SettingsScreen(
  * matching on the title meant renaming a heading silently re-pointed it at another section's
  * expand state, and every new section defaulted into whichever branch the `else` happened to name.
  */
-private enum class SettingsSectionId { APPEARANCE, PLAYBACK, RECOGNITION, SCROBBLING, BACKUP }
+private enum class SettingsSectionId { APPEARANCE, PLAYBACK, RECOGNITION, SCROBBLING, BACKUP, ABOUT }
 
 /**
  * A collapsible Settings group: a tappable header showing the section name and its current state,

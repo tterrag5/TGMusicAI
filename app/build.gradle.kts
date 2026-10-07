@@ -5,6 +5,21 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.plugin.serialization)
 }
 
+/**
+ * The short commit this build came from, or "unknown" outside a git checkout (a source release, or
+ * a CI job with no history). Never fails the build -- a missing commit is a worse label, not a
+ * reason to be unable to compile.
+ */
+val gitCommitProvider = providers.exec {
+    commandLine("git", "rev-parse", "--short", "HEAD")
+    workingDir = rootDir
+    isIgnoreExitValue = true
+}.standardOutput.asText.map { it.trim() }
+
+fun gitCommit(): String = runCatching {
+    gitCommitProvider.get().ifEmpty { "unknown" }
+}.getOrDefault("unknown")
+
 android {
     namespace = "com.example.tgmusicai"
     compileSdk {
@@ -19,6 +34,13 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Stamped into the APK so Settings can say which build is installed. The version name
+        // alone cannot: debug builds are installed over each other constantly and all of them are
+        // "1.0", so the commit and the build time are what actually distinguish one from the next
+        // when a bug needs to be pinned to a build.
+        buildConfigField("String", "GIT_COMMIT", "\"${gitCommit()}\"")
+        buildConfigField("long", "BUILD_TIME_MS", "${System.currentTimeMillis()}L")
     }
 
     buildTypes {
@@ -34,6 +56,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     androidResources {
         // Keep AI model assets uncompressed in the APK so they can be mmap'd/loaded directly
