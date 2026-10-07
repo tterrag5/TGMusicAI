@@ -448,6 +448,9 @@ class PlaybackService : MediaLibraryService() {
                 preferences.listenBrainzServerFlow
             ) { enabled, token, server -> Triple(enabled, token, server) }
                 .collect { (enabled, token, server) ->
+                    // A different token is a different credential, so an earlier rejection says
+                    // nothing about this one.
+                    if (token != listenBrainzToken) scrobblingRejected = false
                     scrobblingEnabled = enabled
                     listenBrainzToken = token
                     listenBrainzServer = server
@@ -831,6 +834,14 @@ class PlaybackService : MediaLibraryService() {
     private var currentItemStartedAtEpochSeconds = 0L
 
     /**
+     * Set when ListenBrainz rejects the token, which stops submissions for the rest of the session.
+     * Retrying cannot help -- the user has to paste a new token in Settings -- and without this the
+     * rejection cost one doomed request per track for as long as the app kept playing. Cleared
+     * whenever the stored token changes, so fixing it in Settings takes effect without a restart.
+     */
+    private var scrobblingRejected = false
+
+    /**
      * Submits the track that is playing to the user's listening history once it has played far
      * enough to count.
      *
@@ -840,7 +851,7 @@ class PlaybackService : MediaLibraryService() {
      * threshold suited to a personal library rather than to a shared record.
      */
     private fun maybeScrobble(positionMs: Long, durationMs: Long) {
-        if (!scrobblingEnabled || scrobbleSubmittedForCurrentItem) return
+        if (!scrobblingEnabled || scrobblingRejected || scrobbleSubmittedForCurrentItem) return
         if (durationMs in 1 until ListenBrainzScrobbler.MIN_TRACK_LENGTH_MS) return
         if (positionMs < ListenBrainzScrobbler.scrobbleThresholdMs(durationMs)) return
 
@@ -853,10 +864,12 @@ class PlaybackService : MediaLibraryService() {
             when (val result = scrobbler.submitListen(token, listenBrainzServer, listen)) {
                 is ListenBrainzScrobbler.Result.Success ->
                     android.util.Log.d("PlaybackService", "Scrobbled ${listen.title}")
-                is ListenBrainzScrobbler.Result.InvalidToken ->
+                is ListenBrainzScrobbler.Result.InvalidToken -> {
                     // Retrying cannot help, and the user has to fix it in Settings, so stop trying
                     // for this session rather than failing once per track for the rest of it.
+                    scrobblingRejected = true
                     android.util.Log.w("PlaybackService", "ListenBrainz rejected the token; scrobbling is paused")
+                }
                 is ListenBrainzScrobbler.Result.Transient ->
                     android.util.Log.d("PlaybackService", "Scrobble failed (${result.reason})")
             }
@@ -865,7 +878,7 @@ class PlaybackService : MediaLibraryService() {
 
     /** Sends the "now playing" indicator, which is not stored as history and is fine to lose. */
     private fun submitNowPlaying(mediaItem: MediaItem?) {
-        if (!scrobblingEnabled || mediaItem == null) return
+        if (!scrobblingEnabled || scrobblingRejected || mediaItem == null) return
         val token = listenBrainzToken ?: return
         val listen = buildListen(mediaItem, 0L) ?: return
         serviceScope.launch { scrobbler.submitNowPlaying(token, listenBrainzServer, listen) }
@@ -1357,7 +1370,7 @@ class PlaybackService : MediaLibraryService() {
                     return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
             }
-            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED))
+            return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
         }
 
         // --- Helper methods for automotive category generation ---
