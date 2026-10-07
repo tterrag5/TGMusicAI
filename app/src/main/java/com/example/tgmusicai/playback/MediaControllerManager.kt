@@ -13,6 +13,7 @@ import androidx.media3.session.SessionToken
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -592,10 +593,28 @@ class MediaControllerManager(
         for (index in indices) {
             val song = currentSongList.getOrNull(index) ?: continue
             if (!isUnresolvedCloudUri(song.mediaUri)) continue
-            val key = windowKey(song)
-            if (resolveJobs.containsKey(key)) continue
-            resolveJobs[key] = launchWindowResolve(song, key)
+            startWindowResolve(song, windowKey(song))
         }
+    }
+
+    /**
+     * Starts resolving one windowed track, unless it is already in flight.
+     *
+     * Registration happens before the work does -- the coroutine is created lazily, put in the map,
+     * given its own cleanup, and only then started. Registering after launching left a window in
+     * which a resolution that finished immediately removed nothing (its key was not in the map yet)
+     * and the caller then stored an already-completed job, which the in-flight check reads as "this
+     * track is being resolved" for as long as the queue lives -- so that one track could never be
+     * resolved again.
+     */
+    private fun startWindowResolve(song: Song, key: String) {
+        val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+            resolveWindowedTrack(song, key)
+        }
+        if (resolveJobs.putIfAbsent(key, job) != null) return
+        // Removed by identity, so a finished job can never evict a successor's entry.
+        job.invokeOnCompletion { resolveJobs.remove(key, job) }
+        job.start()
     }
 
     /**
@@ -603,30 +622,24 @@ class MediaControllerManager(
      * patch time rather than by the index it started at, because the queue can be reordered or
      * added to while a resolution is in the air.
      */
-    private fun launchWindowResolve(song: Song, key: String): Job {
+    private suspend fun resolveWindowedTrack(song: Song, key: String) {
         val generation = queueGeneration
-        return scope.launch(Dispatchers.IO) {
-            try {
-                val resolved = resolveSemaphore.withPermit { resolveSongForPlayback(song) }
-                if (resolved.mediaUri == song.mediaUri) return@launch
-                withContext(Dispatchers.Main) {
-                    if (queueGeneration != generation) return@withContext
-                    val livePlayer = controller ?: return@withContext
-                    val at = currentSongList.indexOfFirst { windowKey(it) == key }
-                    if (at < 0 || at >= livePlayer.mediaItemCount) return@withContext
-                    currentSongList = currentSongList.toMutableList().also { it[at] = resolved }
-                    _playlist.value = currentSongList
-                    livePlayer.replaceMediaItem(at, buildMediaItem(resolved))
-                    prefetcher.prefetch(resolved.mediaUri)
-                    // The player may be sitting on this very item, stalled because the watch URL it
-                    // was handed could never play. Now that there is a real stream, start it.
-                    if (at == livePlayer.currentMediaItemIndex) {
-                        livePlayer.prepare()
-                        livePlayer.play()
-                    }
-                }
-            } finally {
-                resolveJobs.remove(key)
+        val resolved = resolveSemaphore.withPermit { resolveSongForPlayback(song) }
+        if (resolved.mediaUri == song.mediaUri) return
+        withContext(Dispatchers.Main) {
+            if (queueGeneration != generation) return@withContext
+            val livePlayer = controller ?: return@withContext
+            val at = currentSongList.indexOfFirst { windowKey(it) == key }
+            if (at < 0 || at >= livePlayer.mediaItemCount) return@withContext
+            currentSongList = currentSongList.toMutableList().also { it[at] = resolved }
+            _playlist.value = currentSongList
+            livePlayer.replaceMediaItem(at, buildMediaItem(resolved))
+            prefetcher.prefetch(resolved.mediaUri)
+            // The player may be sitting on this very item, stalled because the watch URL it was
+            // handed could never play. Now that there is a real stream, start it.
+            if (at == livePlayer.currentMediaItemIndex) {
+                livePlayer.prepare()
+                livePlayer.play()
             }
         }
     }
@@ -730,10 +743,7 @@ class MediaControllerManager(
             // Resolved through the window resolver, which locates the track by key at patch time
             // (the user can skip, reorder or queue something else meanwhile) and drops the work if
             // the track falls outside the window before it lands.
-            val key = windowKey(song)
-            if (!resolveJobs.containsKey(key)) {
-                resolveJobs[key] = launchWindowResolve(song, key)
-            }
+            startWindowResolve(song, windowKey(song))
         }
     }
 
