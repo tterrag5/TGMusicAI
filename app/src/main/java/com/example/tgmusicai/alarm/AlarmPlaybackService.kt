@@ -320,7 +320,16 @@ class AlarmPlaybackService : Service() {
         fun start(context: Context, alarmId: Long) {
             val intent = Intent(context, AlarmPlaybackService::class.java)
                 .putExtra(AlarmScheduler.EXTRA_ALARM_ID, alarmId)
-            context.startForegroundService(intent)
+            // startForegroundService only exists from API 26. This app runs from API 24, where
+            // calling it throws NoSuchMethodError -- and the one caller is an alarm firing, so the
+            // failure is the alarm never ringing at all. Plain startService is the correct call
+            // there: background start restrictions, which is what startForegroundService exists to
+            // satisfy, were introduced in the same release.
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
 
         /** Stops whatever alarm is currently ringing, if any. Safe to call even if nothing is playing. */
