@@ -318,10 +318,13 @@ abstract class AppDatabase : RoomDatabase() {
          * Returns the app-wide singleton [AppDatabase], creating it on first call.
          * Double-checked locking (`synchronized` + null check twice) avoids building the
          * database twice if two threads race to call this before [INSTANCE] is set.
-         * [fallbackToDestructiveMigration] is a safety net for any DB version bump that
-         * doesn't get an explicit `MIGRATION_x_y` below -- it wipes and recreates the DB
-         * rather than crashing, but every migration so far is written explicitly to avoid
-         * losing user data.
+         *
+         * The destructive fallback is scoped to versions 1-5 -- the pre-release schemas that never
+         * got a migration written -- and deliberately not left open-ended. An unscoped
+         * `fallbackToDestructiveMigration()` applies to every future version bump as well, so
+         * forgetting one `MIGRATION_x_y` wipes every user's library on their next launch with no
+         * error anywhere. Scoped like this, a missing migration fails loudly on a developer's
+         * device instead of silently deleting someone's music.
          */
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -335,7 +338,7 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
                     MIGRATION_17_18, MIGRATION_18_19,
                 )
-                .fallbackToDestructiveMigration()
+                .fallbackToDestructiveMigrationFrom(dropAllTables = true, 1, 2, 3, 4, 5)
                 .build()
                 .also { INSTANCE = it }
             }
