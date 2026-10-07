@@ -12,14 +12,21 @@ import java.nio.FloatBuffer
 import java.nio.LongBuffer
 
 /**
- * On-device speech-to-text lyric transcription via a bundled, quantized Whisper-tiny.en (ONNX,
- * ~40MB total for both the encoder and merged decoder -- see `assets/ai/whisper/`). Replaces the
- * app's previous design of calling OpenAI's hosted Whisper API: no API key, no per-call cost, no
- * network dependency, works fully offline once the song is downloaded. Model credit: OpenAI
- * (Whisper), ONNX export via `onnx-community/whisper-tiny.en` (MIT).
+ * On-device speech-to-text lyric transcription via a bundled, quantized Whisper-base (ONNX, ~77MB
+ * total for both the encoder and merged decoder -- see `assets/ai/whisper/`). Replaces the app's
+ * previous design of calling OpenAI's hosted Whisper API: no API key, no per-call cost, no network
+ * dependency, works fully offline once the song is downloaded. Model credit: OpenAI (Whisper), ONNX
+ * export via `onnx-community/whisper-base` (MIT).
+ *
+ * **base, and multilingual, rather than tiny.en.** tiny is the smallest Whisper there is, and sung
+ * vocals over a full mix are already outside what a speech model handles well; at that size the
+ * output was not usable. base roughly doubles the parameter count for about twice the assets, and
+ * being multilingual it can also transcribe songs that are not in English, which the previous
+ * English-only checkpoint answered with confident nonsense. Transcribing singing remains the
+ * hardest thing this model is asked to do and it will still get lines wrong.
  *
  * Runs the same greedy-decode algorithm the reference model uses (forced `<|startoftranscript|>
- * <|notimestamps|>` prompt, `suppress_tokens`/`begin_suppress_tokens` exactly as configured in the
+ * <|lang|> <|transcribe|>` prompt, `suppress_tokens`/`begin_suppress_tokens` exactly as configured in the
  * reference `generation_config.json`, self-attention KV-cache reuse across steps, frozen
  * cross-attention KV computed once per 30s audio chunk) against the merged decoder graph exported
  * by Optimum, which folds the "first step" (no cache) and "later steps" (cached) branches into one
@@ -36,26 +43,41 @@ class WhisperTranscriptionEngine(private val context: Context) {
         private const val DECODER_ASSET = "ai/whisper/decoder_model_merged.onnx"
         private const val VOCAB_ASSET = "ai/whisper/vocab.json"
 
-        private const val NUM_LAYERS = 4
-        private const val NUM_HEADS = 6
+        private const val NUM_LAYERS = 6
+        private const val NUM_HEADS = 8
         private const val HEAD_DIM = 64
         private const val ENCODER_SEQ_LEN = 1500
 
         // From the reference model's generation_config.json -- see this class's doc comment.
         // Hardcoded rather than parsed at runtime since these are fixed properties of the bundled
         // checkpoint, not something that varies per call.
-        private const val SOT_TOKEN = 50257 // <|startoftranscript|> (also decoder_start_token_id)
-        private const val NO_TIMESTAMPS_TOKEN = 50362
-        private const val EOS_TOKEN = 50256 // <|endoftext|>
+        // Every one of these moved with the model. whisper-base is multilingual, and its
+        // vocabulary inserts 99 language tokens and the task tokens that an English-only model has
+        // no use for. Taken from the checkpoint's own generation_config.json rather than from
+        // memory: an off-by-one here does not fail loudly, it decodes from the wrong starting state
+        // and returns fluent nonsense.
+        private const val SOT_TOKEN = 50258 // <|startoftranscript|> (also decoder_start_token_id)
+        private const val EOS_TOKEN = 50257 // <|endoftext|>
+        private const val TRANSCRIBE_TOKEN = 50359
+        private const val NO_TIMESTAMPS_TOKEN = 50363
+
+        /** The 99 `<|xx|>` language tokens, contiguous, in the order the model was trained on. */
+        private const val FIRST_LANGUAGE_TOKEN = 50259
+        private const val LAST_LANGUAGE_TOKEN = 50357
+
+        /** `<|0.00|>`. Timestamps run from here in 20ms steps to `<|30.00|>`. */
+        private const val FIRST_TIMESTAMP_TOKEN = 50364
+        private const val TIMESTAMP_STEP_SECONDS = 0.02
+
         private const val MAX_NEW_TOKENS = 224
-        private val BEGIN_SUPPRESS_TOKENS = setOf(220, 50256)
+        private val BEGIN_SUPPRESS_TOKENS = setOf(220, 50257)
         private val SUPPRESS_TOKENS = setOf(
             1, 2, 7, 8, 9, 10, 14, 25, 26, 27, 28, 29, 31, 58, 59, 60, 61, 62, 63, 90, 91, 92, 93,
-            357, 366, 438, 532, 685, 705, 796, 930, 1058, 1220, 1267, 1279, 1303, 1343, 1377, 1391,
-            1635, 1782, 1875, 2162, 2361, 2488, 3467, 4008, 4211, 4600, 4808, 5299, 5855, 6329, 7203,
-            9609, 9959, 10563, 10786, 11420, 11709, 11907, 13163, 13697, 13700, 14808, 15306, 16410,
-            16791, 17992, 19203, 19510, 20724, 22305, 22935, 27007, 30109, 30420, 33409, 34949,
-            40283, 40493, 40549, 47282, 49146, 50257, 50357, 50358, 50359, 50360, 50361
+            359, 503, 522, 542, 873, 893, 902, 918, 922, 931, 1350, 1853, 1982, 2460, 2627, 3246,
+            3253, 3268, 3536, 3846, 3961, 4183, 4667, 6585, 6647, 7273, 9061, 9383, 10428, 10929,
+            11938, 12033, 12331, 12562, 13793, 14157, 14635, 15265, 15618, 16553, 16604, 18362,
+            18956, 20075, 21675, 22520, 26130, 26161, 26435, 28279, 29464, 31650, 32302, 32470,
+            36865, 42863, 47425, 49870, 50254, 50258, 50358, 50359, 50360, 50361, 50362
         )
 
         // A chunk that decodes into the same token over and over (an instrumental stretch with no
@@ -65,6 +87,16 @@ class WhisperTranscriptionEngine(private val context: Context) {
 
         /** Upper bound on ONNX Runtime worker threads, so transcription cannot starve playback. */
         private const val MAX_ORT_THREADS = 4
+
+        /**
+         * Least the window may advance after a chunk, in samples (5s).
+         *
+         * The window normally advances to the end of the last line the model actually finished, so
+         * the next pass starts at a line boundary instead of halfway through a word. A pathological
+         * chunk can report a first line ending almost immediately, though, and honouring that would
+         * crawl through the song a fraction of a second at a time -- or, at zero, never finish.
+         */
+        private const val MIN_ADVANCE_SAMPLES = 5 * 16_000
     }
 
     @Volatile private var initFailed = false
@@ -118,11 +150,22 @@ class WhisperTranscriptionEngine(private val context: Context) {
     }
 
     /**
-     * Transcribes the full song at [filePath] and returns it as an LRC-formatted string (one
-     * `[mm:ss.xx] text` line per ~30s audio chunk -- the model's own native window size, so this
-     * is the finest timestamp granularity a single-pass greedy decode can offer without also
-     * decoding Whisper's internal timestamp tokens). [AiModelResult.Success] carries an empty
-     * string if decoding worked but no chunk produced any text (e.g. a purely instrumental track).
+     * Transcribes the song at [filePath] and returns it as LRC, one `[mm:ss.xx] line` per sung line.
+     *
+     * The audio is worked through in Whisper's native 30-second windows -- the model cannot accept
+     * more than that at once -- but the windows are not a fixed grid. The model is asked for its own
+     * timestamps, which gives two things a fixed grid cannot: a real start time for every line
+     * rather than one lump of text per half-minute, and a place to resume. Each window advances to
+     * the end of the last line the model actually finished, so the next pass starts at a line
+     * boundary instead of halfway through a word, which is where a fixed 30-second step landed most
+     * of the time.
+     *
+     * The spoken language is detected once, from the first window with sound in it, and then held
+     * for the rest of the song. Detecting per window lets one instrumental passage flip the model
+     * into another language mid-song, and a song does not change language halfway through.
+     *
+     * [AiModelResult.Success] carries an empty string when decoding worked but produced no text --
+     * an instrumental, or a track whose vocals the model could not make out.
      */
     fun transcribeFile(filePath: String): AiModelResult<String> {
         if (!ensureInitialized()) return AiModelResult.Unavailable("model unavailable")
@@ -138,32 +181,40 @@ class WhisperTranscriptionEngine(private val context: Context) {
         return try {
             synchronized(initLock) {
                 val lines = mutableListOf<String>()
-                val chunkSamples = WhisperMelSpectrogram.N_SAMPLES
-                var chunkStart = 0
+                val windowSamples = WhisperMelSpectrogram.N_SAMPLES
+                var cursor = 0
+                var language: Int? = null
                 var previousText: String? = null
-                while (chunkStart < pcm.size) {
-                    val chunkEnd = minOf(chunkStart + chunkSamples, pcm.size)
-                    val chunk = pcm.copyOfRange(chunkStart, chunkEnd)
-                    val chunkStartMs = (chunkStart.toLong() * 1000L) / 16_000L
-                    chunkStart += chunkSamples
 
-                    // Near-silence is skipped without running the model at all. It is both the
-                    // cheapest speed-up available -- intros, outros and gaps cost nothing instead
-                    // of a full encode plus a 224-step decode -- and a correctness fix: Whisper is
-                    // famous for inventing confident text out of silence, and those inventions are
-                    // exactly the phantom lines that ended up repeated down a song.
-                    if (WhisperDecodeGuards.isEffectivelySilent(chunk)) continue
+                while (cursor < pcm.size) {
+                    val window = pcm.copyOfRange(cursor, minOf(cursor + windowSamples, pcm.size))
 
-                    val raw = transcribeChunk(chunk, filters, encoder, decoder, tok)
-                    val text = WhisperDecodeGuards.collapseRepeatedPhrases(raw)
-                    if (text.isBlank()) continue
+                    // Silence is skipped without touching the model: the cheapest speed-up there
+                    // is, and a correctness fix too, since Whisper is famous for inventing
+                    // confident text out of nothing.
+                    if (WhisperDecodeGuards.isEffectivelySilent(window)) {
+                        cursor += windowSamples
+                        continue
+                    }
 
-                    // A chunk that says exactly what the previous one said is the model looping,
-                    // not the song repeating a line 30 seconds later to the word.
-                    if (previousText != null && text.equals(previousText, ignoreCase = true)) continue
-                    previousText = text
+                    val segments = withEncodedWindow(window, filters, encoder, OrtEnvironment.getEnvironment()) { env, hidden ->
+                        if (language == null) language = detectLanguage(env, decoder, hidden)
+                        val tokens = runDecoderLoop(env, decoder, hidden, promptFor(language))
+                        parseSegments(tokens, tok)
+                    }.orEmpty()
 
-                    lines.add("[${formatLrcTimestamp(chunkStartMs)}]$text")
+                    for (segment in segments) {
+                        val text = WhisperDecodeGuards.collapseRepeatedPhrases(segment.text)
+                        if (text.isBlank()) continue
+                        // A line identical to the one before it is the model looping, not the song
+                        // repeating itself to the word a few seconds later.
+                        if (text.equals(previousText, ignoreCase = true)) continue
+                        previousText = text
+                        val atMs = (cursor.toLong() * 1000L) / 16_000L + (segment.startSeconds * 1000).toLong()
+                        lines.add("[${formatLrcTimestamp(atMs)}]$text")
+                    }
+
+                    cursor += advanceFor(segments, windowSamples)
                 }
                 AiModelResult.Success(lines.joinToString("\n"))
             }
@@ -173,26 +224,146 @@ class WhisperTranscriptionEngine(private val context: Context) {
         }
     }
 
-    private fun transcribeChunk(
-        chunkPcm: FloatArray,
+    /** How far to move the window: to the end of the last finished line, or a whole window. */
+    private fun advanceFor(segments: List<Segment>, windowSamples: Int): Int {
+        val lastEnd = segments.lastOrNull { it.endSeconds != null }?.endSeconds ?: return windowSamples
+        val samples = (lastEnd * 16_000).toInt()
+        return samples.coerceIn(MIN_ADVANCE_SAMPLES, windowSamples)
+    }
+
+    /** The forced prompt that starts a decode: transcribe, in this language, with timestamps. */
+    private fun promptFor(language: Int?): LongArray = longArrayOf(
+        SOT_TOKEN.toLong(),
+        (language ?: (FIRST_LANGUAGE_TOKEN)).toLong(),
+        TRANSCRIBE_TOKEN.toLong()
+    )
+
+    /** One line the model marked out for itself, with the window-relative times it gave it. */
+    private class Segment(val startSeconds: Double, val endSeconds: Double?, val text: String)
+
+    /**
+     * Splits a decoded token run into lines on the model's own timestamp tokens.
+     *
+     * Whisper emits `<|start|> text <|end|>` for each utterance it is confident about. A trailing
+     * run with no closing timestamp is still returned -- it is real text, it just cannot be used to
+     * decide where the next window begins, which is why [Segment.endSeconds] is nullable.
+     */
+    private fun parseSegments(tokens: List<Int>, tok: WhisperTokenizer): List<Segment> {
+        val segments = mutableListOf<Segment>()
+        var start: Double? = null
+        val buffer = mutableListOf<Int>()
+        for (token in tokens) {
+            if (token >= FIRST_TIMESTAMP_TOKEN) {
+                val seconds = (token - FIRST_TIMESTAMP_TOKEN) * TIMESTAMP_STEP_SECONDS
+                if (start == null) {
+                    start = seconds
+                } else {
+                    if (buffer.isNotEmpty()) {
+                        segments.add(Segment(start, seconds, tok.decode(buffer).trim()))
+                        buffer.clear()
+                    }
+                    start = null
+                }
+            } else {
+                buffer.add(token)
+            }
+        }
+        if (buffer.isNotEmpty()) {
+            segments.add(Segment(start ?: 0.0, null, tok.decode(buffer).trim()))
+        }
+        return segments.filter { it.text.isNotBlank() }
+    }
+
+    /**
+     * Encodes one window and hands the encoder's hidden state to [block], closing both afterwards.
+     * Exists so the encoder output's lifetime is obvious at the call site -- it is reused across the
+     * language probe and the decode, and leaking it once per window would leak it per half-minute
+     * of every song transcribed.
+     */
+    private fun <T> withEncodedWindow(
+        window: FloatArray,
         filters: Array<FloatArray>,
         encoder: OrtSession,
-        decoder: OrtSession,
-        tok: WhisperTokenizer
-    ): String {
-        val env = OrtEnvironment.getEnvironment()
-        val melFeatures = WhisperMelSpectrogram.compute(chunkPcm, filters)
-
+        env: OrtEnvironment,
+        block: (OrtEnvironment, OnnxTensor) -> T
+    ): T? {
+        val melFeatures = WhisperMelSpectrogram.compute(window, filters)
         OnnxTensor.createTensor(
             env,
             FloatBuffer.wrap(melFeatures),
             longArrayOf(1, WhisperMelSpectrogram.N_MELS.toLong(), WhisperMelSpectrogram.N_FRAMES.toLong())
         ).use { inputFeatures ->
-            encoder.run(mapOf("input_features" to inputFeatures)).use { encoderOutputs ->
-                val hiddenState = (encoderOutputs.get("last_hidden_state").orElse(null) as? OnnxTensor)
-                    ?: return ""
-                return runDecoderLoop(env, decoder, hiddenState, tok)
+            encoder.run(mapOf("input_features" to inputFeatures)).use { outputs ->
+                // No hidden state means the encoder gave us nothing to decode. Returning null
+                // rather than inventing an empty tensor: handing the decoder a zero-length encoder
+                // output would produce output, and that output would be fiction.
+                val hidden = (outputs.get("last_hidden_state").orElse(null) as? OnnxTensor)
+                    ?: return null
+                return block(env, hidden)
             }
+        }
+    }
+
+    /**
+     * Asks the model which language it is hearing: one decode step from the bare
+     * `<|startoftranscript|>` prompt, whose next-token distribution over the language tokens is
+     * exactly the language classifier Whisper was trained to expose.
+     */
+    private fun detectLanguage(env: OrtEnvironment, decoder: OrtSession, hidden: OnnxTensor): Int {
+        val logits = singleStepLogits(env, decoder, hidden, longArrayOf(SOT_TOKEN.toLong()))
+            ?: return FIRST_LANGUAGE_TOKEN
+        var best = FIRST_LANGUAGE_TOKEN
+        var bestValue = Float.NEGATIVE_INFINITY
+        for (id in FIRST_LANGUAGE_TOKEN..LAST_LANGUAGE_TOKEN) {
+            val value = logits(id)
+            if (value > bestValue) {
+                bestValue = value
+                best = id
+            }
+        }
+        return best
+    }
+
+    /** Runs the decoder once over [inputIds] with empty caches, returning a logit lookup or null. */
+    private fun singleStepLogits(
+        env: OrtEnvironment,
+        decoder: OrtSession,
+        hidden: OnnxTensor,
+        inputIds: LongArray
+    ): ((Int) -> Float)? {
+        val tensorsToClose = mutableListOf<OnnxTensor>()
+        try {
+            val idsTensor = OnnxTensor.createTensor(env, LongBuffer.wrap(inputIds), longArrayOf(1, inputIds.size.toLong()))
+            tensorsToClose.add(idsTensor)
+            val useCacheTensor = OnnxTensor.createTensor(env, booleanArrayOf(false))
+            tensorsToClose.add(useCacheTensor)
+            val inputs = HashMap<String, OnnxTensor>()
+            inputs["input_ids"] = idsTensor
+            inputs["encoder_hidden_states"] = hidden
+            inputs["use_cache_branch"] = useCacheTensor
+            val empty = LayerCache(null, 0)
+            for (layer in 0 until NUM_LAYERS) {
+                val dk = makeKvTensor(env, empty); tensorsToClose.add(dk)
+                val dv = makeKvTensor(env, empty); tensorsToClose.add(dv)
+                val ek = makeKvTensor(env, empty); tensorsToClose.add(ek)
+                val ev = makeKvTensor(env, empty); tensorsToClose.add(ev)
+                inputs["past_key_values.$layer.decoder.key"] = dk
+                inputs["past_key_values.$layer.decoder.value"] = dv
+                inputs["past_key_values.$layer.encoder.key"] = ek
+                inputs["past_key_values.$layer.encoder.value"] = ev
+            }
+            decoder.run(inputs).use { outputs ->
+                val logitsTensor = outputs.get("logits").orElse(null) as? OnnxTensor ?: return null
+                val shape = logitsTensor.info.shape
+                val vocab = shape[2].toInt()
+                val offset = (shape[1].toInt() - 1) * vocab
+                val values = FloatArray(vocab)
+                val buf = logitsTensor.floatBuffer
+                for (v in 0 until vocab) values[v] = buf.get(offset + v)
+                return { id -> if (id in values.indices) values[id] else Float.NEGATIVE_INFINITY }
+            }
+        } finally {
+            for (t in tensorsToClose) t.close()
         }
     }
 
@@ -203,8 +374,8 @@ class WhisperTranscriptionEngine(private val context: Context) {
         env: OrtEnvironment,
         decoder: OrtSession,
         encoderHiddenState: OnnxTensor,
-        tok: WhisperTokenizer
-    ): String {
+        prompt: LongArray
+    ): List<Int> {
         val decoderCacheKey = Array(NUM_LAYERS) { LayerCache(null, 0) }
         val decoderCacheValue = Array(NUM_LAYERS) { LayerCache(null, 0) }
         // Cross-attention KV is computed once (step 0, use_cache_branch=false) from
@@ -213,7 +384,7 @@ class WhisperTranscriptionEngine(private val context: Context) {
         val encoderCacheValue = Array(NUM_LAYERS) { LayerCache(null, 0) }
 
         val generated = mutableListOf<Int>()
-        var nextInputIds = longArrayOf(SOT_TOKEN.toLong(), NO_TIMESTAMPS_TOKEN.toLong())
+        var nextInputIds = prompt
         var useCache = false
         var repeatRun = 0
         var lastToken = -1
@@ -243,7 +414,7 @@ class WhisperTranscriptionEngine(private val context: Context) {
                 }
 
                 decoder.run(inputs).use { outputs ->
-                    val logitsTensor = outputs.get("logits").orElse(null) as? OnnxTensor ?: return tok.decode(generated)
+                    val logitsTensor = outputs.get("logits").orElse(null) as? OnnxTensor ?: return generated
                     val logitsShape = logitsTensor.info.shape // [1, seqLen, vocab]
                     val seqLen = logitsShape[1].toInt()
                     val vocab = logitsShape[2].toInt()
@@ -285,13 +456,13 @@ class WhisperTranscriptionEngine(private val context: Context) {
             // stuck in *cycles* -- a phrase of several tokens repeated until the token budget runs
             // out -- which is what filled the lyrics pane with the same line hundreds of times, and
             // what made every chunk take the full 224 steps.
-            if (WhisperDecodeGuards.endsInRepeatedCycle(generated)) break
+            if (WhisperDecodeGuards.endsInRepeatedCycle(generated.filter { it < FIRST_TIMESTAMP_TOKEN })) break
 
             nextInputIds = longArrayOf(bestId.toLong())
             useCache = true
         }
 
-        return tok.decode(generated)
+        return generated
     }
 
     /** Builds an OnnxTensor `[1, NUM_HEADS, seqLen, HEAD_DIM]` from [cache], or a valid zero-length-seq placeholder if empty -- every declared graph input must be fed every run regardless of which internal branch (`use_cache_branch`) actually consumes it. */
