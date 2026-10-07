@@ -14,6 +14,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
@@ -40,7 +41,14 @@ class LocalMediaHttpServer(context: Context) : Closeable {
     private val appContext = context.applicationContext
     private val random = SecureRandom()
     private val served = ConcurrentHashMap<String, Uri>()
-    private val workers = Executors.newCachedThreadPool()
+
+    /**
+     * Request threads. Recreated by [start] rather than created once, because [close] shuts the
+     * pool down and a shut-down pool rejects every task forever -- a server stopped and started
+     * again in one process would accept connections and then silently answer none of them.
+     */
+    @Volatile
+    private var workers: ExecutorService = Executors.newCachedThreadPool()
 
     @Volatile
     private var serverSocket: ServerSocket? = null
@@ -60,6 +68,7 @@ class LocalMediaHttpServer(context: Context) : Closeable {
             // need to retry a fixed one.
             val socket = ServerSocket(0)
             serverSocket = socket
+            if (workers.isShutdown) workers = Executors.newCachedThreadPool()
             acceptThread = thread(name = "LocalMediaHttpServer", isDaemon = true) {
                 acceptLoop(socket)
             }
