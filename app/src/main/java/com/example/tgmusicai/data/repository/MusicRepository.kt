@@ -8,6 +8,7 @@ import com.example.tgmusicai.data.local.BackupManager
 import com.example.tgmusicai.data.local.dao.AlarmDao
 import com.example.tgmusicai.data.local.dao.DailyListenTotal
 import com.example.tgmusicai.data.local.dao.ListeningHistoryDao
+import com.example.tgmusicai.data.local.dao.PendingScrobbleDao
 import com.example.tgmusicai.data.local.dao.PlaylistDao
 import com.example.tgmusicai.data.local.dao.SongDao
 import com.example.tgmusicai.data.local.dao.SongStatsDao
@@ -63,9 +64,19 @@ class MusicRepository(
     private val alarmDao: AlarmDao,
     private val listeningHistoryDao: ListeningHistoryDao? = null,
     private val database: com.example.tgmusicai.data.local.AppDatabase? = null,
-    private val recommendationEngine: RecommendationEngine? = null
+    private val recommendationEngine: RecommendationEngine? = null,
+    private val pendingScrobbleDao: PendingScrobbleDao? = null,
 ) {
     private val TAG = "MusicRepository"
+
+    /**
+     * How many finished listens are still waiting to reach ListenBrainz.
+     *
+     * Surfaced so the Settings row can say that history is queued rather than lost. Emits 0 when
+     * there is no DAO, which is the honest answer for a caller that was built without one.
+     */
+    val pendingScrobbleCount: Flow<Int> =
+        pendingScrobbleDao?.countFlow() ?: flowOf(0)
 
     // Playlist.name has no DB-level unique constraint, so the check-then-insert pattern below
     // (used by getOrCreateLikedMusicPlaylistId and ensureSmartPlaylistsExist) is racy if two

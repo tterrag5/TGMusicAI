@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -137,6 +138,15 @@ class PlayerViewModel(
     fun setCrossfadeDurationSec(seconds: Int) {
         viewModelScope.launch { appPreferences?.setCrossfadeDurationSec(seconds) }
     }
+
+    /**
+     * How many finished listens are queued for ListenBrainz because submitting them failed.
+     *
+     * Shown in Settings so a user whose history looks behind can see that it is waiting rather than
+     * gone -- which is the whole point of keeping the queue.
+     */
+    val pendingScrobbleCount: StateFlow<Int> = (repository?.pendingScrobbleCount ?: flowOf(0))
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     /**
      * SponsorBlock segments skipped during playback, for the UI to announce as they happen.

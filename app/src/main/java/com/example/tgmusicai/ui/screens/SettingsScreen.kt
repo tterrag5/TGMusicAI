@@ -111,6 +111,7 @@ fun SettingsScreen(
     val sponsorBlockCategories by playerViewModel.sponsorBlockCategories.collectAsState()
     val scrobblingEnabled by playerViewModel.scrobblingEnabled.collectAsState()
     val listenBrainzUsername by playerViewModel.listenBrainzUsername.collectAsState()
+    val pendingScrobbleCount by playerViewModel.pendingScrobbleCount.collectAsState()
     val listenBrainzServer by playerViewModel.listenBrainzServer.collectAsState()
     val scrobbleConnectionStatus by playerViewModel.scrobbleConnectionStatus.collectAsState()
     val isConnectingScrobbler by playerViewModel.isConnectingScrobbler.collectAsState()
@@ -424,7 +425,14 @@ fun SettingsScreen(
                     title = "Listening history",
                     icon = Icons.Rounded.History,
                     summary = when {
-                        scrobblingEnabled && listenBrainzUsername != null -> "Scrobbling as $listenBrainzUsername"
+                        scrobblingEnabled && listenBrainzUsername != null ->
+                            listOfNotNull(
+                                "Scrobbling as $listenBrainzUsername",
+                                // Only when there is something waiting: a count of zero is noise.
+                                pendingScrobbleCount
+                                    .takeIf { it > 0 }
+                                    ?.let { "$it waiting to send" },
+                            ).joinToString(" \u00b7 ")
                         listenBrainzUsername != null -> "Connected, but paused"
                         else -> "Not connected"
                     },

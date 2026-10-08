@@ -33,6 +33,8 @@ import com.example.tgmusicai.cast.CastAvailability
 import com.example.tgmusicai.cast.CastMediaItemConverter
 import com.example.tgmusicai.cast.LocalMediaHttpServer
 import com.example.tgmusicai.data.local.AppDatabase
+import com.example.tgmusicai.data.local.entity.PendingScrobble
+import com.example.tgmusicai.data.network.NetworkObserver
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.ListeningHistory
 import com.example.tgmusicai.data.local.entity.Song
@@ -60,6 +62,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.future
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -429,6 +433,16 @@ class PlaybackService : MediaLibraryService() {
                 }
         }
 
+        // Queued listens, retried as soon as there is a network again. Collecting connectivity
+        // rather than polling means the common case -- signal returns while the user is still
+        // listening -- is handled the moment it happens, and the first emission covers the service
+        // starting up with a queue already waiting from a previous session.
+        serviceScope.launch {
+            networkObserver.isOnline.collect { online ->
+                if (online) flushPendingScrobbles()
+            }
+        }
+
         // "Downloaded only" decides whether autoplay may reach for cloud recommendations at all.
         // Mirrored into a field for the same reason the others are: autoplay runs on a media item
         // transition, which cannot suspend on a DataStore read.
@@ -454,6 +468,12 @@ class PlaybackService : MediaLibraryService() {
                     scrobblingEnabled = enabled
                     listenBrainzToken = token
                     listenBrainzServer = server
+                    // Also a flush trigger, not just the connectivity one. These settings arrive
+                    // asynchronously, so on a normal start the first connectivity emission usually
+                    // beats them and finds no token to submit with -- and if the network never then
+                    // changes state, a queue left over from a previous session would sit there
+                    // untouched. Flushing here covers startup, and a corrected token too.
+                    flushPendingScrobbles()
                 }
         }
 
@@ -517,6 +537,12 @@ class PlaybackService : MediaLibraryService() {
          * immediately end playback anyway.
          */
         private const val SPONSOR_END_GUARD_MS = 1_000L
+
+        /** How many queued listens one flush may submit, so a long offline stretch arrives in batches. */
+        private const val SCROBBLE_FLUSH_LIMIT = 25
+
+        /** A listen still unsent after this long is dropped; retrying is not going to start working. */
+        private const val SCROBBLE_MAX_AGE_MS = 14L * 24L * 60L * 60L * 1000L
         private const val YOUTUBE_FALLBACK_SEARCH_CANDIDATES = 6
         private const val YOUTUBE_FALLBACK_RESOLVE_TARGET = 3
 
@@ -885,8 +911,105 @@ class PlaybackService : MediaLibraryService() {
                     scrobblingRejected = true
                     android.util.Log.w("PlaybackService", "ListenBrainz rejected the token; scrobbling is paused")
                 }
-                is ListenBrainzScrobbler.Result.Transient ->
-                    android.util.Log.d("PlaybackService", "Scrobble failed (${result.reason})")
+                is ListenBrainzScrobbler.Result.Transient -> {
+                    // Queue it rather than lose it. The server stores the timestamp the track
+                    // started, so submitting this later still lands in the right place in history.
+                    enqueueScrobble(listen)
+                    android.util.Log.d(
+                        "PlaybackService",
+                        "Scrobble failed (${result.reason}); queued for retry"
+                    )
+                }
+            }
+        }
+    }
+
+    /** Observes connectivity so a queued listen is retried as soon as there is a network again. */
+    private val networkObserver by lazy { NetworkObserver(this) }
+
+    /** Guards against two flushes running at once, which would submit the same row twice. */
+    private val scrobbleFlushMutex = Mutex()
+
+    /**
+     * Stores a listen that could not be submitted, so it survives both the failure and a process
+     * kill. Swallows its own errors: failing to queue a listen must never affect playback.
+     */
+    private fun enqueueScrobble(listen: ListenBrainzScrobbler.Listen) {
+        serviceScope.launch {
+            try {
+                database.pendingScrobbleDao().insert(
+                    PendingScrobble(
+                        title = listen.title,
+                        artist = listen.artist,
+                        album = listen.album,
+                        durationMs = listen.durationMs,
+                        startedAtEpochSeconds = listen.startedAtEpochSeconds,
+                        // Due immediately; the first failed attempt is what starts the backoff.
+                        nextAttemptAtMs = 0L,
+                    )
+                )
+            } catch (e: Exception) {
+                android.util.Log.w("PlaybackService", "Could not queue a listen for retry", e)
+            }
+        }
+    }
+
+    /**
+     * Tries to submit every queued listen that is due.
+     *
+     * Runs on service start and whenever connectivity returns. Each failure pushes that row's next
+     * attempt further out, doubling up to [SCROBBLE_BACKOFF_MAX_MS]; the delay lives on the row, so
+     * a service restart cannot turn a queue built up offline into a burst of requests the moment the
+     * app comes back. A rejected token stops the whole pass -- retrying cannot fix a bad credential,
+     * which is the same reasoning that pauses live scrobbling for the session.
+     */
+    private fun flushPendingScrobbles() {
+        if (!scrobblingEnabled || scrobblingRejected) return
+        val token = listenBrainzToken ?: return
+
+        serviceScope.launch {
+            scrobbleFlushMutex.withLock {
+                try {
+                    val dao = database.pendingScrobbleDao()
+                    val nowMs = System.currentTimeMillis()
+
+                    // A listen that has been failing for weeks is failing for a reason a retry will
+                    // not fix, and the queue should not grow without bound.
+                    dao.deleteOlderThan((nowMs - SCROBBLE_MAX_AGE_MS) / 1000L)
+
+                    for (pending in dao.getDue(nowMs, SCROBBLE_FLUSH_LIMIT)) {
+                        val listen = ListenBrainzScrobbler.Listen(
+                            title = pending.title,
+                            artist = pending.artist,
+                            album = pending.album,
+                            durationMs = pending.durationMs,
+                            startedAtEpochSeconds = pending.startedAtEpochSeconds,
+                        )
+                        when (scrobbler.submitListen(token, listenBrainzServer, listen)) {
+                            is ListenBrainzScrobbler.Result.Success -> dao.deleteById(pending.id)
+
+                            is ListenBrainzScrobbler.Result.InvalidToken -> {
+                                scrobblingRejected = true
+                                android.util.Log.w(
+                                    "PlaybackService",
+                                    "ListenBrainz rejected the token; queued listens stay queued"
+                                )
+                                return@withLock
+                            }
+
+                            is ListenBrainzScrobbler.Result.Transient -> {
+                                val attempts = pending.attempts + 1
+                                val backoff = ListenBrainzScrobbler.retryDelayMs(attempts)
+                                dao.recordAttempt(pending.id, attempts, nowMs + backoff)
+                                // The network is evidently still unhappy; stop rather than walk the
+                                // rest of the queue failing once per row.
+                                return@withLock
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("PlaybackService", "Could not flush queued listens", e)
+                }
             }
         }
     }

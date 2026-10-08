@@ -100,7 +100,8 @@ class MainActivity : ComponentActivity() {
             alarmDao = database.alarmDao(),
             listeningHistoryDao = database.listeningHistoryDao(),
             database = database,
-            recommendationEngine = recommendationEngine
+            recommendationEngine = recommendationEngine,
+            pendingScrobbleDao = database.pendingScrobbleDao(),
         )
 
         networkObserver = NetworkObserver(this)

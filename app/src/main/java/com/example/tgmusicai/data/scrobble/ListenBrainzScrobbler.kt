@@ -166,6 +166,32 @@ class ListenBrainzScrobbler(
             if (durationMs <= 0) SCROBBLE_CEILING_MS
             else minOf((durationMs * SCROBBLE_FRACTION).toLong(), SCROBBLE_CEILING_MS)
 
+        /** First retry delay for a queued listen. Each further failure doubles it, up to [RETRY_MAX_MS]. */
+        const val RETRY_BASE_MS = 60_000L
+
+        /**
+         * Ceiling on the retry delay. A queue should keep trying occasionally rather than give up --
+         * a phone can be offline for a long flight, and the listens are still worth sending after.
+         */
+        const val RETRY_MAX_MS = 6L * 60L * 60L * 1000L
+
+        /**
+         * How long to wait before the next submission of a listen that has failed [attempts] times.
+         *
+         * Doubles from [RETRY_BASE_MS] and saturates at [RETRY_MAX_MS]. Computed with arithmetic
+         * rather than a bit shift so a large attempt count cannot overflow into a negative delay,
+         * which would make a row due forever and spin the queue.
+         */
+        fun retryDelayMs(attempts: Int): Long {
+            if (attempts <= 1) return RETRY_BASE_MS
+            var delay = RETRY_BASE_MS
+            repeat(attempts - 1) {
+                if (delay >= RETRY_MAX_MS) return RETRY_MAX_MS
+                delay *= 2
+            }
+            return delay.coerceAtMost(RETRY_MAX_MS)
+        }
+
         private fun defaultClient() = OkHttpClient.Builder()
             .callTimeout(15, TimeUnit.SECONDS)
             .build()

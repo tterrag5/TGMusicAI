@@ -10,6 +10,7 @@ import com.example.tgmusicai.data.local.dao.AiSongTagsDao
 import com.example.tgmusicai.data.local.dao.AlarmDao
 import com.example.tgmusicai.data.local.dao.ListeningHistoryDao
 import com.example.tgmusicai.data.local.dao.PendingDownloadDao
+import com.example.tgmusicai.data.local.dao.PendingScrobbleDao
 import com.example.tgmusicai.data.local.dao.PlaylistDao
 import com.example.tgmusicai.data.local.dao.SongDao
 import com.example.tgmusicai.data.local.dao.SongFingerprintDao
@@ -19,6 +20,7 @@ import com.example.tgmusicai.data.local.entity.Alarm
 import com.example.tgmusicai.data.local.entity.AiSongTags
 import com.example.tgmusicai.data.local.entity.ListeningHistory
 import com.example.tgmusicai.data.local.entity.PendingDownload
+import com.example.tgmusicai.data.local.entity.PendingScrobble
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.PlaylistSongCrossRef
 import com.example.tgmusicai.data.local.entity.Song
@@ -48,6 +50,8 @@ import com.example.tgmusicai.data.local.entity.SongStats
  * Version = 18 added songs.genre, backing the library's tag filter chips.
  * Version = 19 added playlist_play_counts, which records plays per playlist rather than only per
  * song, so a playlist's cover can show what that playlist is actually played for.
+ * Version = 20 added pending_scrobbles, which holds listens that could not reach ListenBrainz yet
+ * so a network failure stops losing them -- another standalone table, droppable wholesale.
  */
 @Database(
     entities = [
@@ -60,9 +64,10 @@ import com.example.tgmusicai.data.local.entity.SongStats
         AiSongTags::class,
         ListeningHistory::class,
         SongFingerprint::class,
-        PlaylistPlayCount::class
+        PlaylistPlayCount::class,
+        PendingScrobble::class
     ],
-    version = 19,
+    version = 20,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -85,6 +90,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun songFingerprintDao(): SongFingerprintDao
     /** DAO for `playlist_play_counts`: per-playlist play tallies, behind the playlist cover mosaic. */
     abstract fun playlistPlayCountDao(): PlaylistPlayCountDao
+
+    /** DAO for `pending_scrobbles`: listens still waiting to reach ListenBrainz. */
+    abstract fun pendingScrobbleDao(): PendingScrobbleDao
 
     companion object {
         @Volatile
@@ -299,6 +307,33 @@ abstract class AppDatabase : RoomDatabase() {
          * guessing would put wrong songs on a cover. Covers fall back to the playlist's own order
          * until real plays accumulate.
          */
+        /**
+         * Adds `pending_scrobbles`, the queue of listens that have not reached ListenBrainz yet.
+         *
+         * Starts empty, which is the only correct answer: a listen that was dropped before this
+         * table existed is gone, and there is nowhere to recover it from. `nextAttemptAtMs` defaults
+         * to 0 so anything written by an older build -- there is nothing, but the default has to be
+         * sane either way -- would be treated as due immediately rather than never.
+         */
+        private val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS pending_scrobbles (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL,
+                        artist TEXT NOT NULL,
+                        album TEXT,
+                        durationMs INTEGER NOT NULL,
+                        startedAtEpochSeconds INTEGER NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        nextAttemptAtMs INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         private val MIGRATION_18_19 = object : Migration(18, 19) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
@@ -336,7 +371,7 @@ abstract class AppDatabase : RoomDatabase() {
                 .addMigrations(
                     MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
                     MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
-                    MIGRATION_17_18, MIGRATION_18_19,
+                    MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20,
                 )
                 .fallbackToDestructiveMigrationFrom(dropAllTables = true, 1, 2, 3, 4, 5)
                 .build()
