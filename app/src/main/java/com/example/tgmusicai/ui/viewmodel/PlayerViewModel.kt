@@ -201,11 +201,16 @@ class PlayerViewModel(
      * gap that follows it, so a drawn-out delivery no longer looks like a stretch of pure music to
      * [LyricsRepository.withInstrumentalMarkers]. The track duration feeds both -- it bounds the
      * last line's span and gives the outro its markers.
+     *
+     * Word timings come last, once no further stage can insert or re-time a line underneath them.
      */
     val parsedLyrics: StateFlow<List<LyricLine>> = combine(_lyrics, durationMs) { raw, duration ->
         val parsed = LyricsRepository.parseLyrics(raw)
-        LyricsRepository.withInstrumentalMarkers(
-            LyricsRepository.splitDenseLines(parsed, duration),
+        LyricsRepository.withWordTimings(
+            LyricsRepository.withInstrumentalMarkers(
+                LyricsRepository.splitDenseLines(parsed, duration),
+                duration,
+            ),
             duration,
         )
     }.stateIn(

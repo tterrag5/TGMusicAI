@@ -23,6 +23,26 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
+ * One karaoke highlight unit within a line: the text to light up, when, and for how long.
+ *
+ * These are derived from the line's own timestamp and the next line's, never fetched -- no lyrics
+ * source this app uses carries per-word timing. LrcLib's format is line-level by definition, and
+ * YouTube's auto-generated captions, the one source that does carry word offsets, are discarded for
+ * sung content long before this point (see [LyricsRepository.hasRealSpeechContent]) because speech
+ * recognition cannot transcribe singing. So the timings are an even division of the line's span,
+ * weighted by how long each unit takes to sing -- close enough to follow along with, and not
+ * presented as anything more precise than that.
+ */
+data class WordTiming(
+    val text: String,
+    val startMs: Long,
+    val durationMs: Long,
+) {
+    /** Exclusive end of this unit's highlight window. */
+    val endMs: Long get() = startMs + durationMs
+}
+
+/**
  * Structured model representing a single line of lyrics with an optional timestamp.
  */
 data class LyricLine(
@@ -33,7 +53,13 @@ data class LyricLine(
      * [LyricsRepository.withInstrumentalMarkers]). These are display-only: they are never saved
      * back to the song's stored lyrics, and they are not worth translating.
      */
-    val isInstrumental: Boolean = false
+    val isInstrumental: Boolean = false,
+    /**
+     * Per-unit highlight timings for karaoke rendering, or empty when the line can't be broken into
+     * more than one unit (or has no timestamp to divide). Empty means "highlight the whole line at
+     * once", which is what the display did before karaoke existed.
+     */
+    val words: List<WordTiming> = emptyList(),
 )
 
 /**
@@ -205,6 +231,56 @@ class LyricsRepository(
                 }
             }
             return result
+        }
+
+        /**
+         * Returns [lines] with [LyricLine.words] filled in, so the display can advance a highlight
+         * through each line instead of lighting the whole line at once.
+         *
+         * Runs last in the parse chain, after [splitDenseLines] and [withInstrumentalMarkers]: both
+         * of those insert and re-time lines, and a timing computed before them would describe a line
+         * that no longer exists. A line keeps empty [LyricLine.words] -- meaning "highlight it
+         * whole" -- when there is nothing to divide: no timestamp (the `-1` sentinel used for
+         * unsynced lyrics), an instrumental marker, or a line that segments into a single unit.
+         *
+         * [totalDurationMs] is the track length, used to bound the final line the same way
+         * [splitDenseLines] uses it; pass 0 when it isn't known.
+         */
+        fun withWordTimings(lines: List<LyricLine>, totalDurationMs: Long = 0L): List<LyricLine> {
+            if (lines.none { it.timestampMs >= 0 }) return lines
+
+            return lines.mapIndexed { index, line ->
+                if (line.timestampMs < 0 || line.isInstrumental) return@mapIndexed line
+
+                val segments = LyricSegmenter.segment(line.text)
+                if (segments.size < 2) return@mapIndexed line
+
+                // Same bounding as splitDenseLines: run to the next timestamped line, else to the
+                // end of the track, else assume a default span -- and cap it either way, or a line
+                // followed by a long instrumental stretch would hold its last word lit for minutes.
+                val nextMs = lines.drop(index + 1).firstOrNull { it.timestampMs >= 0 }?.timestampMs
+                    ?: totalDurationMs.takeIf { it > line.timestampMs }
+                    ?: (line.timestampMs + MAX_SPLIT_SPAN_MS)
+                val span = (nextMs - line.timestampMs).coerceAtMost(MAX_SPLIT_SPAN_MS)
+                if (span <= 0L) return@mapIndexed line
+
+                val totalWeight = segments.sumOf { it.weight }.coerceAtLeast(1)
+                var consumedWeight = 0
+                val words = segments.map { segment ->
+                    val startOffset = span * consumedWeight / totalWeight
+                    consumedWeight += segment.weight
+                    // End is computed from the running total rather than by adding a rounded
+                    // duration, so the units stay flush against each other and the last one lands
+                    // exactly on the line's end instead of drifting by the accumulated remainders.
+                    val endOffset = span * consumedWeight / totalWeight
+                    WordTiming(
+                        text = segment.text,
+                        startMs = line.timestampMs + startOffset,
+                        durationMs = endOffset - startOffset,
+                    )
+                }
+                line.copy(words = words)
+            }
         }
 
         /** Breaks [text] at its phrase boundaries, or returns it whole if it has none worth using. */

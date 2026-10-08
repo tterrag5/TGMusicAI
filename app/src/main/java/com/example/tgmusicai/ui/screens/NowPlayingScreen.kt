@@ -94,6 +94,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -103,6 +104,8 @@ import androidx.media3.common.Player
 import coil.compose.AsyncImage
 import com.example.tgmusicai.ui.components.AddToPlaylistDialog
 import com.example.tgmusicai.ui.components.CastButton
+import com.example.tgmusicai.ui.components.karaokeLine
+import com.example.tgmusicai.ui.components.rememberSmoothedPositionMs
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
 import com.example.tgmusicai.ui.util.FormatUtils
 import com.example.tgmusicai.ui.util.rememberArtworkColors
@@ -587,6 +590,19 @@ fun NowPlayingScreen(
                                 idx
                             }
 
+                            // The karaoke fill needs a finer clock than the 500ms position ticker,
+                            // but only while a line that actually has word timings is on screen:
+                            // gating it here keeps the frame loop, and the recomposition it drives,
+                            // switched off entirely for unsynced lyrics and while paused. The same
+                            // lead the active-line search uses is applied here too, or the word
+                            // fill would run behind the line highlight it belongs to.
+                            val activeLineHasWordTimings =
+                                parsedLyrics.getOrNull(activeIndex)?.words?.isNotEmpty() == true
+                            val smoothedPositionMs = rememberSmoothedPositionMs(
+                                reportedPositionMs = currentPositionMs + LYRICS_SYNC_LEAD_MS,
+                                isPlaying = isPlaying && activeLineHasWordTimings,
+                            )
+
                             val listState = rememberLazyListState()
 
                             // Tracks when the user last dragged the lyrics themselves. Checking
@@ -675,8 +691,25 @@ fun NowPlayingScreen(
                                             }
                                             .padding(vertical = 8.dp, horizontal = 12.dp)
                                     ) {
+                                        // Karaoke fill, on the active line only: the rest of the
+                                        // list has no highlight to advance, and building spans for
+                                        // every line on every frame would be wasted work. A line
+                                        // with no word timings (unsynced lyrics, or a single-unit
+                                        // line) falls through to the plain text it always used.
+                                        val karaoke = isActive &&
+                                            !line.isInstrumental &&
+                                            line.words.isNotEmpty()
                                         Text(
-                                            text = line.text,
+                                            text = if (karaoke) {
+                                                karaokeLine(
+                                                    line = line,
+                                                    positionMs = smoothedPositionMs,
+                                                    sungColor = MaterialTheme.colorScheme.primary,
+                                                    unsungColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            } else {
+                                                AnnotatedString(line.text)
+                                            },
                                             // A music marker is a symbol standing in for singing,
                                             // not a lyric: sized up so it reads as one, and never
                                             // bolded, so real words still stand out when active.
