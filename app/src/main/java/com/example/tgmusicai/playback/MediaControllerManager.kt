@@ -3,15 +3,21 @@ package com.example.tgmusicai.playback
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionError
+import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -19,8 +25,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -113,6 +122,41 @@ class MediaControllerManager(
         _playbackError.value = null
     }
 
+    /**
+     * SponsorBlock segments skipped during playback, as they happen.
+     *
+     * A SharedFlow with no replay rather than a StateFlow: a skip is an event that has already
+     * happened, so a screen opened afterwards should not be told about it, and two skips of the
+     * same category in a row are two separate announcements rather than one deduplicated value.
+     */
+    private val _skippedSegments = MutableSharedFlow<SkippedSegment>(extraBufferCapacity = 4)
+    val skippedSegments: SharedFlow<SkippedSegment> = _skippedSegments.asSharedFlow()
+
+    /** A segment SponsorBlock just skipped: its category id, and the label to show for it. */
+    data class SkippedSegment(val category: String, val label: String)
+
+    /**
+     * Receives what the service broadcasts to its controllers. Playback state arrives through the
+     * Player listener instead; this is only for the things that are events rather than state.
+     */
+    private val sessionListener = object : MediaController.Listener {
+        override fun onCustomCommand(
+            controller: MediaController,
+            command: SessionCommand,
+            args: Bundle,
+        ): ListenableFuture<SessionResult> {
+            if (command.customAction == PlaybackService.ACTION_SEGMENT_SKIPPED) {
+                val category = args.getString(PlaybackService.EXTRA_SEGMENT_CATEGORY)
+                val label = args.getString(PlaybackService.EXTRA_SEGMENT_LABEL)
+                if (category != null && label != null) {
+                    _skippedSegments.tryEmit(SkippedSegment(category, label))
+                }
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+            return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
+        }
+    }
+
     private var positionTickerJob: Job? = null
     private var currentSongList: List<Song> = emptyList()
 
@@ -129,7 +173,9 @@ class MediaControllerManager(
             context,
             ComponentName(context, PlaybackService::class.java)
         )
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
+        val controllerFuture = MediaController.Builder(context, sessionToken)
+            .setListener(sessionListener)
+            .buildAsync()
         
         controllerFuture.addListener(
             {

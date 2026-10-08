@@ -558,6 +558,21 @@ class PlaybackService : MediaLibraryService() {
         const val ACTION_TOGGLE_LIKE = "com.example.tgmusicai.ACTION_TOGGLE_LIKE"
         const val ACTION_TOGGLE_REPEAT_MODE = "com.example.tgmusicai.ACTION_TOGGLE_REPEAT_MODE"
 
+        /**
+         * Broadcast to every connected controller right after a SponsorBlock segment is skipped,
+         * so the UI can say what it did and offer to stop doing it.
+         *
+         * A skip is the one playback action the user did not ask for and cannot see the cause of:
+         * the track simply jumps. Announcing it is what makes that legible rather than alarming.
+         * This goes through the session rather than a shared object because the service outlives
+         * every screen and the UI only ever talks to it through a MediaController.
+         */
+        const val ACTION_SEGMENT_SKIPPED = "com.example.tgmusicai.ACTION_SEGMENT_SKIPPED"
+
+        /** Extras on [ACTION_SEGMENT_SKIPPED]: the SponsorBlock category id and its display label. */
+        const val EXTRA_SEGMENT_CATEGORY = "segment_category"
+        const val EXTRA_SEGMENT_LABEL = "segment_label"
+
         // Content style extra keys/values Android Auto reads to choose Grid vs List rendering.
         const val EXTRAS_KEY_CONTENT_STYLE_BROWSABLE = "android.media.browse.CONTENT_STYLE_BROWSABLE"
         const val EXTRAS_KEY_CONTENT_STYLE_PLAYABLE = "android.media.browse.CONTENT_STYLE_PLAYABLE"
@@ -1053,6 +1068,26 @@ class PlaybackService : MediaLibraryService() {
                 "PlaybackService",
                 "SponsorBlock: skipped ${segment.displayName} (${segment.startMs}-${segment.endMs}ms)"
             )
+            announceSegmentSkipped(segment)
+        }
+    }
+
+    /**
+     * Tells every connected controller that [segment] was just skipped.
+     *
+     * Best-effort and deliberately silent on failure: a session that has gone away, or a controller
+     * that cannot be reached, must never take a skip -- or playback -- down with it.
+     */
+    private fun announceSegmentSkipped(segment: SponsorBlockManager.Segment) {
+        val session = mediaLibrarySession ?: return
+        try {
+            val extras = Bundle().apply {
+                putString(EXTRA_SEGMENT_CATEGORY, segment.category)
+                putString(EXTRA_SEGMENT_LABEL, segment.displayName)
+            }
+            session.broadcastCustomCommand(SessionCommand(ACTION_SEGMENT_SKIPPED, extras), extras)
+        } catch (e: Exception) {
+            android.util.Log.d("PlaybackService", "Could not announce a SponsorBlock skip", e)
         }
     }
 

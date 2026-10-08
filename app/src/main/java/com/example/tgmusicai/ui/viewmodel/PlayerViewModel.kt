@@ -16,6 +16,7 @@ import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.playback.SleepTimerManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -135,6 +136,29 @@ class PlayerViewModel(
 
     fun setCrossfadeDurationSec(seconds: Int) {
         viewModelScope.launch { appPreferences?.setCrossfadeDurationSec(seconds) }
+    }
+
+    /**
+     * SponsorBlock segments skipped during playback, for the UI to announce as they happen.
+     *
+     * A skip is the one playback action the user did not ask for and cannot see the cause of -- the
+     * track simply jumps -- so saying what happened is what makes it legible rather than a glitch.
+     */
+    val skippedSegments: SharedFlow<MediaControllerManager.SkippedSegment> =
+        mediaControllerManager.skippedSegments
+
+    /**
+     * Stops skipping [category] from here on, by dropping it from the saved SponsorBlock
+     * categories. Reachable from the skip announcement itself, because the moment a user decides a
+     * category is skipping things they wanted is the moment it just happened -- making them find
+     * the setting afterwards is how a well-meaning feature becomes one they switch off entirely.
+     */
+    fun disableSponsorCategory(category: String) {
+        val preferences = appPreferences ?: return
+        viewModelScope.launch {
+            val current = preferences.sponsorBlockCategoriesFlow.first()
+            preferences.setSponsorBlockCategories(current - category)
+        }
     }
 
     /** How far Start Radio may stray from what the user already plays. */
