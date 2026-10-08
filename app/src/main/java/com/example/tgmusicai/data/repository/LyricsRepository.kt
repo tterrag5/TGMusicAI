@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Log
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.TranslatorOptions
@@ -185,6 +186,15 @@ class LyricsRepository(
          * long instrumental would smear its phrases across the whole break.
          */
         private const val MAX_SPLIT_SPAN_MS = 8_000L
+
+        /** What ML Kit's language identifier returns when it cannot tell. */
+        private const val UNDETERMINED_LANGUAGE = "und"
+
+        /**
+         * How much lyric text to hand the language identifier. Deliberately a lot: one line is
+         * often too short to identify, and a chorus on its own identifies as nothing.
+         */
+        private const val MAX_LANGUAGE_SAMPLE_CHARS = 2000
 
         /**
          * Returns [lines] with each multi-phrase line broken into one line per phrase, timed by
@@ -673,8 +683,13 @@ class LyricsRepository(
             return@withContext null
         }
 
+        // Nothing to do when the lyrics are already in the target language -- and skipping it
+        // avoids downloading a model to translate a language into itself.
+        val sourceCode = detectSourceLanguage(lines)
+        if (sourceCode == targetCode) return@withContext lines
+
         val options = TranslatorOptions.Builder()
-            .setSourceLanguage(TranslateLanguage.ENGLISH)
+            .setSourceLanguage(sourceCode)
             .setTargetLanguage(targetCode)
             .build()
 
@@ -694,6 +709,43 @@ class LyricsRepository(
         } finally {
             // Frees the loaded model; a Translator holds native resources until closed.
             translator.close()
+        }
+    }
+
+    /**
+     * The ML Kit source language for [lines], identified from the lyrics themselves.
+     *
+     * The source language used to be pinned to English, which made this feature structurally
+     * incapable of the thing it is most wanted for: a song in another language rendered into one the
+     * user reads. A Japanese track was translated English-to-English, which ML Kit answers by
+     * handing most of the text back unchanged -- indistinguishable, on screen, from the translator
+     * being broken. Nothing failed and nothing was logged, so the only way to notice was to try it
+     * on a song that wasn't already in English.
+     *
+     * Falls back to English when identification is inconclusive or ML Kit has no translation model
+     * for what it found. That is the old behaviour, and it is still the right guess for the common
+     * case; it just isn't an assumption worth making without looking first.
+     *
+     * The whole lyric is sampled rather than one line, because a single line is often too short to
+     * identify and a chorus of "la la la" identifies as nothing at all.
+     */
+    private suspend fun detectSourceLanguage(lines: List<String>): String {
+        val sample = lines.asSequence()
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .take(MAX_LANGUAGE_SAMPLE_CHARS)
+        if (sample.isBlank()) return TranslateLanguage.ENGLISH
+
+        return try {
+            val tag = LanguageIdentification.getClient().identifyLanguage(sample).await()
+            if (tag == UNDETERMINED_LANGUAGE) {
+                TranslateLanguage.ENGLISH
+            } else {
+                TranslateLanguage.fromLanguageTag(tag) ?: TranslateLanguage.ENGLISH
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not identify the lyrics' language; assuming English", e)
+            TranslateLanguage.ENGLISH
         }
     }
 
