@@ -15,6 +15,38 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
+ * How far a recommendation run is allowed to stray from what the user already listens to.
+ *
+ * The engine ranks only songs already in the library, so "discover" here means a corner of their
+ * own collection they have not worn out -- not something new to them. The three modes move the same
+ * three dials rather than switching algorithms, so a run stays explainable: how much an unplayed
+ * track is rewarded, how much sharing an artist or album counts for, and how many times one artist
+ * may appear.
+ *
+ * [BLEND] holds the engine's original tuning exactly, so it is the default and changes nothing for
+ * callers that do not ask for a mode.
+ */
+enum class VarietyMode(
+    val displayName: String,
+    internal val noveltyWeight: Float,
+    internal val metadataWeight: Float,
+    internal val maxPerArtist: Int,
+) {
+    /** Lean on what already lands: artist and album count for more, an unplayed track for nothing. */
+    FAMILIAR("Familiar", noveltyWeight = 0f, metadataWeight = 0.15f, maxPerArtist = 5),
+
+    /** The engine's original balance. */
+    BLEND("Blend", noveltyWeight = 0.03f, metadataWeight = 0.05f, maxPerArtist = 3),
+
+    /**
+     * Push outward: unplayed tracks are rewarded heavily, shared metadata barely counts, and an
+     * artist may appear once. One-per-artist is what actually makes this feel different -- without
+     * it the novelty weight only reorders the same handful of artists.
+     */
+    DISCOVER("Discover", noveltyWeight = 0.20f, metadataWeight = 0.02f, maxPerArtist = 1),
+}
+
+/**
  * Picks songs related to a seed, or to the library as a whole, entirely on the device.
  *
  * Signals blended: how two songs *sound* (EffNet-Discogs music embeddings), how similar their
@@ -65,12 +97,13 @@ class RecommendationEngine(
         seedSong: Song,
         limit: Int = 20,
         downloadedOnly: Boolean = false,
+        variety: VarietyMode = VarietyMode.BLEND,
     ): List<Song> = withContext(Dispatchers.IO) {
         val candidates = loadCandidates(downloadedOnly).filter { it.id != seedSong.id }
         if (candidates.isEmpty()) return@withContext emptyList()
 
-        val scored = scoreAgainstSeeds(listOf(seedSong), candidates)
-        diversify(scored, limit)
+        val scored = scoreAgainstSeeds(listOf(seedSong), candidates, variety)
+        diversify(scored, limit, variety.maxPerArtist)
     }
 
     /**
@@ -83,6 +116,7 @@ class RecommendationEngine(
     suspend fun recommendForLibrary(
         limit: Int = 20,
         downloadedOnly: Boolean = false,
+        variety: VarietyMode = VarietyMode.BLEND,
     ): List<Song> = withContext(Dispatchers.IO) {
         val candidates = loadCandidates(downloadedOnly)
         if (candidates.isEmpty()) return@withContext emptyList()
@@ -97,8 +131,8 @@ class RecommendationEngine(
         }
 
         val seedIds = seeds.map { it.id }.toSet()
-        val scored = scoreAgainstSeeds(seeds, candidates.filter { it.id !in seedIds })
-        diversify(scored, limit)
+        val scored = scoreAgainstSeeds(seeds, candidates.filter { it.id !in seedIds }, variety)
+        diversify(scored, limit, variety.maxPerArtist)
     }
 
     /**
@@ -130,7 +164,11 @@ class RecommendationEngine(
 
     // ---- scoring ----------------------------------------------------------------------------
 
-    private suspend fun scoreAgainstSeeds(seeds: List<Song>, candidates: List<Song>): List<Scored> {
+    private suspend fun scoreAgainstSeeds(
+        seeds: List<Song>,
+        candidates: List<Song>,
+        variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Scored> {
         val profiles = loadProfiles()
         val playCounts = loadPlayCounts()
         val lastPlayed = loadLastPlayedAt()
@@ -169,11 +207,11 @@ class RecommendationEngine(
                     W_THEMATIC * thematic +
                     W_LANGUAGE * language +
                     W_BEHAVIOUR * behaviour +
-                    W_METADATA * metadata
+                    variety.metadataWeight * metadata
                 if (combined > best) best = combined
             }
 
-            var score = best + W_NOVELTY * noveltyOf(candidate, playCounts)
+            var score = best + variety.noveltyWeight * noveltyOf(candidate, playCounts)
             val playedAt = lastPlayed[candidate.id]
             if (playedAt != null && nowMs - playedAt < RECENT_PLAY_WINDOW_MS) {
                 score -= PENALTY_RECENT
@@ -409,7 +447,11 @@ class RecommendationEngine(
          * back rather than dropped, which keeps a single-artist library from returning a
          * near-empty queue.
          */
-        internal fun diversify(scored: List<Scored>, limit: Int): List<Song> {
+        internal fun diversify(
+            scored: List<Scored>,
+            limit: Int,
+            maxPerArtist: Int = MAX_PER_ARTIST,
+        ): List<Song> {
             val ordered = scored.sortedWith(compareByDescending<Scored> { it.score }.thenBy { it.song.id })
 
             val picked = mutableListOf<Song>()
@@ -423,7 +465,7 @@ class RecommendationEngine(
                 val trailingSameArtist = picked.takeLast(MAX_CONSECUTIVE_SAME_ARTIST)
                     .count { it.artist.equals(entry.song.artist, ignoreCase = true) }
 
-                if (used >= MAX_PER_ARTIST || trailingSameArtist >= MAX_CONSECUTIVE_SAME_ARTIST) {
+                if (used >= maxPerArtist || trailingSameArtist >= MAX_CONSECUTIVE_SAME_ARTIST) {
                     deferred.add(entry.song)
                     continue
                 }
@@ -489,8 +531,9 @@ class RecommendationEngine(
         private const val W_THEMATIC = 0.14f
         private const val W_LANGUAGE = 0.04f
         private const val W_BEHAVIOUR = 0.16f
-        private const val W_METADATA = 0.05f
-        private const val W_NOVELTY = 0.03f
+        // The metadata and novelty weights live on [VarietyMode] instead, since those are the two
+        // the mode moves. VarietyMode.BLEND carries the values they held here (0.05f and 0.03f),
+        // so the default run is unchanged.
 
         /**
          * What cross-language lyric similarity is multiplied by.

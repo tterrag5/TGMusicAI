@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.text.selection.SelectionContainer
 import com.example.tgmusicai.BuildConfig
+import com.example.tgmusicai.data.repository.VarietyMode
 import com.example.tgmusicai.data.sponsorblock.SponsorBlockManager
 import com.example.tgmusicai.ui.theme.AppTheme
 import com.example.tgmusicai.ui.theme.ThemeMode
@@ -116,6 +117,7 @@ fun SettingsScreen(
     var listenBrainzTokenInput by remember { mutableStateOf("") }
     var listenBrainzServerInput by remember(listenBrainzServer) { mutableStateOf(listenBrainzServer) }
     val crossfadeEnabled by playerViewModel.crossfadeEnabled.collectAsState()
+    val radioVariety by playerViewModel.radioVariety.collectAsState()
     val crossfadeDurationSec by playerViewModel.crossfadeDurationSec.collectAsState()
     var draggedCrossfadeDurationSec by remember(crossfadeDurationSec) { mutableStateOf(crossfadeDurationSec.toFloat()) }
 
@@ -275,6 +277,39 @@ fun SettingsScreen(
                                     valueRange = 1f..12f,
                                     steps = 10
                                 )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                "Radio variety",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                "How far Start Radio ranges from the artists you already play.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                                VarietyMode.entries.forEachIndexed { index, mode ->
+                                    SegmentedButton(
+                                        selected = radioVariety == mode,
+                                        onClick = { playerViewModel.setRadioVariety(mode) },
+                                        shape = SegmentedButtonDefaults.itemShape(
+                                            index = index,
+                                            count = VarietyMode.entries.size,
+                                        ),
+                                    ) {
+                                        Text(mode.displayName, style = MaterialTheme.typography.labelLarge)
+                                    }
+                                }
                             }
                         }
                     }

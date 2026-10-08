@@ -10,6 +10,7 @@ import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricLine
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.VarietyMode
 import com.example.tgmusicai.data.scrobble.ListenBrainzScrobbler
 import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.playback.SleepTimerManager
@@ -134,6 +135,15 @@ class PlayerViewModel(
 
     fun setCrossfadeDurationSec(seconds: Int) {
         viewModelScope.launch { appPreferences?.setCrossfadeDurationSec(seconds) }
+    }
+
+    /** How far Start Radio may stray from what the user already plays. */
+    val radioVariety: StateFlow<VarietyMode> = appPreferences?.radioVarietyFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), VarietyMode.BLEND)
+        ?: MutableStateFlow(VarietyMode.BLEND).asStateFlow()
+
+    fun setRadioVariety(mode: VarietyMode) {
+        viewModelScope.launch { appPreferences?.setRadioVariety(mode) }
     }
 
     init {
@@ -736,11 +746,15 @@ class PlayerViewModel(
         _statusMessage.value = null
     }
 
-    /** "Start Radio": builds and plays a queue of songs related to [song] (see [MusicRepository.buildRadioQueue]). */
+    /**
+     * "Start Radio": builds and plays a queue of songs related to [song] (see
+     * [MusicRepository.buildRadioQueue]), as adventurous as the user's saved variety setting says.
+     */
     fun startRadio(song: Song) {
         val repo = repository ?: return
         viewModelScope.launch {
-            val queue = repo.buildRadioQueue(song)
+            val variety = appPreferences?.radioVarietyFlow?.first() ?: VarietyMode.BLEND
+            val queue = repo.buildRadioQueue(song, variety = variety)
             if (queue.isNotEmpty()) {
                 playQueue(queue, startIndex = 0)
                 _statusMessage.value = "Starting radio based on \"${song.title}\""

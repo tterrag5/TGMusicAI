@@ -334,14 +334,18 @@ class MusicRepository(
      * perfectly predictable. There's no genre field in the schema, so this uses producer/artist
      * overlap only, not the full producer/artist/genre similarity the original spec described.
      */
-    suspend fun buildRadioQueue(seedSong: Song, limit: Int = 20): List<Song> {
+    suspend fun buildRadioQueue(
+        seedSong: Song,
+        limit: Int = 20,
+        variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Song> {
         // The engine blends how the songs sound, what they say, and what actually gets played
         // together; the producer/artist walk below is kept as its fallback. A recommendation
         // failure must never turn Start Radio into a dead button, so anything going wrong in
         // there drops through to the original behaviour rather than propagating.
         recommendationEngine?.let { engine ->
             try {
-                val recommended = engine.recommendFor(seedSong, limit - 1)
+                val recommended = engine.recommendFor(seedSong, limit - 1, variety = variety)
                 if (recommended.isNotEmpty()) {
                     return (listOf(seedSong) + recommended).distinctBy { it.id }.take(limit)
                 }

@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.tgmusicai.data.repository.VarietyMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -80,6 +81,7 @@ class AppPreferences(private val context: Context) {
         val VOLUME_NORMALIZATION_ENABLED = booleanPreferencesKey("volume_normalization_enabled")
         val SPONSORBLOCK_ENABLED = booleanPreferencesKey("sponsorblock_enabled")
         val SPONSORBLOCK_CATEGORIES = stringPreferencesKey("sponsorblock_categories")
+        val RADIO_VARIETY = stringPreferencesKey("radio_variety")
         val SCROBBLING_ENABLED = booleanPreferencesKey("scrobbling_enabled")
         val LISTENBRAINZ_TOKEN = stringPreferencesKey("listenbrainz_token")
         val LISTENBRAINZ_SERVER = stringPreferencesKey("listenbrainz_server")
@@ -164,6 +166,24 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { preferences ->
             preferences[SPONSORBLOCK_CATEGORIES] = categories.joinToString(",")
         }
+    }
+
+    /**
+     * How far Start Radio may stray from what the user already plays.
+     *
+     * Stored by enum name rather than ordinal, so reordering [VarietyMode] cannot silently change
+     * what an existing install means. An unrecognised value reads as the default instead of
+     * throwing, which is what happens if a mode is ever renamed or removed.
+     */
+    val radioVarietyFlow: Flow<VarietyMode> = context.dataStore.data
+        .map { preferences ->
+            preferences[RADIO_VARIETY]
+                ?.let { stored -> VarietyMode.entries.firstOrNull { it.name == stored } }
+                ?: VarietyMode.BLEND
+        }
+
+    suspend fun setRadioVariety(mode: VarietyMode) {
+        context.dataStore.edit { preferences -> preferences[RADIO_VARIETY] = mode.name }
     }
 
     /**
