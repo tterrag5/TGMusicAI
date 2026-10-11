@@ -122,6 +122,18 @@ class MediaControllerManager(
         _playbackError.value = null
     }
 
+    private val _isConnected = MutableStateFlow(false)
+
+    /**
+     * Whether the controller has finished binding to the service.
+     *
+     * Binding is asynchronous, so anything that has to act the moment the app opens -- a voice
+     * intent that launched it, in particular -- arrives before there is a player to act on. Without
+     * something to wait for, the request is simply dropped on a cold start and the user watches the
+     * app open and do nothing.
+     */
+    val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+
     /**
      * SponsorBlock segments skipped during playback, as they happen.
      *
@@ -183,6 +195,7 @@ class MediaControllerManager(
                     val controllerInstance = controllerFuture.get()
                     controller = controllerInstance
                     setupPlayerListener(controllerInstance)
+                    _isConnected.value = true
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -944,6 +957,45 @@ class MediaControllerManager(
      * come from a playlist, so attribution can never be inherited by the next thing played.
      */
     private var originPlaylistId: Long? = null
+
+    /**
+     * Plays whatever best matches [query], resolving it on the service side.
+     *
+     * Hands the service a media item carrying nothing but a search query, which is the shape
+     * [PlaybackService]'s `onSetMediaItems` already answers for "play X on TGMusic" from Assistant
+     * and Android Auto: it runs the search, substitutes the real queue and starts playback. Going
+     * through that path rather than searching here is deliberate -- that resolver already walks
+     * liked songs, playlists, exact and fuzzy titles, artists and then YouTube with real stream
+     * resolution, and a second implementation on this side would immediately drift from it.
+     *
+     * Returns false when there is no controller yet, so a caller that arrived from a cold-start
+     * voice intent can retry once the service is connected rather than silently doing nothing.
+     */
+    fun playFromSearch(query: String): Boolean {
+        val player = controller ?: return false
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return false
+
+        // The queue is about to be replaced by whatever the service resolves, so the locally
+        // tracked queue state has to be dropped rather than left describing the old one.
+        queueGeneration++
+        currentSongList = emptyList()
+        _playlist.value = emptyList()
+
+        val searchItem = MediaItem.Builder()
+            .setMediaId("voice-search:$trimmed")
+            .setRequestMetadata(
+                MediaItem.RequestMetadata.Builder()
+                    .setSearchQuery(trimmed)
+                    .build()
+            )
+            .build()
+
+        player.setMediaItems(listOf(searchItem), 0, 0L)
+        player.prepare()
+        player.play()
+        return true
+    }
 
     private fun buildMediaItem(song: Song): MediaItem {
         return MediaItem.Builder()
