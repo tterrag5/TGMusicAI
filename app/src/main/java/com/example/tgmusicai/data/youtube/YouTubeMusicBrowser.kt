@@ -400,6 +400,59 @@ class YouTubeMusicBrowser(
         }
     }
 
+    /** Lyrics for one track as YouTube Music shows them: timed per line, or plain text. */
+    data class TrackLyrics(
+        /** LRC with each line's end as a trailing `<mm:ss.xx>` tag when timed; plain text otherwise. */
+        val text: String,
+        val isTimed: Boolean,
+        /** The credit YouTube Music shows under them, e.g. "Source: Musixmatch". */
+        val source: String?,
+    )
+
+    /**
+     * The lyrics YouTube Music itself shows for [videoId]: the Lyrics tab's browse id comes from
+     * `/next`, and `/browse` on it returns the lyrics. Only the Android/iOS Music clients get the
+     * timed version (`timedLyricsData`, one cue per line with start and end in ms, licensed from
+     * Musixmatch/LyricFind); the web client gets plain text for the same id, which is why the
+     * browse call names [LYRICS_CLIENT_NAME]. Null when the track has no lyrics tab.
+     *
+     * Music videos often have no tab while the official audio ("song") version does, so callers
+     * holding a video id should also try the song found by [searchSongs].
+     */
+    suspend fun fetchLyrics(videoId: String): TrackLyrics? {
+        if (videoId.isBlank()) return null
+        val next = post(
+            NEXT_URL,
+            JSONObject().apply {
+                put("context", webRemixContext())
+                put("videoId", videoId)
+            },
+            "next($videoId) for lyrics"
+        ) ?: return null
+        val browseId = lyricsBrowseId(next) ?: return null
+        val root = post(
+            BROWSE_URL,
+            JSONObject().apply {
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", LYRICS_CLIENT_NAME)
+                        put("clientVersion", LYRICS_CLIENT_VERSION)
+                        put("hl", "en")
+                        put("gl", "US")
+                    })
+                })
+                put("browseId", browseId)
+            },
+            "browse($browseId) for lyrics"
+        ) ?: return null
+        return try {
+            parseLyricsResponse(root)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Could not parse lyrics for $videoId", e)
+            null
+        }
+    }
+
     /** The current top-songs chart. Empty if charts are unavailable in the user's region. */
     suspend fun fetchTopChart(): List<YouTubeSearchResult> {
         val root = browse(BROWSE_ID_CHARTS) ?: return emptyList()
@@ -588,6 +641,86 @@ class YouTubeMusicBrowser(
 
         private const val SEARCH_URL = "https://music.youtube.com/youtubei/v1/search"
         private const val NEXT_URL = "https://music.youtube.com/youtubei/v1/next"
+
+        /**
+         * The client the lyrics browse call identifies as. Pinned on purpose: the web client gets
+         * untimed text for the same browse id, and Music clients older than 6.x are refused (400).
+         * Version as used by sydlexius/canticle and verified live on 2026-10-11.
+         */
+        const val LYRICS_CLIENT_NAME = "ANDROID_MUSIC"
+        const val LYRICS_CLIENT_VERSION = "7.03.52"
+
+        /** The Lyrics tab's browse id in a `/next` response (they start with `MPLY`). */
+        internal fun lyricsBrowseId(next: JSONObject): String? {
+            val ids = mutableListOf<String>()
+            collectStrings(next, "browseId", ids)
+            return ids.firstOrNull { it.startsWith("MPLY") }
+        }
+
+        private fun collectStrings(node: Any?, key: String, out: MutableList<String>) {
+            when (node) {
+                is JSONObject -> {
+                    (node.opt(key) as? String)?.let { out.add(it) }
+                    val keys = node.keys()
+                    while (keys.hasNext()) collectStrings(node.opt(keys.next()), key, out)
+                }
+                is org.json.JSONArray -> for (i in 0 until node.length()) collectStrings(node.opt(i), key, out)
+                else -> Unit
+            }
+        }
+
+        /**
+         * Reads a lyrics browse response: `timedLyricsData` (each entry `lyricLine` plus
+         * `cueRange.startTimeMilliseconds`/`endTimeMilliseconds`) into LRC with line-end tags, or
+         * the plain `description` text when that is all there is.
+         */
+        internal fun parseLyricsResponse(root: JSONObject): TrackLyrics? {
+            val sources = mutableListOf<String>()
+            val footers = mutableListOf<JSONObject>()
+            collectRenderers(root, "sourceMessage", footers)
+            footers.firstOrNull()?.let { runsText(it).takeIf { t -> t.isNotBlank() }?.let(sources::add) }
+            if (sources.isEmpty()) collectStrings(root, "sourceMessage", sources)
+            val source = sources.firstOrNull()
+
+            val timed = findArray(root, "timedLyricsData")
+            if (timed != null && timed.length() > 0) {
+                val out = StringBuilder()
+                for (i in 0 until timed.length()) {
+                    val cue = timed.optJSONObject(i) ?: continue
+                    val text = cue.optString("lyricLine").trim()
+                    val range = cue.optJSONObject("cueRange") ?: continue
+                    val start = range.optString("startTimeMilliseconds").toLongOrNull() ?: continue
+                    val end = range.optString("endTimeMilliseconds").toLongOrNull()
+                    if (text.isEmpty()) continue
+                    out.append(com.example.tgmusicai.data.lyrics.LrcFormat.lineTag(start)).append(text)
+                    if (end != null && end > start) out.append(com.example.tgmusicai.data.lyrics.LrcFormat.wordTag(end))
+                    out.append('\n')
+                }
+                if (out.isNotEmpty()) return TrackLyrics(out.toString().trimEnd(), true, source)
+            }
+
+            val shelves = mutableListOf<JSONObject>()
+            collectRenderers(root, "musicDescriptionShelfRenderer", shelves)
+            val plain = shelves.firstNotNullOfOrNull { runsText(it.optJSONObject("description")).takeIf { t -> t.isNotBlank() } }
+            if (plain != null) {
+                val footer = shelves.firstNotNullOfOrNull { runsText(it.optJSONObject("footer")).takeIf { t -> t.isNotBlank() } }
+                return TrackLyrics(plain.trim(), false, source ?: footer)
+            }
+            return null
+        }
+
+        private fun findArray(node: Any?, key: String): org.json.JSONArray? {
+            when (node) {
+                is JSONObject -> {
+                    (node.opt(key) as? org.json.JSONArray)?.let { return it }
+                    val keys = node.keys()
+                    while (keys.hasNext()) findArray(node.opt(keys.next()), key)?.let { return it }
+                }
+                is org.json.JSONArray -> for (i in 0 until node.length()) findArray(node.opt(i), key)?.let { return it }
+                else -> Unit
+            }
+            return null
+        }
 
         /** Prefix that turns a video id into the id of YouTube Music's radio seeded from it. */
         const val RADIO_PLAYLIST_PREFIX = "RDAMVM"

@@ -279,6 +279,18 @@ class PlayerViewModel(
                         ) {
                             fetchLyrics(song, isAutomatic = true)
                         }
+                        // Stored but unsynced (fetched before the synced sources existed): look
+                        // once per session for a synced version and swap it in quietly.
+                        if (clean != null && lyricsRepository != null && !LyricsRepository.isSynced(clean)) {
+                            viewModelScope.launch {
+                                val upgraded = lyricsRepository.fetchAndSaveLyrics(song)
+                                if (LyricsRepository.isSynced(upgraded) &&
+                                    currentSong.value?.let(::lyricsLookupKey) == lyricsLookupKey(song)
+                                ) {
+                                    publishLyricsFor(song, upgraded)
+                                }
+                            }
+                        }
                         if (repository != null) {
                             _isCurrentSongLiked.value = repository.isSongLikedSync(song.id)
                         }
