@@ -796,6 +796,25 @@ class PlayerViewModel(
         }
     }
 
+    /**
+     * "Start Radio" from several songs: every one of [songs] is a seed (see
+     * [MusicRepository.buildRadioQueue]), up to [MusicRepository.MAX_RADIO_SEEDS].
+     */
+    fun startRadio(songs: List<Song>) {
+        val repo = repository ?: return
+        if (songs.isEmpty()) return
+        if (songs.size == 1) return startRadio(songs.first())
+        viewModelScope.launch {
+            val variety = appPreferences?.radioVarietyFlow?.first() ?: VarietyMode.BLEND
+            val queue = repo.buildRadioQueue(songs, variety = variety)
+            if (queue.isNotEmpty()) {
+                playQueue(queue, startIndex = 0)
+                val seedCount = minOf(songs.distinctBy { it.id }.size, MusicRepository.MAX_RADIO_SEEDS)
+                _statusMessage.value = "Starting radio based on $seedCount songs"
+            }
+        }
+    }
+
     fun togglePlayPause() {
         mediaControllerManager.togglePlayPause()
     }

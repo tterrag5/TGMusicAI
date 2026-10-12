@@ -107,6 +107,31 @@ class RecommendationEngine(
     }
 
     /**
+     * Songs related to several [seeds] at once, for a radio built from a hand-picked set.
+     *
+     * Not the same as scoring against all seeds together. [scoreAgainstSeeds] keeps each
+     * candidate's best match, so the queue collapses onto whichever seed has the strongest
+     * neighbours and the others barely appear. Here each seed is scored on its own and the
+     * per-seed rankings are taken in turn ([blendPerSeed]), so every seed contributes. None of
+     * the seeds is included in the result.
+     */
+    suspend fun recommendForSeeds(
+        seeds: List<Song>,
+        limit: Int = 20,
+        downloadedOnly: Boolean = false,
+        variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Song> = withContext(Dispatchers.IO) {
+        val distinctSeeds = seeds.distinctBy { it.id }
+        if (distinctSeeds.isEmpty()) return@withContext emptyList()
+        val seedIds = distinctSeeds.map { it.id }.toSet()
+        val candidates = loadCandidates(downloadedOnly).filter { it.id !in seedIds }
+        if (candidates.isEmpty()) return@withContext emptyList()
+
+        val perSeed = distinctSeeds.map { seed -> scoreAgainstSeeds(listOf(seed), candidates, variety) }
+        diversify(blendPerSeed(perSeed), limit, variety.maxPerArtist)
+    }
+
+    /**
      * Recommendations with no particular seed, for a "Made for you" style row.
      *
      * Seeds are the user's most recently played songs rather than their most played: recent
@@ -447,6 +472,27 @@ class RecommendationEngine(
          * back rather than dropped, which keeps a single-artist library from returning a
          * near-empty queue.
          */
+        /**
+         * Merges per-seed rankings by taking each seed's next-best song in turn, skipping songs
+         * already taken. The result carries descending synthetic scores so [diversify] keeps this
+         * order.
+         */
+        internal fun blendPerSeed(perSeed: List<List<Scored>>): List<Scored> {
+            val rankings = perSeed.map { list ->
+                list.sortedWith(compareByDescending<Scored> { it.score }.thenBy { it.song.id })
+            }
+            val taken = mutableSetOf<Long>()
+            val blended = mutableListOf<Song>()
+            val depth = rankings.maxOfOrNull { it.size } ?: 0
+            for (rank in 0 until depth) {
+                for (ranking in rankings) {
+                    val song = ranking.getOrNull(rank)?.song ?: continue
+                    if (taken.add(song.id)) blended += song
+                }
+            }
+            return blended.mapIndexed { index, song -> Scored(song, -index.toFloat()) }
+        }
+
         internal fun diversify(
             scored: List<Scored>,
             limit: Int,

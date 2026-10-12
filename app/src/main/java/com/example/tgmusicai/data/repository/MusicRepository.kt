@@ -382,6 +382,40 @@ class MusicRepository(
         return (listOf(seedSong) + pool).distinctBy { it.id }.take(limit)
     }
 
+    /**
+     * "Start Radio" from several songs at once. With one seed this is [buildRadioQueue]. With
+     * more, the queue opens on the first seed, the other seeds are spread through it, and every
+     * seed contributes its own related songs ([RecommendationEngine.recommendForSeeds]). If the
+     * engine has nothing, each seed's single-seed radio is merged in turn instead.
+     */
+    suspend fun buildRadioQueue(
+        seeds: List<Song>,
+        limit: Int = 20,
+        variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Song> {
+        val distinctSeeds = seeds.distinctBy { it.id }.take(MAX_RADIO_SEEDS)
+        if (distinctSeeds.isEmpty()) return emptyList()
+        if (distinctSeeds.size == 1) return buildRadioQueue(distinctSeeds.first(), limit, variety)
+
+        val related = recommendationEngine?.let { engine ->
+            try {
+                engine.recommendForSeeds(distinctSeeds, limit - distinctSeeds.size, variety = variety)
+            } catch (e: Throwable) {
+                Log.e(TAG, "Recommendation engine failed for a multi-seed radio, using per-seed fallback", e)
+                null
+            }
+        }.orEmpty().ifEmpty {
+            val seedIds = distinctSeeds.map { it.id }.toSet()
+            val perSeed = distinctSeeds.map { seed ->
+                buildRadioQueue(seed, limit, variety).filter { it.id !in seedIds }
+            }
+            (0 until (perSeed.maxOfOrNull { it.size } ?: 0))
+                .flatMap { rank -> perSeed.mapNotNull { it.getOrNull(rank) } }
+                .distinctBy { it.id }
+        }
+        return spreadSeeds(distinctSeeds, related, limit)
+    }
+
     /** Songs with a play count of zero, backing the "Unplayed" smart playlist. */
     fun getUnplayedSongs(): Flow<List<Song>> {
         return songDao.getUnplayedSongs()
@@ -640,6 +674,39 @@ class MusicRepository(
     }
 
     companion object {
+        /**
+         * Seeds a multi-seed radio uses. Each seed is scored against the whole library, so the
+         * cost grows with the count, and past this many the radio stops sounding like any of them.
+         */
+        const val MAX_RADIO_SEEDS = 10
+
+        /**
+         * A radio queue of at most [limit]: the first seed, then [related] with the remaining
+         * seeds placed at even intervals, so the picked songs are heard through the radio rather
+         * than all at the start. Songs appear once; a seed also found in [related] keeps its
+         * seed position.
+         */
+        fun spreadSeeds(seeds: List<Song>, related: List<Song>, limit: Int): List<Song> {
+            if (limit <= 0 || seeds.isEmpty()) return emptyList()
+            val seedIds = seeds.map { it.id }.toSet()
+            val rest = related.filter { it.id !in seedIds }.distinctBy { it.id }
+                .take((limit - seeds.size).coerceAtLeast(0))
+            val laterSeeds = seeds.drop(1)
+            if (laterSeeds.isEmpty()) return (listOf(seeds.first()) + rest).take(limit)
+
+            // One gap per later seed, so seed k lands after (k * rest.size / count) related songs.
+            val queue = mutableListOf(seeds.first())
+            var consumed = 0
+            laterSeeds.forEachIndexed { index, seed ->
+                val until = (index + 1) * rest.size / (laterSeeds.size + 1)
+                queue += rest.subList(consumed, until)
+                consumed = until
+                queue += seed
+            }
+            queue += rest.subList(consumed, rest.size)
+            return queue.take(limit)
+        }
+
         /** Display names of the app's auto-generated smart playlists; also used as DB row names. */
         const val LIKED_MUSIC_NAME = "Liked Music"
         const val TOP_50_MOST_PLAYED_NAME = "Top 50 Most Played"

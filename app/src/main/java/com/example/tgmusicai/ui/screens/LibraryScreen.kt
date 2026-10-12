@@ -222,10 +222,12 @@ fun LibraryScreen(
                                     }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Start Radio (from first selected)") },
+                                    text = { Text("Start Radio from selection") },
                                     onClick = {
                                         showBulkMoreMenu = false
-                                        songs.firstOrNull { it.id in selectedSongIds }?.let { playerViewModel.startRadio(it) }
+                                        // In the order they were tapped: the first one tapped opens the radio.
+                                        val byId = songs.associateBy { it.id }
+                                        playerViewModel.startRadio(selectedSongIds.mapNotNull { byId[it] })
                                         libraryViewModel.clearSelection()
                                     }
                                 )
