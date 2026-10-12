@@ -116,6 +116,8 @@ fun SettingsScreen(
     val scrobbleConnectionStatus by playerViewModel.scrobbleConnectionStatus.collectAsState()
     val isConnectingScrobbler by playerViewModel.isConnectingScrobbler.collectAsState()
     var listenBrainzTokenInput by remember { mutableStateOf("") }
+    val isYouTubeSignedIn by playerViewModel.isYouTubeSignedIn.collectAsState()
+    val youtubeHistoryEnabled by playerViewModel.youtubeHistoryEnabled.collectAsState()
     val hasLastFmApiKey by playerViewModel.hasLastFmApiKey.collectAsState()
     val lastFmRecommendationsEnabled by playerViewModel.lastFmRecommendationsEnabled.collectAsState()
     val isCheckingLastFmKey by playerViewModel.isCheckingLastFmKey.collectAsState()
@@ -547,6 +549,26 @@ fun SettingsScreen(
                                     Text(if (isConnectingScrobbler) "Checking..." else "Connect")
                                 }
                             }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            SettingsToggleContent(
+                                title = "Add to YouTube history",
+                                subtitle = if (isYouTubeSignedIn) {
+                                    "Add YouTube songs you play here to your YouTube Music history."
+                                } else {
+                                    "Sign in to YouTube (Import from YouTube) to use this."
+                                },
+                                checked = youtubeHistoryEnabled && isYouTubeSignedIn,
+                                onCheckedChange = { enabled ->
+                                    if (isYouTubeSignedIn) playerViewModel.setYouTubeHistoryEnabled(enabled)
+                                }
+                            )
                         }
                     }
                 }

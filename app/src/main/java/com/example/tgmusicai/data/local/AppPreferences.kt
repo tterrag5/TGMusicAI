@@ -87,6 +87,7 @@ class AppPreferences(private val context: Context) {
         val LISTENBRAINZ_TOKEN = stringPreferencesKey("listenbrainz_token")
         val LISTENBRAINZ_SERVER = stringPreferencesKey("listenbrainz_server")
         val LISTENBRAINZ_USERNAME = stringPreferencesKey("listenbrainz_username")
+        val YOUTUBE_HISTORY_ENABLED = booleanPreferencesKey("youtube_history_enabled")
         val LASTFM_API_KEY = stringPreferencesKey("lastfm_api_key")
         val LASTFM_RECOMMENDATIONS_ENABLED = booleanPreferencesKey("lastfm_recommendations_enabled")
     }
@@ -137,6 +138,17 @@ class AppPreferences(private val context: Context) {
             preferences.remove(LISTENBRAINZ_USERNAME)
             preferences[SCROBBLING_ENABLED] = false
         }
+    }
+
+    /**
+     * Whether cloud tracks played here are added to the signed-in account's YouTube Music
+     * history. Off by default: it writes to the user's real account.
+     */
+    val youtubeHistoryEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[YOUTUBE_HISTORY_ENABLED] ?: false }
+
+    suspend fun setYouTubeHistoryEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[YOUTUBE_HISTORY_ENABLED] = enabled }
     }
 
     /**

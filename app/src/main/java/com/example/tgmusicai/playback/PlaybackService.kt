@@ -158,6 +158,16 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var volumeNormalizationEnabled: Boolean = true
 
+    /** Whether plays of cloud tracks are added to the user's YouTube history (opt-in). */
+    @Volatile
+    private var youtubeHistoryEnabled: Boolean = false
+
+    private val youtubeHistoryReporter by lazy {
+        com.example.tgmusicai.data.youtube.YouTubeHistoryReporter(
+            InnerTubeCookieManager(AppPreferences(applicationContext))
+        )
+    }
+
     /** Crossfade settings, mirrored for the playback ticker, which cannot suspend on DataStore. */
     @Volatile
     private var crossfadeEnabled: Boolean = false
@@ -456,6 +466,10 @@ class PlaybackService : MediaLibraryService() {
                 applyReplayGain(player.currentMediaItem)
                 attachLoudnessEnhancer(player.audioSessionId)
             }
+        }
+
+        serviceScope.launch(Dispatchers.Main) {
+            AppPreferences(applicationContext).youtubeHistoryEnabledFlow.collect { youtubeHistoryEnabled = it }
         }
 
         // Crossfade settings. Turning it off mid-fade lets the fade already running finish.
@@ -1187,6 +1201,11 @@ class PlaybackService : MediaLibraryService() {
 
     private fun recordPlay() {
         if (trackedMediaId == null) return
+        // Same threshold as a counted play (30s or half the track), once per play, cloud only.
+        val videoId = trackedYoutubeId?.takeIf { it.isNotBlank() }
+        if (youtubeHistoryEnabled && videoId != null) {
+            serviceScope.launch(Dispatchers.IO) { youtubeHistoryReporter.report(videoId) }
+        }
         serviceScope.launch(Dispatchers.IO) {
             val songId = resolveTrackedSongId() ?: return@launch
             trackedSongId = songId

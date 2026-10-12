@@ -432,6 +432,20 @@ class PlayerViewModel(
         }
     }
 
+    /** Whether a YouTube Music session is stored (signed in via Import from YouTube). */
+    val isYouTubeSignedIn: StateFlow<Boolean> = appPreferences?.youtubeMusicSapisidFlow
+        ?.map { !it.isNullOrBlank() }
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    val youtubeHistoryEnabled: StateFlow<Boolean> = appPreferences?.youtubeHistoryEnabledFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    fun setYouTubeHistoryEnabled(enabled: Boolean) {
+        viewModelScope.launch { appPreferences?.setYouTubeHistoryEnabled(enabled) }
+    }
+
     /** Whether a Last.fm key is stored (the key itself is never shown back). */
     val hasLastFmApiKey: StateFlow<Boolean> = appPreferences?.lastFmApiKeyFlow
         ?.map { it != null }
