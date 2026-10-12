@@ -416,6 +416,35 @@ class MusicRepository(
         return spreadSeeds(distinctSeeds, related, limit)
     }
 
+    /**
+     * Smart Shuffle for a playlist: [playlistSongs] shuffled, with a related library track after
+     * every few of them ([SmartShuffle]). Related tracks are scored against up to
+     * [MAX_RADIO_SEEDS] songs sampled from the playlist, so they follow its overall feel. If the
+     * engine has nothing, this is a plain shuffle.
+     */
+    suspend fun buildSmartShuffleQueue(
+        playlistSongs: List<Song>,
+        variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Song> {
+        val shuffled = playlistSongs.distinctBy { it.id }.shuffled()
+        if (shuffled.isEmpty()) return emptyList()
+        val wanted = SmartShuffle.recommendationsWanted(shuffled.size)
+        val related = recommendationEngine?.let { engine ->
+            try {
+                engine.recommendForSeeds(
+                    shuffled.take(MAX_RADIO_SEEDS),
+                    // Over-asked: anything already in the playlist is dropped by the interleave.
+                    limit = wanted + shuffled.size,
+                    variety = variety
+                )
+            } catch (e: Throwable) {
+                Log.e(TAG, "Recommendation engine failed for Smart Shuffle, playing a plain shuffle", e)
+                null
+            }
+        }.orEmpty()
+        return SmartShuffle.interleave(shuffled, related) { it.id }
+    }
+
     /** Songs with a play count of zero, backing the "Unplayed" smart playlist. */
     fun getUnplayedSongs(): Flow<List<Song>> {
         return songDao.getUnplayedSongs()

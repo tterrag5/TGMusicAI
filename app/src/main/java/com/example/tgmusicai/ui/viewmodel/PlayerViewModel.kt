@@ -867,6 +867,23 @@ class PlayerViewModel(
         }
     }
 
+    /**
+     * Plays [songs] (a playlist) with Smart Shuffle: shuffled, with a related track from the
+     * library after every few playlist tracks. See [MusicRepository.buildSmartShuffleQueue].
+     */
+    fun smartShuffle(songs: List<Song>, fromPlaylistId: Long? = null) {
+        val repo = repository ?: return
+        if (songs.isEmpty()) return
+        viewModelScope.launch {
+            val variety = appPreferences?.radioVarietyFlow?.first() ?: VarietyMode.BLEND
+            val queue = repo.buildSmartShuffleQueue(songs, variety)
+            if (queue.isEmpty()) return@launch
+            playQueue(queue, startIndex = 0, fromPlaylistId = fromPlaylistId)
+            val added = queue.size - songs.distinctBy { it.id }.size
+            _statusMessage.value = if (added > 0) "Smart Shuffle: $added related songs mixed in" else "Shuffling"
+        }
+    }
+
     fun togglePlayPause() {
         mediaControllerManager.togglePlayPause()
     }
