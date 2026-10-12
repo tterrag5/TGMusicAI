@@ -548,17 +548,6 @@ class PlaybackService : MediaLibraryService() {
         private const val YOUTUBE_FALLBACK_SEARCH_CANDIDATES = 6
         private const val YOUTUBE_FALLBACK_RESOLVE_TARGET = 3
 
-        /** Random on-device tracks one autoplay queue extension appends. */
-        private const val AUTOPLAY_LOCAL_COUNT = 3
-
-        /**
-         * Recommended cloud tracks one autoplay queue extension appends. Deliberately fewer than
-         * the local half: each one costs a stream resolution, and a queue extension that keeps the
-         * user in music they own reads as their library continuing rather than as the app wandering
-         * off into YouTube.
-         */
-        private const val AUTOPLAY_CLOUD_COUNT = 2
-
         /**
          * How many recommendations to consider per track actually wanted. Some fraction of any
          * batch will not resolve, and over-fetching from an already-cached list costs nothing.
@@ -566,11 +555,12 @@ class PlaybackService : MediaLibraryService() {
         private const val RECOMMENDATION_OVERFETCH = 4
 
         /**
-         * Ceiling on the whole recommendation fetch-and-resolve pass. It runs when the last track
-         * in the queue *starts*, so there are minutes of slack -- but the pass must still end on
-         * its own rather than hold a coroutine open on a network that never answers.
+         * Ceiling on the whole recommendation fetch-and-resolve pass. It runs with at least a few
+         * tracks still queued ahead, so there is slack -- but the pass must still end on its own
+         * rather than hold a coroutine open on a network that never answers. Tracks resolved
+         * before the ceiling are kept.
          */
-        private const val RECOMMENDATION_RESOLVE_TIMEOUT_MS = 30_000L
+        private const val RECOMMENDATION_RESOLVE_TIMEOUT_MS = 60_000L
 
         // Automotive media tree category IDs (children of ROOT_ID, surfaced via onGetChildren).
         const val ROOT_ID = "root"
@@ -685,46 +675,62 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
-    // Guards maybeExtendQueueForAutoplay against re-triggering for the same "now playing the
-    // last item" position on every transition callback for that same item.
+    // One top-up attempt per "now playing" position: a top-up that came back short (offline, a
+    // small library) is not retried on every callback for the same item, only on the next one.
     private var lastAutoExtendedAtIndex = -1
+    private var autoplayTopUpJob: Job? = null
 
     /**
-     * Appends a few songs to the live queue as soon as playback reaches the current last item,
-     * provided repeat is off -- so the queue never actually runs out, the new songs are visible
-     * and skippable in "Up Next" (they are really appended to the player's timeline, not swapped
-     * in reactively after a stop), and nothing audibly interrupts playback.
+     * Keeps a reserve of upcoming tracks in the live queue (see [AutoplayPlanner]): when fewer than
+     * [AutoplayPlanner.MIN_UPCOMING] follow the playing track and repeat is off, the queue is
+     * topped back up to [AutoplayPlanner.TARGET_UPCOMING]. The added tracks are really appended to
+     * the player's timeline, so they are visible and skippable in Up Next.
      *
      * The songs are a mix: recommendations from YouTube Music chosen around what the user
-     * actually plays, plus random tracks already on the device. Both halves are requested, and
-     * whatever comes back is interleaved so the run does not read as a block of cloud followed by
-     * a block of local. The local half is what makes this work on a plane -- a failed or empty
-     * recommendation fetch must never leave the queue un-extended, which is why local tracks are
-     * asked for outright rather than only after the network has been given its chance.
+     * actually plays, plus random tracks already on the device, spread through each other. The
+     * local half is what makes this work on a plane -- a failed or empty recommendation fetch must
+     * never leave the queue un-extended, which is why local tracks are asked for outright rather
+     * than only after the network has been given its chance, and why cloud fills in for a device
+     * with too few tracks of its own.
      */
     private fun maybeExtendQueueForAutoplay(exoPlayer: ExoPlayer) {
         if (exoPlayer.repeatMode != Player.REPEAT_MODE_OFF) return
-        if (exoPlayer.hasNextMediaItem()) return
         val currentIndex = exoPlayer.currentMediaItemIndex
-        if (currentIndex < 0 || currentIndex == lastAutoExtendedAtIndex) return
+        if (currentIndex < 0) return
+        val need = AutoplayPlanner.topUpCount(
+            AutoplayPlanner.upcoming(exoPlayer.mediaItemCount, currentIndex)
+        )
+        if (need <= 0) return
+        if (currentIndex == lastAutoExtendedAtIndex) return
+        if (autoplayTopUpJob?.isActive == true) return
         lastAutoExtendedAtIndex = currentIndex
 
         val queued = (0 until exoPlayer.mediaItemCount).map { exoPlayer.getMediaItemAt(it) }
         val existingIds = queued.map { it.mediaId }.toSet()
         val existingVideoIds = queued.mapNotNull { SongMediaExtras.youtubeId(it.mediaMetadata.extras) }.toSet()
-        val seedVideoId = SongMediaExtras.youtubeId(exoPlayer.currentMediaItem?.mediaMetadata?.extras)
-        serviceScope.launch {
-            val local = database.songDao().getRandomDownloadedSongs(AUTOPLAY_LOCAL_COUNT)
+        // The radio follows on from the last track in the queue, since that is what the added
+        // tracks will come after.
+        val seedVideoId = queued.asReversed().firstNotNullOfOrNull { SongMediaExtras.youtubeId(it.mediaMetadata.extras) }
+        autoplayTopUpJob = serviceScope.launch {
+            val local = database.songDao().getRandomDownloadedSongs(need)
                 .filter { it.mediaUri !in existingIds }
-            val cloud = resolvedRecommendations(AUTOPLAY_CLOUD_COUNT, existingIds, existingVideoIds, seedVideoId)
-            val candidates = interleave(cloud, local)
+            val cloud = resolvedRecommendations(
+                AutoplayPlanner.cloudCount(need, local.size),
+                existingIds,
+                existingVideoIds,
+                seedVideoId
+            )
+            val candidates = AutoplayPlanner.mix(cloud, local, need)
             if (candidates.isEmpty()) return@launch
             withContext(Dispatchers.Main) {
+                // Repeat may have been switched on while this ran; appending then would be noise.
+                if (exoPlayer.repeatMode != Player.REPEAT_MODE_OFF) return@withContext
                 val items = candidates.map { song -> autoplayMediaItem(song) }
                 exoPlayer.addMediaItems(items)
                 android.util.Log.d(
                     "PlaybackService",
-                    "Auto-extended queue with ${items.size} song(s): ${cloud.size} recommended, ${local.size} local"
+                    "Autoplay topped up the queue with ${items.size} song(s): " +
+                        "${candidates.count { it in cloud }} recommended, ${candidates.count { it in local }} local"
                 )
             }
         }
@@ -795,6 +801,8 @@ class PlaybackService : MediaLibraryService() {
         seedVideoId: String? = null
     ): List<Song> {
         if (limit <= 0 || downloadedOnly) return emptyList()
+        // Outside the timeout, so a pass that runs out of time still keeps what it resolved.
+        val resolved = mutableListOf<Song>()
         return try {
             withTimeoutOrNull(RECOMMENDATION_RESOLVE_TIMEOUT_MS) {
                 val radio = seedVideoId?.let {
@@ -803,7 +811,6 @@ class PlaybackService : MediaLibraryService() {
                 val tracks = cloudRecommendations.recommendedTracks(
                     limit = limit * RECOMMENDATION_OVERFETCH
                 )
-                val resolved = mutableListOf<Song>()
                 // The taste list is shuffled so a queue that runs dry three times in one evening
                 // does not append the same few tracks each time; the cached list barely changes.
                 // The radio is not: its order is the point, and its seed changes every time.
@@ -816,11 +823,11 @@ class PlaybackService : MediaLibraryService() {
                     if (resolved.any { it.mediaUri == song.mediaUri }) continue
                     resolved += song
                 }
-                resolved
-            }.orEmpty()
+            }
+            resolved.toList()
         } catch (e: Throwable) {
             android.util.Log.w("PlaybackService", "Could not resolve autoplay recommendations", e)
-            emptyList()
+            resolved.toList()
         }
     }
 

@@ -572,8 +572,8 @@ class MediaControllerManager(
     }
 
     // ---------------------------------------------------------------------------------------------
-    // The playback window: two tracks back, the playing track, two tracks ahead. Only those five
-    // are resolved and only those five are held in the audio cache.
+    // The playback window: two tracks back, the playing track, three tracks ahead. Only those six
+    // are resolved and only those six are held in the audio cache.
     //
     // Deliberately a window and not the whole queue. Resolving every track of a cloud queue up
     // front fanned out one coroutine per item, and because they acquired their permits roughly in
@@ -603,12 +603,13 @@ class MediaControllerManager(
     private fun windowKey(song: Song): String = song.youtubeId?.takeIf { it.isNotBlank() } ?: song.mediaUri
 
     /**
-     * Queue positions the window covers, ordered by how soon each is needed: the playing track
-     * first, then ahead, then behind. The resolver has only a couple of permits, so the order is
+     * Queue positions the window covers -- the playing track, three ahead, two behind -- ordered
+     * by how soon each is needed: the playing track first, then ahead, then behind. Three ahead
+     * means even a quick double skip lands on a track that is already resolved. The resolver has only a couple of permits, so the order is
      * what decides which track gets a permit first -- the one being waited on, always.
      */
     private fun windowIndices(current: Int, size: Int): List<Int> =
-        listOf(0, 1, 2, -1, -2)
+        listOf(0, 1, 2, 3, -1, -2)
             .map { current + it }
             .filter { it in 0 until size }
             .distinct()
@@ -707,7 +708,7 @@ class MediaControllerManager(
     // the same shared Piped/Invidious mirror the instant "Play All" is tapped on an all-cloud
     // playlist (e.g. Cloud Nine) looks a lot like hostile traffic to that mirror and was observed
     // live to trigger a wall of 401/403 responses across every candidate at once -- a self-inflicted
-    // rate-limit, not a real outage. A window of five tracks is small enough that three at a time
+    // rate-limit, not a real outage. A window of six tracks is small enough that three at a time
     // still fills it promptly while staying well short of that burst.
     private val resolveSemaphore = Semaphore(3)
 
