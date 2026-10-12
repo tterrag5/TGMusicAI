@@ -116,6 +116,11 @@ fun SettingsScreen(
     val scrobbleConnectionStatus by playerViewModel.scrobbleConnectionStatus.collectAsState()
     val isConnectingScrobbler by playerViewModel.isConnectingScrobbler.collectAsState()
     var listenBrainzTokenInput by remember { mutableStateOf("") }
+    val hasLastFmApiKey by playerViewModel.hasLastFmApiKey.collectAsState()
+    val lastFmRecommendationsEnabled by playerViewModel.lastFmRecommendationsEnabled.collectAsState()
+    val isCheckingLastFmKey by playerViewModel.isCheckingLastFmKey.collectAsState()
+    val lastFmKeyStatus by playerViewModel.lastFmKeyStatus.collectAsState()
+    var lastFmKeyInput by remember { mutableStateOf("") }
     var listenBrainzServerInput by remember(listenBrainzServer) { mutableStateOf(listenBrainzServer) }
     val crossfadeEnabled by playerViewModel.crossfadeEnabled.collectAsState()
     val radioVariety by playerViewModel.radioVariety.collectAsState()
@@ -310,6 +315,56 @@ fun SettingsScreen(
                                     ) {
                                         Text(mode.displayName, style = MaterialTheme.typography.labelLarge)
                                     }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            if (hasLastFmApiKey) {
+                                SettingsToggleContent(
+                                    title = "Last.fm recommendations",
+                                    subtitle = "Add tracks Last.fm lists as similar to your recent listening to recommendations and autoplay.",
+                                    checked = lastFmRecommendationsEnabled,
+                                    onCheckedChange = playerViewModel::setLastFmRecommendationsEnabled
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TextButton(onClick = playerViewModel::removeLastFmKey) {
+                                    Text("Remove key")
+                                }
+                            } else {
+                                Text(
+                                    "Last.fm recommendations",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    "Uses your own Last.fm API key. Sends the artist and title of recently played songs to Last.fm.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = lastFmKeyInput,
+                                    onValueChange = { lastFmKeyInput = it },
+                                    label = { Text("API key") },
+                                    supportingText = lastFmKeyStatus?.let { status -> { Text(status) } },
+                                    isError = lastFmKeyStatus != null,
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TextButton(
+                                    enabled = lastFmKeyInput.isNotBlank() && !isCheckingLastFmKey,
+                                    onClick = {
+                                        playerViewModel.connectLastFm(lastFmKeyInput)
+                                    }
+                                ) {
+                                    Text(if (isCheckingLastFmKey) "Checking..." else "Save key")
                                 }
                             }
                         }

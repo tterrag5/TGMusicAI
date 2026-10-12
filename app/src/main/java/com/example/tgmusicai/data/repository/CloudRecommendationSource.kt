@@ -2,6 +2,8 @@ package com.example.tgmusicai.data.repository
 
 import android.util.Log
 import com.example.tgmusicai.data.local.dao.SongDao
+import com.example.tgmusicai.data.scrobble.LastFmSimilarClient
+import com.example.tgmusicai.data.scrobble.LastFmTrack
 import com.example.tgmusicai.data.youtube.YouTubeMusicBrowser
 import com.example.tgmusicai.data.youtube.YouTubeSearchResult
 import kotlinx.coroutines.Dispatchers
@@ -35,11 +37,17 @@ class CloudRecommendationSource(
     private val browser: YouTubeMusicBrowser,
     private val songDao: SongDao,
     private val recommendationEngine: RecommendationEngine? = null,
+    private val lastFm: LastFmSimilarClient? = null,
+    /** The user's own Last.fm key when Last.fm recommendations are on, otherwise null. */
+    private val lastFmApiKey: suspend () -> String? = { null },
 ) {
 
     private val cacheLock = Mutex()
     private var cached: List<YouTubeSearchResult> = emptyList()
     private var cachedAtMs: Long = 0L
+    // The Last.fm key the cached list was built with, so turning Last.fm on or off in Settings
+    // takes effect on the next request instead of after the cache expires.
+    private var cachedWithLastFmKey: String? = null
 
     // The last radio fetched, keyed by its seed. Autoplay can ask twice for the same seed (queue
     // extension, then the end-of-queue fallback), and a radio is ~50 tracks in one response.
@@ -60,15 +68,21 @@ class CloudRecommendationSource(
 
         cacheLock.withLock {
             val age = System.currentTimeMillis() - cachedAtMs
-            if (!forceRefresh && cached.isNotEmpty() && age < CACHE_TTL_MS) {
+            val currentLastFmKey = if (lastFm == null) null else try { lastFmApiKey() } catch (e: Throwable) { null }
+            if (!forceRefresh && cached.isNotEmpty() && age < CACHE_TTL_MS &&
+                currentLastFmKey == cachedWithLastFmKey
+            ) {
                 return@withContext cached.take(limit)
             }
 
             val fetched = try {
                 val seeded = tasteSeededTracks()
+                // Last.fm's picks lead when the user has turned them on: they come from what
+                // listeners of the seed actually play, a different signal from artist pages.
+                val lastFmPicks = lastFmTracks()
                 // The generic feed both fills the list out when the seeded lookups came back thin
                 // and stands in entirely when they came back empty.
-                val combined = (seeded + homeFeedTracks()).distinctBy { it.videoId }
+                val combined = (lastFmPicks + seeded + homeFeedTracks()).distinctBy { it.videoId }
                 excludeOwned(combined)
             } catch (e: Throwable) {
                 Log.e(TAG, "Could not build cloud recommendations", e)
@@ -78,6 +92,7 @@ class CloudRecommendationSource(
             if (fetched.isNotEmpty()) {
                 cached = fetched
                 cachedAtMs = System.currentTimeMillis()
+                cachedWithLastFmKey = currentLastFmKey
             }
             // On a failed refresh the previous list is better than nothing, and it is already
             // filtered, so it is served again rather than blanking the row.
@@ -150,6 +165,56 @@ class CloudRecommendationSource(
     }
 
     /**
+     * Tracks Last.fm lists as similar to the user's recent listening, each found on YouTube Music
+     * by name. Empty unless the user has supplied a Last.fm key and turned this on.
+     *
+     * Per seed song, `track.getSimilar` first; when Last.fm knows nothing similar to that track,
+     * the closest similar artist's top tracks stand in. Seeds are taken in turn so one seed cannot
+     * fill the list, and the YouTube lookups are capped because each one is a request.
+     */
+    private suspend fun lastFmTracks(): List<YouTubeSearchResult> {
+        val client = lastFm ?: return emptyList()
+        val apiKey = try { lastFmApiKey() } catch (e: Throwable) { null }
+        if (apiKey.isNullOrBlank()) return emptyList()
+
+        val seeds = try {
+            recommendationEngine?.tasteSeeds(SEED_SONG_COUNT).orEmpty()
+        } catch (e: Throwable) {
+            Log.e(TAG, "Could not read taste seeds for Last.fm", e)
+            emptyList()
+        }
+            .filter { it.artist.isNotBlank() && !it.artist.equals("<unknown>", ignoreCase = true) }
+            .distinctBy { it.artist.lowercase() to it.title.lowercase() }
+            .take(LASTFM_SEED_COUNT)
+        if (seeds.isEmpty()) return emptyList()
+
+        val found = mutableListOf<YouTubeSearchResult>()
+        val perSeedNames = mutableListOf<List<LastFmTrack>>()
+        for (seed in seeds) {
+            val similar = client.similarTracks(apiKey, seed.artist, seed.title, LASTFM_TRACKS_PER_SEED)
+            if (similar.isNotEmpty()) {
+                perSeedNames += similar
+                continue
+            }
+            // No track-level data: the nearest similar artist's own top tracks, via the catalogue.
+            val artistName = client.similarArtists(apiKey, seed.artist, 1).firstOrNull() ?: continue
+            val artistRef = browser.searchArtists(artistName).firstOrNull() ?: continue
+            found += browser.fetchArtist(artistRef.browseId)?.topTracks.orEmpty().take(TRACKS_PER_RELATED_ARTIST)
+        }
+
+        for (named in roundRobin(perSeedNames).take(LASTFM_YOUTUBE_LOOKUPS)) {
+            val match = browser.searchSongs("${named.title} ${named.artist}")
+                .let { results ->
+                    results.firstOrNull { it.uploader.equals(named.artist, ignoreCase = true) }
+                        ?: results.firstOrNull()
+                }
+                ?: continue
+            found += match
+        }
+        return found.distinctBy { it.videoId }
+    }
+
+    /**
      * The artists worth looking up: the ones behind the user's recent listening, most recent
      * first, with placeholder artist names dropped.
      */
@@ -192,7 +257,13 @@ class CloudRecommendationSource(
             }
         }
 
-    private companion object {
+    internal companion object {
+        /** Takes each list's next item in turn, so every seed's best match comes before any second-best. */
+        internal fun <T> roundRobin(lists: List<List<T>>): List<T> {
+            val depth = lists.maxOfOrNull { it.size } ?: 0
+            return (0 until depth).flatMap { rank -> lists.mapNotNull { it.getOrNull(rank) } }
+        }
+
         const val TAG = "CloudRecommendation"
 
         /** How long a fetched list stays usable before the next request refreshes it. */
@@ -208,5 +279,12 @@ class CloudRecommendationSource(
 
         const val TRACKS_PER_SEED = 4
         const val TRACKS_PER_RELATED_ARTIST = 4
+
+        /** Seed songs asked of Last.fm. Each costs one Last.fm request (two on the artist fallback). */
+        const val LASTFM_SEED_COUNT = 3
+        const val LASTFM_TRACKS_PER_SEED = 10
+
+        /** Last.fm tracks looked up on YouTube Music per refresh; each is one search request. */
+        const val LASTFM_YOUTUBE_LOOKUPS = 8
     }
 }

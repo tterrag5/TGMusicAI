@@ -11,6 +11,7 @@ import com.example.tgmusicai.data.repository.LyricLine
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
 import com.example.tgmusicai.data.repository.VarietyMode
+import com.example.tgmusicai.data.scrobble.LastFmSimilarClient
 import com.example.tgmusicai.data.scrobble.ListenBrainzScrobbler
 import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.playback.SleepTimerManager
@@ -447,6 +448,57 @@ class PlayerViewModel(
             } finally {
                 _isConnectingScrobbler.value = false
             }
+        }
+    }
+
+    /** Whether a Last.fm key is stored (the key itself is never shown back). */
+    val hasLastFmApiKey: StateFlow<Boolean> = appPreferences?.lastFmApiKeyFlow
+        ?.map { it != null }
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    val lastFmRecommendationsEnabled: StateFlow<Boolean> = appPreferences?.lastFmRecommendationsEnabledFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    private val _isCheckingLastFmKey = MutableStateFlow(false)
+    val isCheckingLastFmKey: StateFlow<Boolean> = _isCheckingLastFmKey.asStateFlow()
+
+    private val _lastFmKeyStatus = MutableStateFlow<String?>(null)
+
+    /** Result of the last key check, shown under the field. */
+    val lastFmKeyStatus: StateFlow<String?> = _lastFmKeyStatus.asStateFlow()
+
+    /** Checks [apiKey] with Last.fm and stores it only if Last.fm accepts it. */
+    fun connectLastFm(apiKey: String) {
+        val preferences = appPreferences ?: return
+        val key = apiKey.trim()
+        if (key.isBlank()) return
+        viewModelScope.launch {
+            _isCheckingLastFmKey.value = true
+            try {
+                _lastFmKeyStatus.value = when (LastFmSimilarClient().verifyKey(key)) {
+                    LastFmSimilarClient.KeyCheck.VALID -> {
+                        preferences.setLastFmApiKey(key)
+                        null
+                    }
+                    LastFmSimilarClient.KeyCheck.REJECTED -> "Last.fm rejected that key."
+                    LastFmSimilarClient.KeyCheck.UNREACHABLE -> "Couldn't reach Last.fm. Try again."
+                }
+            } finally {
+                _isCheckingLastFmKey.value = false
+            }
+        }
+    }
+
+    fun setLastFmRecommendationsEnabled(enabled: Boolean) {
+        viewModelScope.launch { appPreferences?.setLastFmRecommendationsEnabled(enabled) }
+    }
+
+    fun removeLastFmKey() {
+        viewModelScope.launch {
+            appPreferences?.clearLastFmApiKey()
+            _lastFmKeyStatus.value = null
         }
     }
 

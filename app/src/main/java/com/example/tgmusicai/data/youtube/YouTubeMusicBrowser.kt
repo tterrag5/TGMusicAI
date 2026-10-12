@@ -191,6 +191,21 @@ class YouTubeMusicBrowser(
     }
 
     /**
+     * Songs matching [query], best first -- YouTube Music's "Songs" search filter, which returns
+     * official audio tracks rather than videos. Used to turn a track known only by name (from
+     * Last.fm) into a playable video id.
+     */
+    suspend fun searchSongs(query: String): List<YouTubeSearchResult> {
+        val root = search(query, SEARCH_PARAMS_SONGS) ?: return emptyList()
+        return try {
+            parseTrackRows(root)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Could not parse song search for '$query'", e)
+            emptyList()
+        }
+    }
+
+    /**
      * Artists matching [query], so a search can lead to an artist's page rather than only to
      * individual tracks.
      *
@@ -623,6 +638,7 @@ class YouTubeMusicBrowser(
          * values the web client sends verbatim -- not constructible from anything meaningful on
          * this side, which is why they are literals rather than something built at call time.
          */
+        private const val SEARCH_PARAMS_SONGS = "EgWKAQIIAWoKEAkQBRAKEAMQBA=="
         private const val SEARCH_PARAMS_ARTISTS = "EgWKAQIgAWoKEAkQChAFEAMQBA=="
         private const val SEARCH_PARAMS_ALBUMS = "EgWKAQIYAWoKEAkQChAFEAMQBA=="
 

@@ -204,7 +204,9 @@ class MainActivity : ComponentActivity() {
         val cloudRecommendationSource = CloudRecommendationSource(
             browser = youTubeMusicBrowser,
             songDao = database.songDao(),
-            recommendationEngine = recommendationEngine
+            recommendationEngine = recommendationEngine,
+            lastFm = com.example.tgmusicai.data.scrobble.LastFmSimilarClient(),
+            lastFmApiKey = { appPreferences.activeLastFmApiKey() }
         )
         val youTubePlaylistSyncManager = YouTubePlaylistSyncManager(
             songDao = database.songDao(),

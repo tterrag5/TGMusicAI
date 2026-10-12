@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.tgmusicai.data.repository.VarietyMode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -86,6 +87,8 @@ class AppPreferences(private val context: Context) {
         val LISTENBRAINZ_TOKEN = stringPreferencesKey("listenbrainz_token")
         val LISTENBRAINZ_SERVER = stringPreferencesKey("listenbrainz_server")
         val LISTENBRAINZ_USERNAME = stringPreferencesKey("listenbrainz_username")
+        val LASTFM_API_KEY = stringPreferencesKey("lastfm_api_key")
+        val LASTFM_RECOMMENDATIONS_ENABLED = booleanPreferencesKey("lastfm_recommendations_enabled")
     }
 
     /**
@@ -133,6 +136,45 @@ class AppPreferences(private val context: Context) {
             preferences.remove(LISTENBRAINZ_TOKEN)
             preferences.remove(LISTENBRAINZ_USERNAME)
             preferences[SCROBBLING_ENABLED] = false
+        }
+    }
+
+    /**
+     * The user's own Last.fm API key; null until they paste one in. The app has no key of its own
+     * (Last.fm issues keys to developers, and CLAUDE.md's "No API keys" rule keeps those out of
+     * the build), so Last.fm recommendations exist only for a user who brings one.
+     */
+    val lastFmApiKeyFlow: Flow<String?> = context.dataStore.data
+        .map { preferences -> preferences[LASTFM_API_KEY]?.takeIf { it.isNotBlank() } }
+
+    /** Whether recommendations and autoplay also draw on Last.fm. Off by default. */
+    val lastFmRecommendationsEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[LASTFM_RECOMMENDATIONS_ENABLED] ?: false }
+
+    /** The key to use right now: the stored key while the feature is on, otherwise null. */
+    suspend fun activeLastFmApiKey(): String? {
+        val preferences = context.dataStore.data.first()
+        if (preferences[LASTFM_RECOMMENDATIONS_ENABLED] != true) return null
+        return preferences[LASTFM_API_KEY]?.takeIf { it.isNotBlank() }
+    }
+
+    /** Stores a verified key and turns the feature on, since that is why a key is added. */
+    suspend fun setLastFmApiKey(apiKey: String) {
+        context.dataStore.edit { preferences ->
+            preferences[LASTFM_API_KEY] = apiKey.trim()
+            preferences[LASTFM_RECOMMENDATIONS_ENABLED] = true
+        }
+    }
+
+    suspend fun setLastFmRecommendationsEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[LASTFM_RECOMMENDATIONS_ENABLED] = enabled }
+    }
+
+    /** Forgets the key and turns the feature off, since one cannot work without the other. */
+    suspend fun clearLastFmApiKey() {
+        context.dataStore.edit { preferences ->
+            preferences.remove(LASTFM_API_KEY)
+            preferences[LASTFM_RECOMMENDATIONS_ENABLED] = false
         }
     }
 

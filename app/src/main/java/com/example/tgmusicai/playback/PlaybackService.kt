@@ -108,7 +108,9 @@ class PlaybackService : MediaLibraryService() {
                 songStatsDao = database.songStatsDao(),
                 aiSongTagsDao = database.aiSongTagsDao(),
                 listeningHistoryDao = database.listeningHistoryDao()
-            )
+            ),
+            lastFm = com.example.tgmusicai.data.scrobble.LastFmSimilarClient(),
+            lastFmApiKey = { AppPreferences(applicationContext).activeLastFmApiKey() }
         )
     }
 
