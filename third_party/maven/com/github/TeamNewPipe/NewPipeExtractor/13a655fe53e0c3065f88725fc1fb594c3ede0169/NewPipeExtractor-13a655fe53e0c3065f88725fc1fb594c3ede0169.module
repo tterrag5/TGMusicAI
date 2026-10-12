@@ -1,0 +1,124 @@
+{
+  "formatVersion" : "1.1",
+  "component" : {
+    "group" : "com.github.TeamNewPipe",
+    "module" : "NewPipeExtractor",
+    "version" : "13a655fe53e0c3065f88725fc1fb594c3ede0169",
+    "attributes" : {
+      "org.gradle.status" : "release"
+    }
+  },
+  "createdBy" : {
+    "gradle" : {
+      "version" : "9.7.1"
+    }
+  },
+  "variants" : [ {
+    "name" : "apiElements",
+    "attributes" : {
+      "org.gradle.category" : "library",
+      "org.gradle.dependency.bundling" : "external",
+      "org.gradle.jvm.version" : "17",
+      "org.gradle.libraryelements" : "jar",
+      "org.gradle.usage" : "java-api"
+    },
+    "files" : [ {
+      "name" : "NewPipeExtractor-13a655fe53e0c3065f88725fc1fb594c3ede0169.jar",
+      "url" : "NewPipeExtractor-13a655fe53e0c3065f88725fc1fb594c3ede0169.jar",
+      "size" : 809210,
+      "sha512" : "17794ff043eb0e320bb3a8bffeecd3e6c351cecc195b2bc54fea8458864b4c435ef2d95cb54420dd0b347020e2b9d30a8c3185d2ce2c20f000b5b0e68754a071",
+      "sha256" : "5c238c57328095ae03443075c462f44b910ff3b9d53ddfe1dfe23ade085d19b8",
+      "sha1" : "8b27b573816a35369b2b241af9280907bfe032ef",
+      "md5" : "38e479f9f614d06b3dcaa54cb95a6bbc"
+    } ]
+  }, {
+    "name" : "runtimeElements",
+    "attributes" : {
+      "org.gradle.category" : "library",
+      "org.gradle.dependency.bundling" : "external",
+      "org.gradle.jvm.version" : "17",
+      "org.gradle.libraryelements" : "jar",
+      "org.gradle.usage" : "java-runtime"
+    },
+    "dependencies" : [ {
+      "group" : "com.github.TeamNewPipe",
+      "module" : "nanojson",
+      "version" : {
+        "requires" : "e9d656ddb49a412a5a0a5d5ef20ca7ef09549996"
+      }
+    }, {
+      "group" : "org.jsoup",
+      "module" : "jsoup",
+      "version" : {
+        "requires" : "1.23.1"
+      }
+    }, {
+      "group" : "com.google.code.findbugs",
+      "module" : "jsr305",
+      "version" : {
+        "requires" : "3.0.2"
+      }
+    }, {
+      "group" : "com.google.protobuf",
+      "module" : "protobuf-javalite",
+      "version" : {
+        "requires" : "4.36.0"
+      }
+    }, {
+      "group" : "org.mozilla",
+      "module" : "rhino",
+      "version" : {
+        "requires" : "1.8.1"
+      }
+    }, {
+      "group" : "org.mozilla",
+      "module" : "rhino-engine",
+      "version" : {
+        "requires" : "1.8.1"
+      }
+    } ],
+    "files" : [ {
+      "name" : "NewPipeExtractor-13a655fe53e0c3065f88725fc1fb594c3ede0169.jar",
+      "url" : "NewPipeExtractor-13a655fe53e0c3065f88725fc1fb594c3ede0169.jar",
+      "size" : 809210,
+      "sha512" : "17794ff043eb0e320bb3a8bffeecd3e6c351cecc195b2bc54fea8458864b4c435ef2d95cb54420dd0b347020e2b9d30a8c3185d2ce2c20f000b5b0e68754a071",
+      "sha256" : "5c238c57328095ae03443075c462f44b910ff3b9d53ddfe1dfe23ade085d19b8",
+      "sha1" : "8b27b573816a35369b2b241af9280907bfe032ef",
+      "md5" : "38e479f9f614d06b3dcaa54cb95a6bbc"
+    } ]
+  }, {
+    "name" : "sourcesElements",
+    "attributes" : {
+      "org.gradle.category" : "documentation",
+      "org.gradle.dependency.bundling" : "external",
+      "org.gradle.docstype" : "sources",
+      "org.gradle.usage" : "java-runtime"
+    },
+    "files" : [ {
+      "name" : "NewPipeExtractor-13a655fe53e0c3065f88725fc1fb594c3ede0169.jar",
+      "url" : "NewPipeExtractor-13a655fe53e0c3065f88725fc1fb594c3ede0169.jar",
+      "size" : 508408,
+      "sha512" : "b410ca1053cdccda1c631a97a1c0eeafd777b716a455ac98fbbe814c30711cb835beff114e765ea922f75f371dcae3e6b327d12e36df37941bed363298d3fb2a",
+      "sha256" : "2dd94aae0151a15d27cb17c29a772fff0de1b73421a674dd63ce1764e66ba7b0",
+      "sha1" : "a3fa516fee2c76cfb946171ea4ff015a6f8664b4",
+      "md5" : "55e3dd96bf5e0ee84e11f6dd44e6c0da"
+    } ]
+  }, {
+    "name" : "javadocElements",
+    "attributes" : {
+      "org.gradle.category" : "documentation",
+      "org.gradle.dependency.bundling" : "external",
+      "org.gradle.docstype" : "javadoc",
+      "org.gradle.usage" : "java-runtime"
+    },
+    "files" : [ {
+      "name" : "NewPipeExtractor-13a655fe53e0c3065f88725fc1fb594c3ede0169.jar",
+      "url" : "NewPipeExtractor-13a655fe53e0c3065f88725fc1fb594c3ede0169.jar",
+      "size" : 1710108,
+      "sha512" : "fb8093ecd072f286adf6f8da4f16bff6c915bfa596063f3809a1f4a95b0b5dc0f36fffbecb9d048b3d192026d2a4d214dbddd3a8bf6e00ce74e233e72e2c209a",
+      "sha256" : "9cbfd09fdda05f69177794d41a2724aeac7a390d20ebb1631fa3a731ca0a6a8a",
+      "sha1" : "79e69e58da67b868444e26d7e401c180b790ce68",
+      "md5" : "7f1c11b7b86c3b0441f75ce551d5add6"
+    } ]
+  } ]
+}
