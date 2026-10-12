@@ -187,6 +187,8 @@ class MediaControllerManager(
         )
         val controllerFuture = MediaController.Builder(context, sessionToken)
             .setListener(sessionListener)
+            // Tells the service the app's own resolver is present, so its fallback stays idle.
+            .setConnectionHints(android.os.Bundle().apply { putBoolean(ServiceStreamResolver.HINT_APP_UI, true) })
             .buildAsync()
         
         controllerFuture.addListener(
