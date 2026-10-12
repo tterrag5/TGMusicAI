@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.text.selection.SelectionContainer
 import com.example.tgmusicai.BuildConfig
+import com.example.tgmusicai.data.repository.VarietyMode
 import com.example.tgmusicai.data.sponsorblock.SponsorBlockManager
 import com.example.tgmusicai.ui.theme.AppTheme
 import com.example.tgmusicai.ui.theme.ThemeMode
@@ -110,12 +111,21 @@ fun SettingsScreen(
     val sponsorBlockCategories by playerViewModel.sponsorBlockCategories.collectAsState()
     val scrobblingEnabled by playerViewModel.scrobblingEnabled.collectAsState()
     val listenBrainzUsername by playerViewModel.listenBrainzUsername.collectAsState()
+    val pendingScrobbleCount by playerViewModel.pendingScrobbleCount.collectAsState()
     val listenBrainzServer by playerViewModel.listenBrainzServer.collectAsState()
     val scrobbleConnectionStatus by playerViewModel.scrobbleConnectionStatus.collectAsState()
     val isConnectingScrobbler by playerViewModel.isConnectingScrobbler.collectAsState()
     var listenBrainzTokenInput by remember { mutableStateOf("") }
+    val isYouTubeSignedIn by playerViewModel.isYouTubeSignedIn.collectAsState()
+    val youtubeHistoryEnabled by playerViewModel.youtubeHistoryEnabled.collectAsState()
+    val hasLastFmApiKey by playerViewModel.hasLastFmApiKey.collectAsState()
+    val lastFmRecommendationsEnabled by playerViewModel.lastFmRecommendationsEnabled.collectAsState()
+    val isCheckingLastFmKey by playerViewModel.isCheckingLastFmKey.collectAsState()
+    val lastFmKeyStatus by playerViewModel.lastFmKeyStatus.collectAsState()
+    var lastFmKeyInput by remember { mutableStateOf("") }
     var listenBrainzServerInput by remember(listenBrainzServer) { mutableStateOf(listenBrainzServer) }
     val crossfadeEnabled by playerViewModel.crossfadeEnabled.collectAsState()
+    val radioVariety by playerViewModel.radioVariety.collectAsState()
     val crossfadeDurationSec by playerViewModel.crossfadeDurationSec.collectAsState()
     var draggedCrossfadeDurationSec by remember(crossfadeDurationSec) { mutableStateOf(crossfadeDurationSec.toFloat()) }
 
@@ -284,6 +294,89 @@ fun SettingsScreen(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                "Radio variety",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                "How far Start Radio ranges from the artists you already play.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                                VarietyMode.entries.forEachIndexed { index, mode ->
+                                    SegmentedButton(
+                                        selected = radioVariety == mode,
+                                        onClick = { playerViewModel.setRadioVariety(mode) },
+                                        shape = SegmentedButtonDefaults.itemShape(
+                                            index = index,
+                                            count = VarietyMode.entries.size,
+                                        ),
+                                    ) {
+                                        Text(mode.displayName, style = MaterialTheme.typography.labelLarge)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            if (hasLastFmApiKey) {
+                                SettingsToggleContent(
+                                    title = "Last.fm recommendations",
+                                    subtitle = "Add tracks Last.fm lists as similar to your recent listening to recommendations and autoplay.",
+                                    checked = lastFmRecommendationsEnabled,
+                                    onCheckedChange = playerViewModel::setLastFmRecommendationsEnabled
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TextButton(onClick = playerViewModel::removeLastFmKey) {
+                                    Text("Remove key")
+                                }
+                            } else {
+                                Text(
+                                    "Last.fm recommendations",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    "Uses your own Last.fm API key. Sends the artist and title of recently played songs to Last.fm.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = lastFmKeyInput,
+                                    onValueChange = { lastFmKeyInput = it },
+                                    label = { Text("API key") },
+                                    supportingText = lastFmKeyStatus?.let { status -> { Text(status) } },
+                                    isError = lastFmKeyStatus != null,
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TextButton(
+                                    enabled = lastFmKeyInput.isNotBlank() && !isCheckingLastFmKey,
+                                    onClick = {
+                                        playerViewModel.connectLastFm(lastFmKeyInput)
+                                    }
+                                ) {
+                                    Text(if (isCheckingLastFmKey) "Checking..." else "Save key")
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
                             SettingsToggleContent(
                                 title = "Skip non-music sections",
                                 subtitle = "Jump past intros, sponsor reads and talking in YouTube tracks. Sends an anonymised lookup per track.",
@@ -389,7 +482,14 @@ fun SettingsScreen(
                     title = "Listening history",
                     icon = Icons.Rounded.History,
                     summary = when {
-                        scrobblingEnabled && listenBrainzUsername != null -> "Scrobbling as $listenBrainzUsername"
+                        scrobblingEnabled && listenBrainzUsername != null ->
+                            listOfNotNull(
+                                "Scrobbling as $listenBrainzUsername",
+                                // Only when there is something waiting: a count of zero is noise.
+                                pendingScrobbleCount
+                                    .takeIf { it > 0 }
+                                    ?.let { "$it waiting to send" },
+                            ).joinToString(" \u00b7 ")
                         listenBrainzUsername != null -> "Connected, but paused"
                         else -> "Not connected"
                     },
@@ -449,6 +549,26 @@ fun SettingsScreen(
                                     Text(if (isConnectingScrobbler) "Checking..." else "Connect")
                                 }
                             }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            SettingsToggleContent(
+                                title = "Add to YouTube history",
+                                subtitle = if (isYouTubeSignedIn) {
+                                    "Add YouTube songs you play here to your YouTube Music history."
+                                } else {
+                                    "Sign in to YouTube (Import from YouTube) to use this."
+                                },
+                                checked = youtubeHistoryEnabled && isYouTubeSignedIn,
+                                onCheckedChange = { enabled ->
+                                    if (isYouTubeSignedIn) playerViewModel.setYouTubeHistoryEnabled(enabled)
+                                }
+                            )
                         }
                     }
                 }

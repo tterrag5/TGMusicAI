@@ -8,6 +8,7 @@ import com.example.tgmusicai.data.local.BackupManager
 import com.example.tgmusicai.data.local.dao.AlarmDao
 import com.example.tgmusicai.data.local.dao.DailyListenTotal
 import com.example.tgmusicai.data.local.dao.ListeningHistoryDao
+import com.example.tgmusicai.data.local.dao.PendingScrobbleDao
 import com.example.tgmusicai.data.local.dao.PlaylistDao
 import com.example.tgmusicai.data.local.dao.SongDao
 import com.example.tgmusicai.data.local.dao.SongStatsDao
@@ -63,9 +64,19 @@ class MusicRepository(
     private val alarmDao: AlarmDao,
     private val listeningHistoryDao: ListeningHistoryDao? = null,
     private val database: com.example.tgmusicai.data.local.AppDatabase? = null,
-    private val recommendationEngine: RecommendationEngine? = null
+    private val recommendationEngine: RecommendationEngine? = null,
+    private val pendingScrobbleDao: PendingScrobbleDao? = null,
 ) {
     private val TAG = "MusicRepository"
+
+    /**
+     * How many finished listens are still waiting to reach ListenBrainz.
+     *
+     * Surfaced so the Settings row can say that history is queued rather than lost. Emits 0 when
+     * there is no DAO, which is the honest answer for a caller that was built without one.
+     */
+    val pendingScrobbleCount: Flow<Int> =
+        pendingScrobbleDao?.countFlow() ?: flowOf(0)
 
     // Playlist.name has no DB-level unique constraint, so the check-then-insert pattern below
     // (used by getOrCreateLikedMusicPlaylistId and ensureSmartPlaylistsExist) is racy if two
@@ -334,14 +345,18 @@ class MusicRepository(
      * perfectly predictable. There's no genre field in the schema, so this uses producer/artist
      * overlap only, not the full producer/artist/genre similarity the original spec described.
      */
-    suspend fun buildRadioQueue(seedSong: Song, limit: Int = 20): List<Song> {
+    suspend fun buildRadioQueue(
+        seedSong: Song,
+        limit: Int = 20,
+        variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Song> {
         // The engine blends how the songs sound, what they say, and what actually gets played
         // together; the producer/artist walk below is kept as its fallback. A recommendation
         // failure must never turn Start Radio into a dead button, so anything going wrong in
         // there drops through to the original behaviour rather than propagating.
         recommendationEngine?.let { engine ->
             try {
-                val recommended = engine.recommendFor(seedSong, limit - 1)
+                val recommended = engine.recommendFor(seedSong, limit - 1, variety = variety)
                 if (recommended.isNotEmpty()) {
                     return (listOf(seedSong) + recommended).distinctBy { it.id }.take(limit)
                 }
@@ -365,6 +380,69 @@ class MusicRepository(
 
         val pool = sameProducer.underplayedFirst() + sameArtist.underplayedFirst() + remaining.shuffled()
         return (listOf(seedSong) + pool).distinctBy { it.id }.take(limit)
+    }
+
+    /**
+     * "Start Radio" from several songs at once. With one seed this is [buildRadioQueue]. With
+     * more, the queue opens on the first seed, the other seeds are spread through it, and every
+     * seed contributes its own related songs ([RecommendationEngine.recommendForSeeds]). If the
+     * engine has nothing, each seed's single-seed radio is merged in turn instead.
+     */
+    suspend fun buildRadioQueue(
+        seeds: List<Song>,
+        limit: Int = 20,
+        variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Song> {
+        val distinctSeeds = seeds.distinctBy { it.id }.take(MAX_RADIO_SEEDS)
+        if (distinctSeeds.isEmpty()) return emptyList()
+        if (distinctSeeds.size == 1) return buildRadioQueue(distinctSeeds.first(), limit, variety)
+
+        val related = recommendationEngine?.let { engine ->
+            try {
+                engine.recommendForSeeds(distinctSeeds, limit - distinctSeeds.size, variety = variety)
+            } catch (e: Throwable) {
+                Log.e(TAG, "Recommendation engine failed for a multi-seed radio, using per-seed fallback", e)
+                null
+            }
+        }.orEmpty().ifEmpty {
+            val seedIds = distinctSeeds.map { it.id }.toSet()
+            val perSeed = distinctSeeds.map { seed ->
+                buildRadioQueue(seed, limit, variety).filter { it.id !in seedIds }
+            }
+            (0 until (perSeed.maxOfOrNull { it.size } ?: 0))
+                .flatMap { rank -> perSeed.mapNotNull { it.getOrNull(rank) } }
+                .distinctBy { it.id }
+        }
+        return spreadSeeds(distinctSeeds, related, limit)
+    }
+
+    /**
+     * Smart Shuffle for a playlist: [playlistSongs] shuffled, with a related library track after
+     * every few of them ([SmartShuffle]). Related tracks are scored against up to
+     * [MAX_RADIO_SEEDS] songs sampled from the playlist, so they follow its overall feel. If the
+     * engine has nothing, this is a plain shuffle.
+     */
+    suspend fun buildSmartShuffleQueue(
+        playlistSongs: List<Song>,
+        variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Song> {
+        val shuffled = playlistSongs.distinctBy { it.id }.shuffled()
+        if (shuffled.isEmpty()) return emptyList()
+        val wanted = SmartShuffle.recommendationsWanted(shuffled.size)
+        val related = recommendationEngine?.let { engine ->
+            try {
+                engine.recommendForSeeds(
+                    shuffled.take(MAX_RADIO_SEEDS),
+                    // Over-asked: anything already in the playlist is dropped by the interleave.
+                    limit = wanted + shuffled.size,
+                    variety = variety
+                )
+            } catch (e: Throwable) {
+                Log.e(TAG, "Recommendation engine failed for Smart Shuffle, playing a plain shuffle", e)
+                null
+            }
+        }.orEmpty()
+        return SmartShuffle.interleave(shuffled, related) { it.id }
     }
 
     /** Songs with a play count of zero, backing the "Unplayed" smart playlist. */
@@ -625,6 +703,39 @@ class MusicRepository(
     }
 
     companion object {
+        /**
+         * Seeds a multi-seed radio uses. Each seed is scored against the whole library, so the
+         * cost grows with the count, and past this many the radio stops sounding like any of them.
+         */
+        const val MAX_RADIO_SEEDS = 10
+
+        /**
+         * A radio queue of at most [limit]: the first seed, then [related] with the remaining
+         * seeds placed at even intervals, so the picked songs are heard through the radio rather
+         * than all at the start. Songs appear once; a seed also found in [related] keeps its
+         * seed position.
+         */
+        fun spreadSeeds(seeds: List<Song>, related: List<Song>, limit: Int): List<Song> {
+            if (limit <= 0 || seeds.isEmpty()) return emptyList()
+            val seedIds = seeds.map { it.id }.toSet()
+            val rest = related.filter { it.id !in seedIds }.distinctBy { it.id }
+                .take((limit - seeds.size).coerceAtLeast(0))
+            val laterSeeds = seeds.drop(1)
+            if (laterSeeds.isEmpty()) return (listOf(seeds.first()) + rest).take(limit)
+
+            // One gap per later seed, so seed k lands after (k * rest.size / count) related songs.
+            val queue = mutableListOf(seeds.first())
+            var consumed = 0
+            laterSeeds.forEachIndexed { index, seed ->
+                val until = (index + 1) * rest.size / (laterSeeds.size + 1)
+                queue += rest.subList(consumed, until)
+                consumed = until
+                queue += seed
+            }
+            queue += rest.subList(consumed, rest.size)
+            return queue.take(limit)
+        }
+
         /** Display names of the app's auto-generated smart playlists; also used as DB row names. */
         const val LIKED_MUSIC_NAME = "Liked Music"
         const val TOP_50_MOST_PLAYED_NAME = "Top 50 Most Played"

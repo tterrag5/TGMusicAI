@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Log
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.TranslatorOptions
@@ -23,6 +24,23 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
+ * One karaoke highlight unit within a line: the text to light up, when, and for how long.
+ *
+ * Real when the lyrics carry them: enhanced-LRC word tags (`<mm:ss.xx>word`), which BetterLyrics
+ * (word-synced TTML) is stored as and some LrcLib entries use. Otherwise estimated: the line's span
+ * divided by how long each unit takes to sing ([LyricsRepository.withWordTimings]), which is close
+ * enough to follow along with and not presented as anything more precise.
+ */
+data class WordTiming(
+    val text: String,
+    val startMs: Long,
+    val durationMs: Long,
+) {
+    /** Exclusive end of this unit's highlight window. */
+    val endMs: Long get() = startMs + durationMs
+}
+
+/**
  * Structured model representing a single line of lyrics with an optional timestamp.
  */
 data class LyricLine(
@@ -33,7 +51,21 @@ data class LyricLine(
      * [LyricsRepository.withInstrumentalMarkers]). These are display-only: they are never saved
      * back to the song's stored lyrics, and they are not worth translating.
      */
-    val isInstrumental: Boolean = false
+    val isInstrumental: Boolean = false,
+    /**
+     * Per-unit highlight timings for karaoke rendering, or empty when the line can't be broken into
+     * more than one unit (or has no timestamp to divide). Empty means "highlight the whole line at
+     * once", which is what the display did before karaoke existed.
+     */
+    val words: List<WordTiming> = emptyList(),
+    /**
+     * When the line stops being sung, if the source says (YouTube Music's timed lyrics do; stored
+     * as a trailing `<mm:ss.xx>` tag). Bounds the estimated word sweep so it finishes with the
+     * singer instead of stretching into the pause before the next line.
+     */
+    val endMs: Long? = null,
+    /** True when [words] came from the source rather than being estimated. */
+    val hasRealWordTimings: Boolean = false,
 )
 
 /**
@@ -43,8 +75,21 @@ data class LyricLine(
 class LyricsRepository(
     private val context: Context,
     private val musicRepository: MusicRepository,
-    private val youtubeExtractor: YouTubeExtractor = YouTubeExtractor()
+    private val youtubeExtractor: YouTubeExtractor = YouTubeExtractor(),
+    private val youTubeMusic: com.example.tgmusicai.data.youtube.YouTubeMusicBrowser =
+        com.example.tgmusicai.data.youtube.YouTubeMusicBrowser(),
+    private val betterLyrics: com.example.tgmusicai.data.lyrics.BetterLyricsClient =
+        com.example.tgmusicai.data.lyrics.BetterLyricsClient(),
+    private val kuGou: com.example.tgmusicai.data.lyrics.KuGouLyricsClient =
+        com.example.tgmusicai.data.lyrics.KuGouLyricsClient(),
 ) {
+
+    /**
+     * Songs whose stored lyrics are unsynced and that were already re-checked for synced ones
+     * this session. Synced lyrics appear over time, so the check is repeated next session, not on
+     * every play.
+     */
+    private val upgradeAttempted = java.util.Collections.synchronizedSet(mutableSetOf<Long>())
 
     private val TAG = "LyricsRepository"
 
@@ -75,6 +120,55 @@ class LyricsRepository(
     }
 
     companion object {
+        private fun normaliseForMatch(text: String): String =
+            text.lowercase()
+                .replace(Regex("""[(\[（【][^)\]）】]*[)\]）】]"""), " ")
+                .replace(Regex("""\b(feat|ft)\.?\s.*$"""), " ")
+                .replace(Regex("""['’]"""), "")
+                .replace(Regex("""[^\p{L}\p{N}]+"""), " ")
+                .trim()
+
+        /**
+         * Whether a YouTube Music song is the library track [title] by [artist], for borrowing its
+         * lyrics. Looser than recommendation matching, because YouTube titles are often bilingual
+         * ("メズマライザー - Mesmerizer") and credit different artists than the file's tags
+         * ("32ki, Hatsune Miku" for a track tagged "Hiiragi Magnetite"):
+         * - the title must match whole, or match one " - " / " / " part of the candidate's title;
+         * - then either the artists overlap, or the durations agree within [LYRICS_DURATION_TOLERANCE_SEC]
+         *   (a strong signal on its own; a cover or remix is rarely within three seconds).
+         */
+        fun isLyricsMatch(
+            title: String,
+            artist: String,
+            durationSec: Long,
+            candidateTitle: String,
+            candidateArtist: String,
+            candidateDurationSec: Long,
+        ): Boolean {
+            val wanted = normaliseForMatch(title)
+            if (wanted.isBlank()) return false
+            val parts = (listOf(candidateTitle) + candidateTitle.split(" - ", " / ", " | "))
+                .map(::normaliseForMatch)
+                .filter { it.isNotBlank() }
+            val titleMatches = parts.any { it == wanted } ||
+                (wanted.length >= 4 && parts.any { it.startsWith("$wanted ") })
+            if (!titleMatches) return false
+
+            val a = normaliseForMatch(artist)
+            val b = normaliseForMatch(candidateArtist)
+            val artistsOverlap = a.isNotBlank() && b.isNotBlank() &&
+                (a.contains(b) || b.contains(a) || a.split(" ").any { word -> word.length >= 3 && b.split(" ").contains(word) })
+            if (artistsOverlap) return true
+            return durationSec > 0 && candidateDurationSec > 0 &&
+                kotlin.math.abs(durationSec - candidateDurationSec) <= LYRICS_DURATION_TOLERANCE_SEC
+        }
+
+        const val LYRICS_DURATION_TOLERANCE_SEC = 3L
+
+        /** True when [lyrics] carry LRC line timestamps. */
+        fun isSynced(lyrics: String?): Boolean =
+            !lyrics.isNullOrBlank() && lyrics.lineSequence().any { LRC_TIMESTAMP_REGEX.containsMatchIn(it) }
+
         // Matches [mm:ss.fff], [mm:ss:fff] (colon-separated centiseconds, common from some LRC
         // providers), and [mmm:ss...] (3-digit minutes for long tracks) -- the old pattern only
         // matched the dot-separated form and silently dropped every other line as "unparsed",
@@ -82,6 +176,66 @@ class LyricsRepository(
         private val LRC_TIMESTAMP_REGEX = Regex("""\[(\d{1,3}):(\d{2})[.:](\d{1,3})\]""")
         // Non-lyric metadata tags (artist/title/album/offset/etc.) that some LRC files include --
         // must be dropped entirely rather than kept as a zero-timestamp "lyric" line.
+        /** An enhanced-LRC inline word tag, `<mm:ss.xx>`. */
+        private val WORD_TAG_REGEX = Regex("""<(\d{1,3}):(\d{2})[.:](\d{1,3})>""")
+
+        private fun tagMillis(minutes: String, seconds: String, fraction: String): Long {
+            val millis = when (fraction.length) {
+                1 -> fraction.toLong() * 100
+                2 -> fraction.toLong() * 10
+                else -> fraction.take(3).toLong()
+            }
+            return minutes.toLong() * 60_000 + seconds.toLong() * 1000 + millis
+        }
+
+        /**
+         * Splits a line's text on its inline `<mm:ss.xx>` tags.
+         *
+         * Returns the plain text, the real word timings when the tags mark words (each tag starts
+         * the text after it; a tag after the last word ends it), and the line end when the only
+         * tag is a trailing one.
+         */
+        internal fun parseInlineTags(body: String): Triple<String, List<WordTiming>, Long?> {
+            val tags = WORD_TAG_REGEX.findAll(body).toList()
+            if (tags.isEmpty()) return Triple(body.trim(), emptyList(), null)
+            val plain = WORD_TAG_REGEX.replace(body, "").replace(Regex("""\s+"""), " ").trim()
+            val leading = body.substring(0, tags.first().range.first)
+            // Only a trailing tag: the text before it is the line, the tag is its end.
+            if (tags.size == 1 && body.substring(tags.first().range.last + 1).isBlank()) {
+                val (m, sec, f) = tags.first().destructured
+                return Triple(plain, emptyList(), tagMillis(m, sec, f))
+            }
+            val words = mutableListOf<WordTiming>()
+            var lineEnd: Long? = null
+            tags.forEachIndexed { i, tag ->
+                val (m, sec, f) = tag.destructured
+                val start = tagMillis(m, sec, f)
+                val textEnd = tags.getOrNull(i + 1)?.range?.first ?: body.length
+                val text = body.substring(tag.range.last + 1, textEnd)
+                if (text.isBlank()) {
+                    if (i == tags.lastIndex) lineEnd = start
+                    return@forEachIndexed
+                }
+                val nextStart = tags.getOrNull(i + 1)?.let { next ->
+                    val (nm, ns, nf) = next.destructured
+                    tagMillis(nm, ns, nf)
+                }
+                words += WordTiming(text, start, ((nextStart ?: start) - start).coerceAtLeast(0))
+            }
+            // Text before the first tag has no timing of its own; it rides with the first word.
+            if (leading.isNotBlank() && words.isNotEmpty()) {
+                words[0] = words[0].copy(text = leading + words[0].text)
+            }
+            // The last word runs to the line end when there is one, else it is given no length
+            // here and bounded later like any other line.
+            if (words.isNotEmpty() && lineEnd != null) {
+                val last = words.last()
+                words[words.lastIndex] = last.copy(durationMs = (lineEnd!! - last.startMs).coerceAtLeast(0))
+            }
+            // Spacing is the renderer's job (it lays words back into the line's own text).
+            return Triple(plain, words.map { it.copy(text = it.text.trim()) }.filter { it.text.isNotEmpty() }, lineEnd)
+        }
+
         private val METADATA_TAG_REGEX = Regex("""^\[(ar|ti|al|by|offset|length|re|ve):.*]""", RegexOption.IGNORE_CASE)
 
         /**
@@ -113,18 +267,21 @@ class LyricsRepository(
                 // A single line can carry multiple timestamp tags (e.g. a repeated chorus line
                 // marked "[00:12.34][01:15.20] Chorus") -- each becomes its own LyricLine sharing
                 // the same text.
-                val text = LRC_TIMESTAMP_REGEX.replace(trimmed, "").trim()
+                val (text, words, lineEnd) = parseInlineTags(LRC_TIMESTAMP_REGEX.replace(trimmed, ""))
                 for (match in matches) {
-                    val minutes = match.groupValues[1].toLongOrNull() ?: 0L
-                    val seconds = match.groupValues[2].toLongOrNull() ?: 0L
-                    val fracStr = match.groupValues[3]
-                    val millis = when (fracStr.length) {
-                        1 -> fracStr.toLong() * 100
-                        2 -> fracStr.toLong() * 10
-                        else -> fracStr.take(3).toLong()
-                    }
-                    val totalMs = (minutes * 60 * 1000) + (seconds * 1000) + millis
-                    parsedLines.add(LyricLine(timestampMs = totalMs, text = text))
+                    val totalMs = tagMillis(match.groupValues[1], match.groupValues[2], match.groupValues[3])
+                    // Word tags are absolute times, so they belong to the first stamp only; a
+                    // repeat of the same line elsewhere gets estimated timing like any other.
+                    val real = words.isNotEmpty() && match == matches.first()
+                    parsedLines.add(
+                        LyricLine(
+                            timestampMs = totalMs,
+                            text = text,
+                            words = if (real) words else emptyList(),
+                            endMs = if (match == matches.first()) lineEnd else null,
+                            hasRealWordTimings = real,
+                        )
+                    )
                 }
             }
 
@@ -140,6 +297,9 @@ class LyricsRepository(
          * marking them as "music only" is wrong.
          */
         const val INSTRUMENTAL_GAP_MS = 10_000L
+
+        /** The same, measured from where a line is known to end rather than from where it starts. */
+        const val INSTRUMENTAL_GAP_AFTER_END_MS = 6_000L
 
         /** Roughly how far apart markers sit inside a gap long enough to earn more than one. */
         const val INSTRUMENTAL_MARKER_SPACING_MS = 5_000L
@@ -160,6 +320,15 @@ class LyricsRepository(
          */
         private const val MAX_SPLIT_SPAN_MS = 8_000L
 
+        /** What ML Kit's language identifier returns when it cannot tell. */
+        private const val UNDETERMINED_LANGUAGE = "und"
+
+        /**
+         * How much lyric text to hand the language identifier. Deliberately a lot: one line is
+         * often too short to identify, and a chorus on its own identifies as nothing.
+         */
+        private const val MAX_LANGUAGE_SAMPLE_CHARS = 2000
+
         /**
          * Returns [lines] with each multi-phrase line broken into one line per phrase, timed by
          * splitting the original line's span in proportion to each phrase's length.
@@ -177,7 +346,7 @@ class LyricsRepository(
 
             val result = mutableListOf<LyricLine>()
             lines.forEachIndexed { index, line ->
-                val parts = if (line.timestampMs < 0 || line.isInstrumental) {
+                val parts = if (line.timestampMs < 0 || line.isInstrumental || line.hasRealWordTimings) {
                     listOf(line.text)
                 } else {
                     splitIntoPhrases(line.text)
@@ -187,24 +356,91 @@ class LyricsRepository(
                     return@forEachIndexed
                 }
 
-                val nextMs = lines.drop(index + 1).firstOrNull { it.timestampMs >= 0 }?.timestampMs
+                val nextMs = line.endMs?.takeIf { it > line.timestampMs }
+                    ?: lines.drop(index + 1).firstOrNull { it.timestampMs >= 0 }?.timestampMs
                     ?: totalDurationMs.takeIf { it > line.timestampMs }
                     ?: (line.timestampMs + MAX_SPLIT_SPAN_MS)
                 val span = (nextMs - line.timestampMs).coerceAtMost(MAX_SPLIT_SPAN_MS)
+                val partEnds = parts.runningFold(0) { acc, part -> acc + part.length }.drop(1)
                 val totalChars = parts.sumOf { it.length }.coerceAtLeast(1)
 
                 var consumedChars = 0
-                for (part in parts) {
+                parts.forEachIndexed { partIndex, part ->
                     result.add(
                         line.copy(
                             timestampMs = line.timestampMs + span * consumedChars / totalChars,
                             text = part,
+                            // Only the last phrase inherits the line's end; earlier ones run to
+                            // the next phrase.
+                            endMs = if (partIndex == parts.lastIndex) line.endMs else
+                                line.timestampMs + span * partEnds[partIndex] / totalChars,
                         )
                     )
                     consumedChars += part.length
                 }
             }
             return result
+        }
+
+        /**
+         * Returns [lines] with [LyricLine.words] filled in, so the display can advance a highlight
+         * through each line instead of lighting the whole line at once.
+         *
+         * Runs last in the parse chain, after [splitDenseLines] and [withInstrumentalMarkers]: both
+         * of those insert and re-time lines, and a timing computed before them would describe a line
+         * that no longer exists. A line keeps empty [LyricLine.words] -- meaning "highlight it
+         * whole" -- when there is nothing to divide: no timestamp (the `-1` sentinel used for
+         * unsynced lyrics), an instrumental marker, or a line that segments into a single unit.
+         *
+         * [totalDurationMs] is the track length, used to bound the final line the same way
+         * [splitDenseLines] uses it; pass 0 when it isn't known.
+         */
+        fun withWordTimings(lines: List<LyricLine>, totalDurationMs: Long = 0L): List<LyricLine> {
+            if (lines.none { it.timestampMs >= 0 }) return lines
+
+            return lines.mapIndexed { index, line ->
+                if (line.timestampMs < 0 || line.isInstrumental) return@mapIndexed line
+                if (line.hasRealWordTimings) {
+                    // Real timings need only their last word bounded when the source gave no end.
+                    val last = line.words.last()
+                    if (last.durationMs > 0) return@mapIndexed line
+                    val nextMs = lines.drop(index + 1).firstOrNull { it.timestampMs >= 0 }?.timestampMs
+                        ?: totalDurationMs.takeIf { it > last.startMs }
+                        ?: (last.startMs + MAX_SPLIT_SPAN_MS / 4)
+                    val bounded = (nextMs - last.startMs).coerceIn(0L, MAX_SPLIT_SPAN_MS / 4)
+                    return@mapIndexed line.copy(words = line.words.dropLast(1) + last.copy(durationMs = bounded))
+                }
+
+                val segments = LyricSegmenter.segment(line.text)
+                if (segments.size < 2) return@mapIndexed line
+
+                // Same bounding as splitDenseLines: run to the next timestamped line, else to the
+                // end of the track, else assume a default span -- and cap it either way, or a line
+                // followed by a long instrumental stretch would hold its last word lit for minutes.
+                val nextMs = line.endMs?.takeIf { it > line.timestampMs }
+                    ?: lines.drop(index + 1).firstOrNull { it.timestampMs >= 0 }?.timestampMs
+                    ?: totalDurationMs.takeIf { it > line.timestampMs }
+                    ?: (line.timestampMs + MAX_SPLIT_SPAN_MS)
+                val span = (nextMs - line.timestampMs).coerceAtMost(MAX_SPLIT_SPAN_MS)
+                if (span <= 0L) return@mapIndexed line
+
+                val totalWeight = segments.sumOf { it.weight }.coerceAtLeast(1)
+                var consumedWeight = 0
+                val words = segments.map { segment ->
+                    val startOffset = span * consumedWeight / totalWeight
+                    consumedWeight += segment.weight
+                    // End is computed from the running total rather than by adding a rounded
+                    // duration, so the units stay flush against each other and the last one lands
+                    // exactly on the line's end instead of drifting by the accumulated remainders.
+                    val endOffset = span * consumedWeight / totalWeight
+                    WordTiming(
+                        text = segment.text,
+                        startMs = line.timestampMs + startOffset,
+                        durationMs = endOffset - startOffset,
+                    )
+                }
+                line.copy(words = words)
+            }
         }
 
         /** Breaks [text] at its phrase boundaries, or returns it whole if it has none worth using. */
@@ -247,9 +483,9 @@ class LyricsRepository(
 
             val result = mutableListOf<LyricLine>()
 
-            fun fillGap(fromMs: Long, toMs: Long) {
+            fun fillGap(fromMs: Long, toMs: Long, threshold: Long = INSTRUMENTAL_GAP_MS) {
                 val gap = toMs - fromMs
-                if (gap < INSTRUMENTAL_GAP_MS) return
+                if (gap < threshold) return
                 // Aim for one marker per INSTRUMENTAL_MARKER_SPACING_MS, then space that many evenly across
                 // the gap so the first and last never land on the words at either end.
                 val count = ((gap / INSTRUMENTAL_MARKER_SPACING_MS).toInt() - 1).coerceAtLeast(1)
@@ -269,43 +505,55 @@ class LyricsRepository(
             lines.forEachIndexed { index, line ->
                 result.add(line)
                 val next = lines.getOrNull(index + 1) ?: return@forEachIndexed
-                fillGap(line.timestampMs, next.timestampMs)
+                // With a known line end the silence is measured, not guessed from the next start,
+                // so a shorter gap is already certain to be music.
+                val end = line.endMs?.takeIf { it > line.timestampMs }
+                if (end != null) fillGap(end, next.timestampMs, INSTRUMENTAL_GAP_AFTER_END_MS)
+                else fillGap(line.timestampMs, next.timestampMs)
             }
 
-            if (totalDurationMs > 0L) fillGap(lines.last().timestampMs, totalDurationMs)
+            if (totalDurationMs > 0L) {
+                val last = lines.last()
+                val end = last.endMs?.takeIf { it > last.timestampMs }
+                if (end != null) fillGap(end, totalDurationMs, INSTRUMENTAL_GAP_AFTER_END_MS)
+                else fillGap(last.timestampMs, totalDurationMs)
+            }
 
             return result
         }
     }
 
     /**
-     * Fetches lyrics for a [song] by trying LrcLib API, embedded ID3 tags, or YouTube captions.
-     * Caches the fetched lyrics into Room DB.
+     * Lyrics for [song], best available first, cached on the song row.
+     *
+     * Synced sources are tried in order of how precisely they follow the singer, and the first
+     * synced result wins:
+     * 1. Better Lyrics: a time on every word (when its cache has the song).
+     * 2. YouTube Music's own lyrics: per-line start *and end*, what the YT Music app shows. Tried
+     *    for the track's own video id, then for the official song found by name, since music
+     *    videos often have no lyrics tab while the song does.
+     * 3. LrcLib, 4. KuGou (Chinese/Japanese catalogue), 5. the file's own tags.
+     * Unsynced text from any of them is kept as the fallback, then YouTube captions last.
+     *
+     * Stored lyrics that are synced are returned as they are. Stored lyrics that are *not* synced
+     * get one look per session for a synced version, so a library fetched before these sources
+     * existed catches up.
      */
     suspend fun fetchAndSaveLyrics(song: Song, forceFetch: Boolean = false): String? = withContext(Dispatchers.IO) {
-        if (!forceFetch && !song.lyrics.isNullOrBlank()) {
-            return@withContext song.lyrics
-        }
-
-        var fetchedLyrics: String? = null
-
-        // 1. Try LrcLib API
-        try {
-            fetchedLyrics = fetchFromLrcLib(song)
-        } catch (e: Exception) {
-            Log.e(TAG, "LrcLib fetch failed for ${song.title}", e)
-        }
-
-        // 2. Try Local Embedded ID3 Tags
-        if (fetchedLyrics.isNullOrBlank()) {
-            try {
-                fetchedLyrics = fetchFromEmbeddedId3(song)
-            } catch (e: Exception) {
-                Log.e(TAG, "Embedded ID3 fetch failed for ${song.title}", e)
+        val stored = song.lyrics?.takeIf { it.isNotBlank() }
+        if (!forceFetch && stored != null) {
+            if (isSynced(stored) || !upgradeAttempted.add(song.id)) return@withContext stored
+            val synced = firstSynced(song).first
+            if (synced != null) {
+                musicRepository.updateSongLyrics(song.id, synced)
+                return@withContext synced
             }
+            return@withContext stored
         }
 
-        // 3. Try YouTube Captions
+        val (synced, plain) = firstSynced(song)
+        var fetchedLyrics = synced ?: plain
+
         if (fetchedLyrics.isNullOrBlank()) {
             try {
                 fetchedLyrics = fetchFromYouTubeCaptions(song)
@@ -314,12 +562,69 @@ class LyricsRepository(
             }
         }
 
-        // Cache in Room DB if lyrics were successfully fetched
         if (!fetchedLyrics.isNullOrBlank()) {
             musicRepository.updateSongLyrics(song.id, fetchedLyrics)
         }
-
         return@withContext fetchedLyrics
+    }
+
+    /**
+     * Walks the sources in order and returns the first synced lyrics, plus the first unsynced
+     * text seen on the way as a fallback.
+     */
+    private suspend fun firstSynced(song: Song): Pair<String?, String?> {
+        val cleaned = com.example.tgmusicai.data.local.AiMetadataCleaner.cleanOffline(song.title, song.artist)
+        val title = cleaned.cleanTitle.ifBlank { song.title }
+        val artist = (cleaned.artist ?: song.artist).takeUnless { it.equals("<unknown>", true) }.orEmpty()
+        val durationSec = song.durationMs / 1000
+        var plain: String? = null
+
+        val sources: List<Pair<String, suspend () -> String?>> = listOf(
+            "Better Lyrics" to { betterLyrics.fetch(title, artist, durationSec) },
+            "YouTube Music" to { fetchFromYouTubeMusic(song, title, artist) { plain = plain ?: it } },
+            "LrcLib" to { fetchFromLrcLib(song) },
+            "KuGou" to { kuGou.fetch(title, artist, durationSec) },
+            "file tags" to { fetchFromEmbeddedId3(song) },
+        )
+        for ((name, fetch) in sources) {
+            val result = try {
+                fetch()
+            } catch (e: Exception) {
+                Log.w(TAG, "$name lyrics lookup failed for ${song.title}", e)
+                null
+            } ?: continue
+            if (isSynced(result)) {
+                Log.d(TAG, "Synced lyrics for '${song.title}' from $name")
+                return result to plain
+            }
+            if (plain == null) plain = result
+        }
+        return null to plain
+    }
+
+    /**
+     * YouTube Music's own lyrics: for the track's video id, then for the official song matching
+     * [title] and [artist]. Timed lyrics are returned; plain ones are handed to [onPlain].
+     */
+    private suspend fun fetchFromYouTubeMusic(
+        song: Song,
+        title: String,
+        artist: String,
+        onPlain: (String) -> Unit,
+    ): String? {
+        val tried = mutableSetOf<String>()
+        suspend fun attempt(videoId: String): String? {
+            if (!tried.add(videoId)) return null
+            val lyrics = youTubeMusic.fetchLyrics(videoId) ?: return null
+            if (lyrics.isTimed) return lyrics.text
+            onPlain(lyrics.text)
+            return null
+        }
+        song.youtubeId?.takeIf { it.isNotBlank() }?.let { attempt(it)?.let { timed -> return timed } }
+        val match = youTubeMusic.searchSongs("$title $artist".trim())
+            .firstOrNull { isLyricsMatch(title, artist, song.durationMs / 1000, it.title, it.uploader, it.durationSeconds) }
+            ?: return null
+        return attempt(match.videoId)
     }
 
     /**
@@ -597,8 +902,13 @@ class LyricsRepository(
             return@withContext null
         }
 
+        // Nothing to do when the lyrics are already in the target language -- and skipping it
+        // avoids downloading a model to translate a language into itself.
+        val sourceCode = detectSourceLanguage(lines)
+        if (sourceCode == targetCode) return@withContext lines
+
         val options = TranslatorOptions.Builder()
-            .setSourceLanguage(TranslateLanguage.ENGLISH)
+            .setSourceLanguage(sourceCode)
             .setTargetLanguage(targetCode)
             .build()
 
@@ -618,6 +928,43 @@ class LyricsRepository(
         } finally {
             // Frees the loaded model; a Translator holds native resources until closed.
             translator.close()
+        }
+    }
+
+    /**
+     * The ML Kit source language for [lines], identified from the lyrics themselves.
+     *
+     * The source language used to be pinned to English, which made this feature structurally
+     * incapable of the thing it is most wanted for: a song in another language rendered into one the
+     * user reads. A Japanese track was translated English-to-English, which ML Kit answers by
+     * handing most of the text back unchanged -- indistinguishable, on screen, from the translator
+     * being broken. Nothing failed and nothing was logged, so the only way to notice was to try it
+     * on a song that wasn't already in English.
+     *
+     * Falls back to English when identification is inconclusive or ML Kit has no translation model
+     * for what it found. That is the old behaviour, and it is still the right guess for the common
+     * case; it just isn't an assumption worth making without looking first.
+     *
+     * The whole lyric is sampled rather than one line, because a single line is often too short to
+     * identify and a chorus of "la la la" identifies as nothing at all.
+     */
+    private suspend fun detectSourceLanguage(lines: List<String>): String {
+        val sample = lines.asSequence()
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .take(MAX_LANGUAGE_SAMPLE_CHARS)
+        if (sample.isBlank()) return TranslateLanguage.ENGLISH
+
+        return try {
+            val tag = LanguageIdentification.getClient().identifyLanguage(sample).await()
+            if (tag == UNDETERMINED_LANGUAGE) {
+                TranslateLanguage.ENGLISH
+            } else {
+                TranslateLanguage.fromLanguageTag(tag) ?: TranslateLanguage.ENGLISH
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not identify the lyrics' language; assuming English", e)
+            TranslateLanguage.ENGLISH
         }
     }
 

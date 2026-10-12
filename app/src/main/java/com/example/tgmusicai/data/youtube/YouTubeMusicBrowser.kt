@@ -191,6 +191,21 @@ class YouTubeMusicBrowser(
     }
 
     /**
+     * Songs matching [query], best first -- YouTube Music's "Songs" search filter, which returns
+     * official audio tracks rather than videos. Used to turn a track known only by name (from
+     * Last.fm) into a playable video id.
+     */
+    suspend fun searchSongs(query: String): List<YouTubeSearchResult> {
+        val root = search(query, SEARCH_PARAMS_SONGS) ?: return emptyList()
+        return try {
+            parseTrackRows(root)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Could not parse song search for '$query'", e)
+            emptyList()
+        }
+    }
+
+    /**
      * Artists matching [query], so a search can lead to an artist's page rather than only to
      * individual tracks.
      *
@@ -360,6 +375,84 @@ class YouTubeMusicBrowser(
         }
     }
 
+    /**
+     * YouTube Music's own radio for [videoId]: the "up next" mix the web player builds when a track
+     * is started, which is the `RDAMVM` + id playlist served through `/youtubei/v1/next`.
+     *
+     * This is the closest thing to "more like this one track" that the catalogue offers, and it is
+     * tuned by YouTube to flow on from the seed, which taste-seeded artist lookups cannot do. The
+     * seed itself (always the first entry) is left out. Empty on any failure.
+     */
+    suspend fun fetchRadio(videoId: String): List<YouTubeSearchResult> {
+        if (videoId.isBlank()) return emptyList()
+        val payload = JSONObject().apply {
+            put("context", webRemixContext())
+            put("videoId", videoId)
+            put("playlistId", RADIO_PLAYLIST_PREFIX + videoId)
+            put("isAudioOnly", true)
+        }
+        val root = post(NEXT_URL, payload, "next($videoId)") ?: return emptyList()
+        return try {
+            parseRadioTracks(root, videoId)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Could not parse the radio for $videoId", e)
+            emptyList()
+        }
+    }
+
+    /** Lyrics for one track as YouTube Music shows them: timed per line, or plain text. */
+    data class TrackLyrics(
+        /** LRC with each line's end as a trailing `<mm:ss.xx>` tag when timed; plain text otherwise. */
+        val text: String,
+        val isTimed: Boolean,
+        /** The credit YouTube Music shows under them, e.g. "Source: Musixmatch". */
+        val source: String?,
+    )
+
+    /**
+     * The lyrics YouTube Music itself shows for [videoId]: the Lyrics tab's browse id comes from
+     * `/next`, and `/browse` on it returns the lyrics. Only the Android/iOS Music clients get the
+     * timed version (`timedLyricsData`, one cue per line with start and end in ms, licensed from
+     * Musixmatch/LyricFind); the web client gets plain text for the same id, which is why the
+     * browse call names [LYRICS_CLIENT_NAME]. Null when the track has no lyrics tab.
+     *
+     * Music videos often have no tab while the official audio ("song") version does, so callers
+     * holding a video id should also try the song found by [searchSongs].
+     */
+    suspend fun fetchLyrics(videoId: String): TrackLyrics? {
+        if (videoId.isBlank()) return null
+        val next = post(
+            NEXT_URL,
+            JSONObject().apply {
+                put("context", webRemixContext())
+                put("videoId", videoId)
+            },
+            "next($videoId) for lyrics"
+        ) ?: return null
+        val browseId = lyricsBrowseId(next) ?: return null
+        val root = post(
+            BROWSE_URL,
+            JSONObject().apply {
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", LYRICS_CLIENT_NAME)
+                        put("clientVersion", LYRICS_CLIENT_VERSION)
+                        put("hl", "en")
+                        put("gl", "US")
+                    })
+                })
+                put("browseId", browseId)
+            },
+            "browse($browseId) for lyrics"
+        ) ?: return null
+        return try {
+            parseLyricsResponse(root)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Could not parse lyrics for $videoId", e)
+            null
+        }
+    }
+
     /** The current top-songs chart. Empty if charts are unavailable in the user's region. */
     suspend fun fetchTopChart(): List<YouTubeSearchResult> {
         val root = browse(BROWSE_ID_CHARTS) ?: return emptyList()
@@ -482,50 +575,61 @@ class YouTubeMusicBrowser(
         browseId: String,
         continuation: String? = null,
         params: String? = null
-    ): JSONObject? = withContext(Dispatchers.IO) {
+    ): JSONObject? {
         val payload = JSONObject().apply {
-            put("context", JSONObject().apply {
-                put("client", JSONObject().apply {
-                    put("clientName", "WEB_REMIX")
-                    put("clientVersion", CLIENT_VERSION)
-                    put("hl", "en")
-                    put("gl", "US")
-                })
-            })
+            put("context", webRemixContext())
             put("browseId", browseId)
             if (!continuation.isNullOrBlank()) put("continuation", continuation)
             if (!params.isNullOrBlank()) put("params", params)
         }
-
-        val builder = Request.Builder()
-            .url("$BROWSE_URL?key=$INNERTUBE_API_KEY&prettyPrint=false")
-            .header("X-Origin", YOUTUBE_MUSIC_ORIGIN)
-            .header("Origin", YOUTUBE_MUSIC_ORIGIN)
-            .header("Referer", "$YOUTUBE_MUSIC_ORIGIN/")
-            .header("User-Agent", NewPipeOkHttpDownloader.REALISTIC_USER_AGENT)
-            .post(payload.toString().toRequestBody("application/json".toMediaType()))
-
-        val cookieHeader = cookieManager?.getCookieHeader()
-        val authHeader = cookieManager?.getAuthorizationHeader()
-        if (cookieHeader != null && authHeader != null) {
-            builder.header("Cookie", cookieHeader)
-                .header("Authorization", authHeader)
-                .header("X-Goog-AuthUser", "0")
-        }
-
-        try {
-            okHttpClient.newCall(builder.build()).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "browse($browseId) failed: HTTP ${response.code}")
-                    return@withContext null
-                }
-                JSONObject(response.body?.string() ?: "{}")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "browse($browseId) failed: ${e.message}")
-            null
-        }
+        return post(BROWSE_URL, payload, "browse($browseId)")
     }
+
+    private fun webRemixContext(): JSONObject = JSONObject().apply {
+        put("client", JSONObject().apply {
+            put("clientName", "WEB_REMIX")
+            put("clientVersion", CLIENT_VERSION)
+            put("hl", "en")
+            put("gl", "US")
+        })
+    }
+
+    /**
+     * POSTs [payload] to an InnerTube endpoint, attaching session headers when there is a session
+     * (to personalise, never to enable -- see [browse]). Null on any failure; [label] names the
+     * call in the log.
+     */
+    private suspend fun post(url: String, payload: JSONObject, label: String): JSONObject? =
+        withContext(Dispatchers.IO) {
+            val builder = Request.Builder()
+                .url("$url?key=$INNERTUBE_API_KEY&prettyPrint=false")
+                .header("X-Origin", YOUTUBE_MUSIC_ORIGIN)
+                .header("Origin", YOUTUBE_MUSIC_ORIGIN)
+                .header("Referer", "$YOUTUBE_MUSIC_ORIGIN/")
+                .header("User-Agent", NewPipeOkHttpDownloader.REALISTIC_USER_AGENT)
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+
+            val cookieHeader = cookieManager?.getCookieHeader()
+            val authHeader = cookieManager?.getAuthorizationHeader()
+            if (cookieHeader != null && authHeader != null) {
+                builder.header("Cookie", cookieHeader)
+                    .header("Authorization", authHeader)
+                    .header("X-Goog-AuthUser", "0")
+            }
+
+            try {
+                okHttpClient.newCall(builder.build()).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        Log.w(TAG, "$label failed: HTTP ${response.code}")
+                        return@withContext null
+                    }
+                    JSONObject(response.body?.string() ?: "{}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "$label failed: ${e.message}")
+                null
+            }
+        }
 
     companion object {
         private const val TAG = "YouTubeMusicBrowser"
@@ -536,6 +640,120 @@ class YouTubeMusicBrowser(
         private const val INNERTUBE_API_KEY = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
 
         private const val SEARCH_URL = "https://music.youtube.com/youtubei/v1/search"
+        private const val NEXT_URL = "https://music.youtube.com/youtubei/v1/next"
+
+        /**
+         * The client the lyrics browse call identifies as. Pinned on purpose: the web client gets
+         * untimed text for the same browse id, and Music clients older than 6.x are refused (400).
+         * Version as used by sydlexius/canticle and verified live on 2026-10-11.
+         */
+        const val LYRICS_CLIENT_NAME = "ANDROID_MUSIC"
+        const val LYRICS_CLIENT_VERSION = "7.03.52"
+
+        /** The Lyrics tab's browse id in a `/next` response (they start with `MPLY`). */
+        internal fun lyricsBrowseId(next: JSONObject): String? {
+            val ids = mutableListOf<String>()
+            collectStrings(next, "browseId", ids)
+            return ids.firstOrNull { it.startsWith("MPLY") }
+        }
+
+        private fun collectStrings(node: Any?, key: String, out: MutableList<String>) {
+            when (node) {
+                is JSONObject -> {
+                    (node.opt(key) as? String)?.let { out.add(it) }
+                    val keys = node.keys()
+                    while (keys.hasNext()) collectStrings(node.opt(keys.next()), key, out)
+                }
+                is org.json.JSONArray -> for (i in 0 until node.length()) collectStrings(node.opt(i), key, out)
+                else -> Unit
+            }
+        }
+
+        /**
+         * Reads a lyrics browse response: `timedLyricsData` (each entry `lyricLine` plus
+         * `cueRange.startTimeMilliseconds`/`endTimeMilliseconds`) into LRC with line-end tags, or
+         * the plain `description` text when that is all there is.
+         */
+        internal fun parseLyricsResponse(root: JSONObject): TrackLyrics? {
+            val sources = mutableListOf<String>()
+            val footers = mutableListOf<JSONObject>()
+            collectRenderers(root, "sourceMessage", footers)
+            footers.firstOrNull()?.let { runsText(it).takeIf { t -> t.isNotBlank() }?.let(sources::add) }
+            if (sources.isEmpty()) collectStrings(root, "sourceMessage", sources)
+            val source = sources.firstOrNull()
+
+            val timed = findArray(root, "timedLyricsData")
+            if (timed != null && timed.length() > 0) {
+                val out = StringBuilder()
+                for (i in 0 until timed.length()) {
+                    val cue = timed.optJSONObject(i) ?: continue
+                    val text = cue.optString("lyricLine").trim()
+                    val range = cue.optJSONObject("cueRange") ?: continue
+                    val start = range.optString("startTimeMilliseconds").toLongOrNull() ?: continue
+                    val end = range.optString("endTimeMilliseconds").toLongOrNull()
+                    if (text.isEmpty()) continue
+                    out.append(com.example.tgmusicai.data.lyrics.LrcFormat.lineTag(start)).append(text)
+                    if (end != null && end > start) out.append(com.example.tgmusicai.data.lyrics.LrcFormat.wordTag(end))
+                    out.append('\n')
+                }
+                if (out.isNotEmpty()) return TrackLyrics(out.toString().trimEnd(), true, source)
+            }
+
+            val shelves = mutableListOf<JSONObject>()
+            collectRenderers(root, "musicDescriptionShelfRenderer", shelves)
+            val plain = shelves.firstNotNullOfOrNull { runsText(it.optJSONObject("description")).takeIf { t -> t.isNotBlank() } }
+            if (plain != null) {
+                val footer = shelves.firstNotNullOfOrNull { runsText(it.optJSONObject("footer")).takeIf { t -> t.isNotBlank() } }
+                return TrackLyrics(plain.trim(), false, source ?: footer)
+            }
+            return null
+        }
+
+        private fun findArray(node: Any?, key: String): org.json.JSONArray? {
+            when (node) {
+                is JSONObject -> {
+                    (node.opt(key) as? org.json.JSONArray)?.let { return it }
+                    val keys = node.keys()
+                    while (keys.hasNext()) findArray(node.opt(keys.next()), key)?.let { return it }
+                }
+                is org.json.JSONArray -> for (i in 0 until node.length()) findArray(node.opt(i), key)?.let { return it }
+                else -> Unit
+            }
+            return null
+        }
+
+        /** Prefix that turns a video id into the id of YouTube Music's radio seeded from it. */
+        const val RADIO_PLAYLIST_PREFIX = "RDAMVM"
+
+        /**
+         * Reads the tracks of a `/next` radio response, skipping [seedVideoId].
+         *
+         * Each entry is a `playlistPanelVideoRenderer`. Its `shortBylineText` holds the artist
+         * alone; `longBylineText` adds view and like counts, which is why it is not used.
+         */
+        internal fun parseRadioTracks(root: JSONObject, seedVideoId: String): List<YouTubeSearchResult> {
+            val rows = mutableListOf<JSONObject>()
+            collectRenderers(root, "playlistPanelVideoRenderer", rows)
+            val seen = mutableSetOf(seedVideoId)
+            return rows.mapNotNull { row ->
+                val videoId = row.optString("videoId").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                if (!seen.add(videoId)) return@mapNotNull null
+                val title = runsText(row.optJSONObject("title")).takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+                val artist = runsText(row.optJSONObject("shortBylineText"))
+                    .split("•")
+                    .map { it.trim() }
+                    .firstOrNull { it.isNotBlank() }
+                    ?: "Unknown Artist"
+                YouTubeSearchResult(
+                    videoId = videoId,
+                    title = title,
+                    uploader = artist,
+                    durationSeconds = extractDurationSeconds(row),
+                    thumbnailUri = findThumbnailUrl(row.optJSONObject("thumbnail")).orEmpty()
+                )
+            }
+        }
 
         /** YouTube Music's own well-known browse ids for its home, moods/genres and charts pages. */
         const val BROWSE_ID_HOME = "FEmusic_home"
@@ -553,6 +771,7 @@ class YouTubeMusicBrowser(
          * values the web client sends verbatim -- not constructible from anything meaningful on
          * this side, which is why they are literals rather than something built at call time.
          */
+        private const val SEARCH_PARAMS_SONGS = "EgWKAQIIAWoKEAkQBRAKEAMQBA=="
         private const val SEARCH_PARAMS_ARTISTS = "EgWKAQIgAWoKEAkQChAFEAMQBA=="
         private const val SEARCH_PARAMS_ALBUMS = "EgWKAQIYAWoKEAkQChAFEAMQBA=="
 

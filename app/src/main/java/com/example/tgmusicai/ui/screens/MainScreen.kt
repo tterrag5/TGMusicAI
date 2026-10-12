@@ -47,6 +47,10 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
@@ -396,7 +400,25 @@ fun MainScreen(
             }
         }
     ) {
+        // SponsorBlock skip announcements. A snackbar rather than the Toast used elsewhere in
+        // the app, because this one carries an action: a Toast cannot hold a button, and the whole
+        // point is to offer the way out at the moment the skip happened.
+        val snackbarHostState = remember { SnackbarHostState() }
+        LaunchedEffect(Unit) {
+            playerViewModel.skippedSegments.collect { skipped ->
+                val outcome = snackbarHostState.showSnackbar(
+                    message = "Skipped ${skipped.label}",
+                    actionLabel = "Disable",
+                    duration = SnackbarDuration.Short,
+                )
+                if (outcome == SnackbarResult.ActionPerformed) {
+                    playerViewModel.disableSponsorCategory(skipped.category)
+                }
+            }
+        }
+
         Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             bottomBar = {
                 // The whole bar (MiniPlayer + bottom NavigationBar) is hidden entirely -- not just
                 // visually covered -- while the full Now Playing screen is expanded, giving it

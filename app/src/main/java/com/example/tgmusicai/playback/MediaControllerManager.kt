@@ -3,15 +3,21 @@ package com.example.tgmusicai.playback
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionError
+import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -19,8 +25,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -113,6 +122,53 @@ class MediaControllerManager(
         _playbackError.value = null
     }
 
+    private val _isConnected = MutableStateFlow(false)
+
+    /**
+     * Whether the controller has finished binding to the service.
+     *
+     * Binding is asynchronous, so anything that has to act the moment the app opens -- a voice
+     * intent that launched it, in particular -- arrives before there is a player to act on. Without
+     * something to wait for, the request is simply dropped on a cold start and the user watches the
+     * app open and do nothing.
+     */
+    val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+
+    /**
+     * SponsorBlock segments skipped during playback, as they happen.
+     *
+     * A SharedFlow with no replay rather than a StateFlow: a skip is an event that has already
+     * happened, so a screen opened afterwards should not be told about it, and two skips of the
+     * same category in a row are two separate announcements rather than one deduplicated value.
+     */
+    private val _skippedSegments = MutableSharedFlow<SkippedSegment>(extraBufferCapacity = 4)
+    val skippedSegments: SharedFlow<SkippedSegment> = _skippedSegments.asSharedFlow()
+
+    /** A segment SponsorBlock just skipped: its category id, and the label to show for it. */
+    data class SkippedSegment(val category: String, val label: String)
+
+    /**
+     * Receives what the service broadcasts to its controllers. Playback state arrives through the
+     * Player listener instead; this is only for the things that are events rather than state.
+     */
+    private val sessionListener = object : MediaController.Listener {
+        override fun onCustomCommand(
+            controller: MediaController,
+            command: SessionCommand,
+            args: Bundle,
+        ): ListenableFuture<SessionResult> {
+            if (command.customAction == PlaybackService.ACTION_SEGMENT_SKIPPED) {
+                val category = args.getString(PlaybackService.EXTRA_SEGMENT_CATEGORY)
+                val label = args.getString(PlaybackService.EXTRA_SEGMENT_LABEL)
+                if (category != null && label != null) {
+                    _skippedSegments.tryEmit(SkippedSegment(category, label))
+                }
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+            return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
+        }
+    }
+
     private var positionTickerJob: Job? = null
     private var currentSongList: List<Song> = emptyList()
 
@@ -129,7 +185,11 @@ class MediaControllerManager(
             context,
             ComponentName(context, PlaybackService::class.java)
         )
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
+        val controllerFuture = MediaController.Builder(context, sessionToken)
+            .setListener(sessionListener)
+            // Tells the service the app's own resolver is present, so its fallback stays idle.
+            .setConnectionHints(android.os.Bundle().apply { putBoolean(ServiceStreamResolver.HINT_APP_UI, true) })
+            .buildAsync()
         
         controllerFuture.addListener(
             {
@@ -137,6 +197,7 @@ class MediaControllerManager(
                     val controllerInstance = controllerFuture.get()
                     controller = controllerInstance
                     setupPlayerListener(controllerInstance)
+                    _isConnected.value = true
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -513,8 +574,8 @@ class MediaControllerManager(
     }
 
     // ---------------------------------------------------------------------------------------------
-    // The playback window: two tracks back, the playing track, two tracks ahead. Only those five
-    // are resolved and only those five are held in the audio cache.
+    // The playback window: two tracks back, the playing track, three tracks ahead. Only those six
+    // are resolved and only those six are held in the audio cache.
     //
     // Deliberately a window and not the whole queue. Resolving every track of a cloud queue up
     // front fanned out one coroutine per item, and because they acquired their permits roughly in
@@ -544,12 +605,13 @@ class MediaControllerManager(
     private fun windowKey(song: Song): String = song.youtubeId?.takeIf { it.isNotBlank() } ?: song.mediaUri
 
     /**
-     * Queue positions the window covers, ordered by how soon each is needed: the playing track
-     * first, then ahead, then behind. The resolver has only a couple of permits, so the order is
+     * Queue positions the window covers -- the playing track, three ahead, two behind -- ordered
+     * by how soon each is needed: the playing track first, then ahead, then behind. Three ahead
+     * means even a quick double skip lands on a track that is already resolved. The resolver has only a couple of permits, so the order is
      * what decides which track gets a permit first -- the one being waited on, always.
      */
     private fun windowIndices(current: Int, size: Int): List<Int> =
-        listOf(0, 1, 2, -1, -2)
+        listOf(0, 1, 2, 3, -1, -2)
             .map { current + it }
             .filter { it in 0 until size }
             .distinct()
@@ -648,7 +710,7 @@ class MediaControllerManager(
     // the same shared Piped/Invidious mirror the instant "Play All" is tapped on an all-cloud
     // playlist (e.g. Cloud Nine) looks a lot like hostile traffic to that mirror and was observed
     // live to trigger a wall of 401/403 responses across every candidate at once -- a self-inflicted
-    // rate-limit, not a real outage. A window of five tracks is small enough that three at a time
+    // rate-limit, not a real outage. A window of six tracks is small enough that three at a time
     // still fills it promptly while staying well short of that burst.
     private val resolveSemaphore = Semaphore(3)
 
@@ -898,6 +960,45 @@ class MediaControllerManager(
      * come from a playlist, so attribution can never be inherited by the next thing played.
      */
     private var originPlaylistId: Long? = null
+
+    /**
+     * Plays whatever best matches [query], resolving it on the service side.
+     *
+     * Hands the service a media item carrying nothing but a search query, which is the shape
+     * [PlaybackService]'s `onSetMediaItems` already answers for "play X on TGMusic" from Assistant
+     * and Android Auto: it runs the search, substitutes the real queue and starts playback. Going
+     * through that path rather than searching here is deliberate -- that resolver already walks
+     * liked songs, playlists, exact and fuzzy titles, artists and then YouTube with real stream
+     * resolution, and a second implementation on this side would immediately drift from it.
+     *
+     * Returns false when there is no controller yet, so a caller that arrived from a cold-start
+     * voice intent can retry once the service is connected rather than silently doing nothing.
+     */
+    fun playFromSearch(query: String): Boolean {
+        val player = controller ?: return false
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return false
+
+        // The queue is about to be replaced by whatever the service resolves, so the locally
+        // tracked queue state has to be dropped rather than left describing the old one.
+        queueGeneration++
+        currentSongList = emptyList()
+        _playlist.value = emptyList()
+
+        val searchItem = MediaItem.Builder()
+            .setMediaId("voice-search:$trimmed")
+            .setRequestMetadata(
+                MediaItem.RequestMetadata.Builder()
+                    .setSearchQuery(trimmed)
+                    .build()
+            )
+            .build()
+
+        player.setMediaItems(listOf(searchItem), 0, 0L)
+        player.prepare()
+        player.play()
+        return true
+    }
 
     private fun buildMediaItem(song: Song): MediaItem {
         return MediaItem.Builder()

@@ -7,7 +7,9 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.tgmusicai.data.repository.VarietyMode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -80,10 +82,14 @@ class AppPreferences(private val context: Context) {
         val VOLUME_NORMALIZATION_ENABLED = booleanPreferencesKey("volume_normalization_enabled")
         val SPONSORBLOCK_ENABLED = booleanPreferencesKey("sponsorblock_enabled")
         val SPONSORBLOCK_CATEGORIES = stringPreferencesKey("sponsorblock_categories")
+        val RADIO_VARIETY = stringPreferencesKey("radio_variety")
         val SCROBBLING_ENABLED = booleanPreferencesKey("scrobbling_enabled")
         val LISTENBRAINZ_TOKEN = stringPreferencesKey("listenbrainz_token")
         val LISTENBRAINZ_SERVER = stringPreferencesKey("listenbrainz_server")
         val LISTENBRAINZ_USERNAME = stringPreferencesKey("listenbrainz_username")
+        val YOUTUBE_HISTORY_ENABLED = booleanPreferencesKey("youtube_history_enabled")
+        val LASTFM_API_KEY = stringPreferencesKey("lastfm_api_key")
+        val LASTFM_RECOMMENDATIONS_ENABLED = booleanPreferencesKey("lastfm_recommendations_enabled")
     }
 
     /**
@@ -135,6 +141,56 @@ class AppPreferences(private val context: Context) {
     }
 
     /**
+     * Whether cloud tracks played here are added to the signed-in account's YouTube Music
+     * history. Off by default: it writes to the user's real account.
+     */
+    val youtubeHistoryEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[YOUTUBE_HISTORY_ENABLED] ?: false }
+
+    suspend fun setYouTubeHistoryEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[YOUTUBE_HISTORY_ENABLED] = enabled }
+    }
+
+    /**
+     * The user's own Last.fm API key; null until they paste one in. The app has no key of its own
+     * (Last.fm issues keys to developers, and CLAUDE.md's "No API keys" rule keeps those out of
+     * the build), so Last.fm recommendations exist only for a user who brings one.
+     */
+    val lastFmApiKeyFlow: Flow<String?> = context.dataStore.data
+        .map { preferences -> preferences[LASTFM_API_KEY]?.takeIf { it.isNotBlank() } }
+
+    /** Whether recommendations and autoplay also draw on Last.fm. Off by default. */
+    val lastFmRecommendationsEnabledFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[LASTFM_RECOMMENDATIONS_ENABLED] ?: false }
+
+    /** The key to use right now: the stored key while the feature is on, otherwise null. */
+    suspend fun activeLastFmApiKey(): String? {
+        val preferences = context.dataStore.data.first()
+        if (preferences[LASTFM_RECOMMENDATIONS_ENABLED] != true) return null
+        return preferences[LASTFM_API_KEY]?.takeIf { it.isNotBlank() }
+    }
+
+    /** Stores a verified key and turns the feature on, since that is why a key is added. */
+    suspend fun setLastFmApiKey(apiKey: String) {
+        context.dataStore.edit { preferences ->
+            preferences[LASTFM_API_KEY] = apiKey.trim()
+            preferences[LASTFM_RECOMMENDATIONS_ENABLED] = true
+        }
+    }
+
+    suspend fun setLastFmRecommendationsEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[LASTFM_RECOMMENDATIONS_ENABLED] = enabled }
+    }
+
+    /** Forgets the key and turns the feature off, since one cannot work without the other. */
+    suspend fun clearLastFmApiKey() {
+        context.dataStore.edit { preferences ->
+            preferences.remove(LASTFM_API_KEY)
+            preferences[LASTFM_RECOMMENDATIONS_ENABLED] = false
+        }
+    }
+
+    /**
      * Whether playback skips the non-music parts of a YouTube track, using the crowd-sourced
      * SponsorBlock database.
      *
@@ -164,6 +220,24 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { preferences ->
             preferences[SPONSORBLOCK_CATEGORIES] = categories.joinToString(",")
         }
+    }
+
+    /**
+     * How far Start Radio may stray from what the user already plays.
+     *
+     * Stored by enum name rather than ordinal, so reordering [VarietyMode] cannot silently change
+     * what an existing install means. An unrecognised value reads as the default instead of
+     * throwing, which is what happens if a mode is ever renamed or removed.
+     */
+    val radioVarietyFlow: Flow<VarietyMode> = context.dataStore.data
+        .map { preferences ->
+            preferences[RADIO_VARIETY]
+                ?.let { stored -> VarietyMode.entries.firstOrNull { it.name == stored } }
+                ?: VarietyMode.BLEND
+        }
+
+    suspend fun setRadioVariety(mode: VarietyMode) {
+        context.dataStore.edit { preferences -> preferences[RADIO_VARIETY] = mode.name }
     }
 
     /**
@@ -315,10 +389,8 @@ class AppPreferences(private val context: Context) {
     }
 
     /**
-     * Whether consecutive tracks fade out/in into each other instead of cutting directly from one
-     * to the next. Implemented as a sequential fade-to-silent-then-fade-in (not a true overlapping
-     * crossfade, which would need two simultaneous ExoPlayer instances) -- see
-     * [com.example.tgmusicai.ui.viewmodel.PlayerViewModel]'s combined volume-fade logic.
+     * Whether consecutive tracks overlap and blend into each other instead of cutting directly
+     * from one to the next -- see [com.example.tgmusicai.playback.OverlapCrossfader].
      */
     val crossfadeEnabledFlow: Flow<Boolean> = context.dataStore.data
         .map { preferences -> preferences[CROSSFADE_ENABLED] ?: false }

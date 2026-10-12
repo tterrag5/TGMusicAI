@@ -33,6 +33,8 @@ import com.example.tgmusicai.cast.CastAvailability
 import com.example.tgmusicai.cast.CastMediaItemConverter
 import com.example.tgmusicai.cast.LocalMediaHttpServer
 import com.example.tgmusicai.data.local.AppDatabase
+import com.example.tgmusicai.data.local.entity.PendingScrobble
+import com.example.tgmusicai.data.network.NetworkObserver
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.entity.ListeningHistory
 import com.example.tgmusicai.data.local.entity.Song
@@ -56,10 +58,14 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.guava.future
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -95,16 +101,31 @@ class PlaybackService : MediaLibraryService() {
      * artists the user actually plays. Built lazily because a device that never reaches the end of
      * a queue never needs it, and because it must not add work to service start-up.
      */
+    private val recommendationEngine by lazy {
+        RecommendationEngine(
+            songDao = database.songDao(),
+            songStatsDao = database.songStatsDao(),
+            aiSongTagsDao = database.aiSongTagsDao(),
+            listeningHistoryDao = database.listeningHistoryDao()
+        )
+    }
+
+    /** Public YouTube Music catalogue, for the car's Discover folder (works signed out). */
+    private val musicBrowser by lazy {
+        YouTubeMusicBrowser(InnerTubeCookieManager(AppPreferences(applicationContext)))
+    }
+
+    /** The car's Discover shelves, kept for the session so a shelf's index stays meaningful. */
+    @Volatile
+    private var discoverShelves: List<com.example.tgmusicai.data.youtube.YouTubeHomeShelf> = emptyList()
+
     private val cloudRecommendations by lazy {
         CloudRecommendationSource(
-            browser = YouTubeMusicBrowser(InnerTubeCookieManager(AppPreferences(applicationContext))),
+            browser = musicBrowser,
             songDao = database.songDao(),
-            recommendationEngine = RecommendationEngine(
-                songDao = database.songDao(),
-                songStatsDao = database.songStatsDao(),
-                aiSongTagsDao = database.aiSongTagsDao(),
-                listeningHistoryDao = database.listeningHistoryDao()
-            )
+            recommendationEngine = recommendationEngine,
+            lastFm = com.example.tgmusicai.data.scrobble.LastFmSimilarClient(),
+            lastFmApiKey = { AppPreferences(applicationContext).activeLastFmApiKey() }
         )
     }
 
@@ -151,6 +172,112 @@ class PlaybackService : MediaLibraryService() {
      */
     @Volatile
     private var volumeNormalizationEnabled: Boolean = true
+
+    /** Whether plays of cloud tracks are added to the user's YouTube history (opt-in). */
+    @Volatile
+    private var youtubeHistoryEnabled: Boolean = false
+
+    private val youtubeHistoryReporter by lazy {
+        com.example.tgmusicai.data.youtube.YouTubeHistoryReporter(
+            InnerTubeCookieManager(AppPreferences(applicationContext))
+        )
+    }
+
+    /** Crossfade settings, mirrored for the playback ticker, which cannot suspend on DataStore. */
+    @Volatile
+    private var crossfadeEnabled: Boolean = false
+
+    @Volatile
+    private var crossfadeDurationMs: Long = AppPreferences.DEFAULT_CROSSFADE_DURATION_SEC * 1000L
+
+    /** Resolves cloud streams when the app's own resolver is not running (car, app closed). */
+    private val streamResolver by lazy {
+        ServiceStreamResolver(
+            scope = serviceScope,
+            extractor = { youtubeExtractor },
+            isUiActive = {
+                mediaLibrarySession?.connectedControllers?.any {
+                    it.connectionHints.getBoolean(ServiceStreamResolver.HINT_APP_UI, false)
+                } == true
+            },
+        )
+    }
+
+    /**
+     * The queue, the track and the position, saved so that Android Auto's play button (or a
+     * headset button) can pick up where listening stopped -- after the app was closed, the phone
+     * restarted, or the process was killed. What [CustomMediaLibrarySessionCallback.onPlaybackResumption]
+     * answers from.
+     */
+    private val resumeStore by lazy {
+        applicationContext.getSharedPreferences("playback_resume", android.content.Context.MODE_PRIVATE)
+    }
+
+    private fun saveResumeState(exoPlayer: Player) {
+        val count = exoPlayer.mediaItemCount
+        if (count == 0) return
+        val current = exoPlayer.currentMediaItemIndex.coerceAtLeast(0)
+        // Around the current track only: a long autoplay queue does not need saving whole.
+        val from = (current - RESUME_KEEP_BEHIND).coerceAtLeast(0)
+        val to = (current + RESUME_KEEP_AHEAD).coerceAtMost(count - 1)
+        val entries = org.json.JSONArray()
+        for (i in from..to) {
+            val item = exoPlayer.getMediaItemAt(i)
+            entries.put(org.json.JSONObject().apply {
+                put("uri", item.mediaId)
+                SongMediaExtras.youtubeId(item.mediaMetadata.extras)?.let { put("yt", it) }
+            })
+        }
+        resumeStore.edit()
+            .putString("items", entries.toString())
+            .putInt("index", current - from)
+            .putLong("position", exoPlayer.currentPosition.coerceAtLeast(0))
+            .apply()
+    }
+
+    /** The saved queue, rebuilt from the library; cloud tracks come back as watch URLs to resolve. */
+    private suspend fun loadResumeState(): MediaSession.MediaItemsWithStartPosition? = withContext(Dispatchers.IO) {
+        val raw = resumeStore.getString("items", null) ?: return@withContext null
+        val entries = try { org.json.JSONArray(raw) } catch (e: Exception) { return@withContext null }
+        val savedIndex = resumeStore.getInt("index", 0)
+        val items = mutableListOf<MediaItem>()
+        var startIndex = 0
+        for (i in 0 until entries.length()) {
+            val entry = entries.optJSONObject(i) ?: continue
+            val uri = entry.optString("uri")
+            val videoId = entry.optString("yt").takeIf { it.isNotBlank() }
+            val song = database.songDao().getSongByUri(uri)
+                ?: videoId?.let { database.songDao().getSongByYoutubeId(it) }
+                ?: continue
+            // A saved stream URL has likely expired; a cloud track restarts from its watch URL.
+            val playable = if (!song.isDownloaded && !song.youtubeId.isNullOrBlank()) {
+                song.copy(mediaUri = "https://www.youtube.com/watch?v=${song.youtubeId}")
+            } else song
+            if (i == savedIndex) startIndex = items.size
+            items += playable.toResumeItem()
+        }
+        if (items.isEmpty()) return@withContext null
+        MediaSession.MediaItemsWithStartPosition(items, startIndex, resumeStore.getLong("position", 0L))
+    }
+
+    private fun Song.toResumeItem(): MediaItem = MediaItem.Builder()
+        .setMediaId(mediaUri)
+        .setUri(Uri.parse(mediaUri))
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(title)
+                .setArtist(artist)
+                .setAlbumTitle(album)
+                .setArtworkUri(resolveCarArtworkUri(artworkUri))
+                .setIsPlayable(true)
+                .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+                .setExtras(SongMediaExtras.fromSong(this))
+                .build()
+        )
+        .build()
+
+    /** Plays the outgoing track's tail over the incoming one; see [OverlapCrossfader]. */
+    private lateinit var crossfader: OverlapCrossfader
 
     /**
      * (Re)attaches the fixed-gain loudness booster to [audioSessionId], releasing any previous
@@ -242,7 +369,10 @@ class PlaybackService : MediaLibraryService() {
             playlistDao = database.playlistDao(),
             songStatsDao = database.songStatsDao(),
             alarmDao = database.alarmDao(),
-            listeningHistoryDao = database.listeningHistoryDao()
+            listeningHistoryDao = database.listeningHistoryDao(),
+            database = database,
+            // So Start Radio from the car ranks songs the way the app does, not by metadata only.
+            recommendationEngine = recommendationEngine
         )
 
         // Zero-wasted-data stream caching: every HTTP(S) byte range ExoPlayer reads (YouTube
@@ -252,6 +382,7 @@ class PlaybackService : MediaLibraryService() {
         // Only http(s):// (YouTube streams) goes through the disk cache; local file:// / content://
         // tracks (downloaded/scanned songs) bypass it entirely -- see SchemeAwareCacheDataSource.
         val cacheDataSourceFactory = SchemeAwareCacheDataSourceFactory(this, AudioCacheManager.getCache(this))
+        crossfader = OverlapCrossfader(this, cacheDataSourceFactory, serviceScope)
 
         // Initialize ExoPlayer with Safe Driving Audio Focus: automatic focus handling ducks
         // music for GPS voice prompts (AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK), pauses for phone calls
@@ -308,6 +439,7 @@ class PlaybackService : MediaLibraryService() {
                 var consecutivePlaybackErrors = 0
                 addListener(object : Player.Listener {
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        crossfader.cancel(this@apply)
                         android.util.Log.e("PlaybackService", "Playback error encountered: ${error.message}", error)
 
                         // A track whose URI is still a raw YouTube watch URL has not failed -- it
@@ -322,8 +454,15 @@ class PlaybackService : MediaLibraryService() {
                         if (pendingResolution) {
                             android.util.Log.d("PlaybackService", "Holding: current item is not resolved yet")
                             pause()
+                            // With the app closed (e.g. Android Auto only), nothing else will
+                            // resolve it; the service does, and resumes.
+                            streamResolver.onHolding(this@apply)
                             return
                         }
+
+                        // An expired or throttled stream of a cloud track: resolve it again once
+                        // before giving up on it (the app does the same when it is open).
+                        if (streamResolver.onStreamFailed(this@apply)) return
 
                         consecutivePlaybackErrors++
                         // Cascade guard: a queue of not-yet-resolved cloud tracks (e.g. "Cloud
@@ -350,6 +489,8 @@ class PlaybackService : MediaLibraryService() {
                         // cascade guard so a later, unrelated run of errors isn't cut short by an
                         // error count left over from an earlier unrelated skip sequence.
                         if (isPlaying) consecutivePlaybackErrors = 0
+                        if (isPlaying) streamResolver.onPlaying()
+                        if (!isPlaying) saveResumeState(this@apply)
                         if (isPlaying) startTelemetryTicker(this@apply) else stopTelemetryTicker()
                         publishWidgetState(currentMediaItem, isPlaying)
                     }
@@ -376,12 +517,19 @@ class PlaybackService : MediaLibraryService() {
                         if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
                             consecutivePlaybackErrors = 0
                         }
+                        // Any transition other than the crossfade's own handover (a user skip,
+                        // a new queue) ends the fade at once.
+                        if (crossfader.isActive && !crossfader.isOwnTransition(mediaItem)) {
+                            crossfader.cancel(this@apply)
+                        }
                         // Proactively extend the queue as soon as playback reaches what is
                         // currently the last item, so there's always a "next" track queued up
                         // well before the current one ends -- keeps music going seamlessly
                         // (repeat off) AND makes the auto-added songs show up in "Up Next" and be
                         // skippable, instead of only ever appearing reactively after a stop.
                         maybeExtendQueueForAutoplay(this@apply)
+                        streamResolver.onQueueOrPositionChanged(this@apply)
+                        saveResumeState(this@apply)
                         resetListenTracking(mediaItem)
                         applyReplayGain(mediaItem)
                         loadSponsorSegments(mediaItem)
@@ -391,6 +539,30 @@ class PlaybackService : MediaLibraryService() {
 
                     override fun onRepeatModeChanged(repeatMode: Int) {
                         updateCustomLayout()
+                    }
+
+                    override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                        // A queue set from the car, or an autoplay top-up, needs its window resolved.
+                        streamResolver.onQueueOrPositionChanged(this@apply)
+                    }
+
+                    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                        // A pause mid-fade would leave the tail playing on its own.
+                        if (!playWhenReady) crossfader.cancel(this@apply)
+                    }
+
+                    override fun onPositionDiscontinuity(
+                        oldPosition: Player.PositionInfo,
+                        newPosition: Player.PositionInfo,
+                        reason: Int
+                    ) {
+                        // Scrubbing within the incoming track mid-fade: the overlap no longer
+                        // lines up with anything, so it ends. The handover itself changes item.
+                        if (reason == Player.DISCONTINUITY_REASON_SEEK &&
+                            oldPosition.mediaItemIndex == newPosition.mediaItemIndex
+                        ) {
+                            crossfader.cancel(this@apply)
+                        }
                     }
                 })
             }
@@ -416,6 +588,21 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
+        serviceScope.launch(Dispatchers.Main) {
+            AppPreferences(applicationContext).youtubeHistoryEnabledFlow.collect { youtubeHistoryEnabled = it }
+        }
+
+        // Crossfade settings. Turning it off mid-fade lets the fade already running finish.
+        serviceScope.launch(Dispatchers.Main) {
+            val preferences = AppPreferences(applicationContext)
+            preferences.crossfadeEnabledFlow
+                .combine(preferences.crossfadeDurationSecFlow) { enabled, seconds -> enabled to seconds }
+                .collect { (enabled, seconds) ->
+                    crossfadeEnabled = enabled
+                    crossfadeDurationMs = seconds * 1000L
+                }
+        }
+
         // SponsorBlock settings. Switching the feature on mid-track fetches segments for what is
         // already playing rather than waiting for the next one.
         serviceScope.launch(Dispatchers.Main) {
@@ -427,6 +614,16 @@ class PlaybackService : MediaLibraryService() {
                     sponsorBlockCategories = categories
                     loadSponsorSegments(player.currentMediaItem)
                 }
+        }
+
+        // Queued listens, retried as soon as there is a network again. Collecting connectivity
+        // rather than polling means the common case -- signal returns while the user is still
+        // listening -- is handled the moment it happens, and the first emission covers the service
+        // starting up with a queue already waiting from a previous session.
+        serviceScope.launch {
+            networkObserver.isOnline.collect { online ->
+                if (online) flushPendingScrobbles()
+            }
         }
 
         // "Downloaded only" decides whether autoplay may reach for cloud recommendations at all.
@@ -454,6 +651,12 @@ class PlaybackService : MediaLibraryService() {
                     scrobblingEnabled = enabled
                     listenBrainzToken = token
                     listenBrainzServer = server
+                    // Also a flush trigger, not just the connectivity one. These settings arrive
+                    // asynchronously, so on a normal start the first connectivity emission usually
+                    // beats them and finds no token to submit with -- and if the network never then
+                    // changes state, a queue left over from a previous session would sit there
+                    // untouched. Flushing here covers startup, and a corrected token too.
+                    flushPendingScrobbles()
                 }
         }
 
@@ -517,19 +720,14 @@ class PlaybackService : MediaLibraryService() {
          * immediately end playback anyway.
          */
         private const val SPONSOR_END_GUARD_MS = 1_000L
+
+        /** How many queued listens one flush may submit, so a long offline stretch arrives in batches. */
+        private const val SCROBBLE_FLUSH_LIMIT = 25
+
+        /** A listen still unsent after this long is dropped; retrying is not going to start working. */
+        private const val SCROBBLE_MAX_AGE_MS = 14L * 24L * 60L * 60L * 1000L
         private const val YOUTUBE_FALLBACK_SEARCH_CANDIDATES = 6
         private const val YOUTUBE_FALLBACK_RESOLVE_TARGET = 3
-
-        /** Random on-device tracks one autoplay queue extension appends. */
-        private const val AUTOPLAY_LOCAL_COUNT = 3
-
-        /**
-         * Recommended cloud tracks one autoplay queue extension appends. Deliberately fewer than
-         * the local half: each one costs a stream resolution, and a queue extension that keeps the
-         * user in music they own reads as their library continuing rather than as the app wandering
-         * off into YouTube.
-         */
-        private const val AUTOPLAY_CLOUD_COUNT = 2
 
         /**
          * How many recommendations to consider per track actually wanted. Some fraction of any
@@ -538,11 +736,12 @@ class PlaybackService : MediaLibraryService() {
         private const val RECOMMENDATION_OVERFETCH = 4
 
         /**
-         * Ceiling on the whole recommendation fetch-and-resolve pass. It runs when the last track
-         * in the queue *starts*, so there are minutes of slack -- but the pass must still end on
-         * its own rather than hold a coroutine open on a network that never answers.
+         * Ceiling on the whole recommendation fetch-and-resolve pass. It runs with at least a few
+         * tracks still queued ahead, so there is slack -- but the pass must still end on its own
+         * rather than hold a coroutine open on a network that never answers. Tracks resolved
+         * before the ceiling are kept.
          */
-        private const val RECOMMENDATION_RESOLVE_TIMEOUT_MS = 30_000L
+        private const val RECOMMENDATION_RESOLVE_TIMEOUT_MS = 60_000L
 
         // Automotive media tree category IDs (children of ROOT_ID, surfaced via onGetChildren).
         const val ROOT_ID = "root"
@@ -553,10 +752,42 @@ class PlaybackService : MediaLibraryService() {
         const val CATEGORY_MOST_PLAYED = "category_most_played"
         const val CATEGORY_PRODUCERS = "category_producers"
         const val CATEGORY_ALL_SONGS = "category_all_songs"
+        const val CATEGORY_RECOMMENDED = "category_recommended"
+        const val CATEGORY_DISCOVER = "category_discover"
+        const val ACTION_START_RADIO = "com.example.tgmusicai.ACTION_START_RADIO"
+
+        /** Tracks saved either side of the current one for playback resumption. */
+        private const val RESUME_KEEP_BEHIND = 20
+        private const val RESUME_KEEP_AHEAD = 50
+
+        /**
+         * Separates a browse item's folder from its own id ("<folder>::<uri>"), so playing a song
+         * from a car folder can queue the rest of that folder the way the app does.
+         */
+        const val FOLDER_SEPARATOR = "::"
+
+        /** The plain media id of a browse item, without the folder it was listed in. */
+        fun stripFolder(mediaId: String): String =
+            if (mediaId.contains(FOLDER_SEPARATOR)) mediaId.substringAfter(FOLDER_SEPARATOR) else mediaId
 
         // Custom car-screen action IDs, handled in onCustomCommand.
         const val ACTION_TOGGLE_LIKE = "com.example.tgmusicai.ACTION_TOGGLE_LIKE"
         const val ACTION_TOGGLE_REPEAT_MODE = "com.example.tgmusicai.ACTION_TOGGLE_REPEAT_MODE"
+
+        /**
+         * Broadcast to every connected controller right after a SponsorBlock segment is skipped,
+         * so the UI can say what it did and offer to stop doing it.
+         *
+         * A skip is the one playback action the user did not ask for and cannot see the cause of:
+         * the track simply jumps. Announcing it is what makes that legible rather than alarming.
+         * This goes through the session rather than a shared object because the service outlives
+         * every screen and the UI only ever talks to it through a MediaController.
+         */
+        const val ACTION_SEGMENT_SKIPPED = "com.example.tgmusicai.ACTION_SEGMENT_SKIPPED"
+
+        /** Extras on [ACTION_SEGMENT_SKIPPED]: the SponsorBlock category id and its display label. */
+        const val EXTRA_SEGMENT_CATEGORY = "segment_category"
+        const val EXTRA_SEGMENT_LABEL = "segment_label"
 
         // Content style extra keys/values Android Auto reads to choose Grid vs List rendering.
         const val EXTRAS_KEY_CONTENT_STYLE_BROWSABLE = "android.media.browse.CONTENT_STYLE_BROWSABLE"
@@ -642,43 +873,67 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
-    // Guards maybeExtendQueueForAutoplay against re-triggering for the same "now playing the
-    // last item" position on every transition callback for that same item.
+    // One top-up attempt per "now playing" position: a top-up that came back short (offline, a
+    // small library) is not retried on every callback for the same item, only on the next one.
     private var lastAutoExtendedAtIndex = -1
+    private var autoplayTopUpJob: Job? = null
 
     /**
-     * Appends a few songs to the live queue as soon as playback reaches the current last item,
-     * provided repeat is off -- so the queue never actually runs out, the new songs are visible
-     * and skippable in "Up Next" (they are really appended to the player's timeline, not swapped
-     * in reactively after a stop), and nothing audibly interrupts playback.
+     * Keeps a reserve of upcoming tracks in the live queue (see [AutoplayPlanner]): when fewer than
+     * [AutoplayPlanner.MIN_UPCOMING] follow the playing track and repeat is off, the queue is
+     * topped back up to [AutoplayPlanner.TARGET_UPCOMING]. The added tracks are really appended to
+     * the player's timeline, so they are visible and skippable in Up Next.
      *
      * The songs are a mix: recommendations from YouTube Music chosen around what the user
-     * actually plays, plus random tracks already on the device. Both halves are requested, and
-     * whatever comes back is interleaved so the run does not read as a block of cloud followed by
-     * a block of local. The local half is what makes this work on a plane -- a failed or empty
-     * recommendation fetch must never leave the queue un-extended, which is why local tracks are
-     * asked for outright rather than only after the network has been given its chance.
+     * actually plays, plus random tracks already on the device, spread through each other. The
+     * local half is what makes this work on a plane -- a failed or empty recommendation fetch must
+     * never leave the queue un-extended, which is why local tracks are asked for outright rather
+     * than only after the network has been given its chance, and why cloud fills in for a device
+     * with too few tracks of its own.
      */
     private fun maybeExtendQueueForAutoplay(exoPlayer: ExoPlayer) {
         if (exoPlayer.repeatMode != Player.REPEAT_MODE_OFF) return
-        if (exoPlayer.hasNextMediaItem()) return
         val currentIndex = exoPlayer.currentMediaItemIndex
-        if (currentIndex < 0 || currentIndex == lastAutoExtendedAtIndex) return
+        if (currentIndex < 0) return
+        val need = AutoplayPlanner.topUpCount(
+            AutoplayPlanner.upcoming(exoPlayer.mediaItemCount, currentIndex)
+        )
+        if (need <= 0) return
+        if (currentIndex == lastAutoExtendedAtIndex) return
+        if (autoplayTopUpJob?.isActive == true) return
         lastAutoExtendedAtIndex = currentIndex
 
-        val existingIds = (0 until exoPlayer.mediaItemCount).map { exoPlayer.getMediaItemAt(it).mediaId }.toSet()
-        serviceScope.launch {
-            val local = database.songDao().getRandomDownloadedSongs(AUTOPLAY_LOCAL_COUNT)
+        val queued = (0 until exoPlayer.mediaItemCount).map { exoPlayer.getMediaItemAt(it) }
+        val existingIds = queued.map { it.mediaId }.toSet()
+        val existingVideoIds = queued.mapNotNull { SongMediaExtras.youtubeId(it.mediaMetadata.extras) }.toSet()
+        // The radio follows on from the last track in the queue, since that is what the added
+        // tracks will come after.
+        val seedVideoId = queued.asReversed().firstNotNullOfOrNull { SongMediaExtras.youtubeId(it.mediaMetadata.extras) }
+        // A queue of local files has no video id; the last one is looked up by name instead.
+        val seedTrack = if (seedVideoId != null) null else queued.lastOrNull()?.mediaMetadata?.let { metadata ->
+            metadata.title?.toString()?.let { title -> title to metadata.artist?.toString().orEmpty() }
+        }
+        autoplayTopUpJob = serviceScope.launch {
+            val local = database.songDao().getRandomDownloadedSongs(need)
                 .filter { it.mediaUri !in existingIds }
-            val cloud = resolvedRecommendations(AUTOPLAY_CLOUD_COUNT, existingIds)
-            val candidates = interleave(cloud, local)
+            val cloud = resolvedRecommendations(
+                AutoplayPlanner.cloudCount(need, local.size),
+                existingIds,
+                existingVideoIds,
+                seedVideoId,
+                seedTrack
+            )
+            val candidates = AutoplayPlanner.mix(cloud, local, need)
             if (candidates.isEmpty()) return@launch
             withContext(Dispatchers.Main) {
+                // Repeat may have been switched on while this ran; appending then would be noise.
+                if (exoPlayer.repeatMode != Player.REPEAT_MODE_OFF) return@withContext
                 val items = candidates.map { song -> autoplayMediaItem(song) }
                 exoPlayer.addMediaItems(items)
                 android.util.Log.d(
                     "PlaybackService",
-                    "Auto-extended queue with ${items.size} song(s): ${cloud.size} recommended, ${local.size} local"
+                    "Autoplay topped up the queue with ${items.size} song(s): " +
+                        "${candidates.count { it in cloud }} recommended, ${candidates.count { it in local }} local"
                 )
             }
         }
@@ -691,10 +946,11 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun playRandomSongAsAutoplay(exoPlayer: ExoPlayer) {
         val lastMediaId = exoPlayer.currentMediaItem?.mediaId
+        val lastVideoId = SongMediaExtras.youtubeId(exoPlayer.currentMediaItem?.mediaMetadata?.extras)
         serviceScope.launch {
             val excluded = setOfNotNull(lastMediaId)
             val candidates = database.songDao().getRandomDownloadedSongs(3)
-            val next = resolvedRecommendations(1, excluded).firstOrNull()
+            val next = resolvedRecommendations(1, excluded, setOfNotNull(lastVideoId), lastVideoId).firstOrNull()
                 ?: candidates.firstOrNull { it.mediaUri !in excluded }
                 ?: candidates.firstOrNull()
             if (next == null) return@launch
@@ -731,32 +987,55 @@ class PlaybackService : MediaLibraryService() {
      * exactly the cascade that the guard in `onPlayerError` exists to contain -- autoplay adding
      * its own would be self-inflicted. Anything that cannot be resolved is dropped.
      *
+     * When there is a cloud seed ([seedVideoId]) -- or a local one ([seedTrack], title to artist)
+     * that YouTube Music confidently recognises -- YouTube Music's radio for it comes first, in YouTube's order: it is built to follow on from that one song, which the
+     * taste-seeded list is not. The taste-seeded list fills whatever the radio could not. Tracks
+     * whose video id is in [excludedVideoIds] are skipped before resolving, since resolving is the
+     * expensive part.
+     *
      * Returns nothing when "Downloaded only" is set, when the device is offline, or when the whole
      * attempt outruns [RECOMMENDATION_RESOLVE_TIMEOUT_MS]. The caller treats an empty list as "use
      * local tracks", which is what keeps autoplay working with no network.
      */
-    private suspend fun resolvedRecommendations(limit: Int, excludedMediaIds: Set<String>): List<Song> {
+    private suspend fun resolvedRecommendations(
+        limit: Int,
+        excludedMediaIds: Set<String>,
+        excludedVideoIds: Set<String> = emptySet(),
+        seedVideoId: String? = null,
+        seedTrack: Pair<String, String>? = null
+    ): List<Song> {
         if (limit <= 0 || downloadedOnly) return emptyList()
+        // Outside the timeout, so a pass that runs out of time still keeps what it resolved.
+        val resolved = mutableListOf<Song>()
         return try {
             withTimeoutOrNull(RECOMMENDATION_RESOLVE_TIMEOUT_MS) {
+                val radio = when {
+                    seedVideoId != null ->
+                        cloudRecommendations.radioFor(seedVideoId, limit = limit * RECOMMENDATION_OVERFETCH)
+                    seedTrack != null ->
+                        cloudRecommendations.radioForTrack(seedTrack.first, seedTrack.second, limit = limit * RECOMMENDATION_OVERFETCH)
+                    else -> emptyList()
+                }
                 val tracks = cloudRecommendations.recommendedTracks(
                     limit = limit * RECOMMENDATION_OVERFETCH
                 )
-                val resolved = mutableListOf<Song>()
-                // Shuffled so a queue that runs dry three times in one evening does not append the
-                // same few tracks each time; the cached recommendation list barely changes.
-                for (track in tracks.shuffled()) {
+                // The taste list is shuffled so a queue that runs dry three times in one evening
+                // does not append the same few tracks each time; the cached list barely changes.
+                // The radio is not: its order is the point, and its seed changes every time.
+                val ordered = (radio + tracks.shuffled()).distinctBy { it.videoId }
+                for (track in ordered) {
                     if (resolved.size >= limit) break
+                    if (track.videoId in excludedVideoIds) continue
                     val song = resolveRecommendation(track) ?: continue
                     if (song.mediaUri in excludedMediaIds) continue
                     if (resolved.any { it.mediaUri == song.mediaUri }) continue
                     resolved += song
                 }
-                resolved
-            }.orEmpty()
+            }
+            resolved.toList()
         } catch (e: Throwable) {
             android.util.Log.w("PlaybackService", "Could not resolve autoplay recommendations", e)
-            emptyList()
+            resolved.toList()
         }
     }
 
@@ -870,8 +1149,105 @@ class PlaybackService : MediaLibraryService() {
                     scrobblingRejected = true
                     android.util.Log.w("PlaybackService", "ListenBrainz rejected the token; scrobbling is paused")
                 }
-                is ListenBrainzScrobbler.Result.Transient ->
-                    android.util.Log.d("PlaybackService", "Scrobble failed (${result.reason})")
+                is ListenBrainzScrobbler.Result.Transient -> {
+                    // Queue it rather than lose it. The server stores the timestamp the track
+                    // started, so submitting this later still lands in the right place in history.
+                    enqueueScrobble(listen)
+                    android.util.Log.d(
+                        "PlaybackService",
+                        "Scrobble failed (${result.reason}); queued for retry"
+                    )
+                }
+            }
+        }
+    }
+
+    /** Observes connectivity so a queued listen is retried as soon as there is a network again. */
+    private val networkObserver by lazy { NetworkObserver(this) }
+
+    /** Guards against two flushes running at once, which would submit the same row twice. */
+    private val scrobbleFlushMutex = Mutex()
+
+    /**
+     * Stores a listen that could not be submitted, so it survives both the failure and a process
+     * kill. Swallows its own errors: failing to queue a listen must never affect playback.
+     */
+    private fun enqueueScrobble(listen: ListenBrainzScrobbler.Listen) {
+        serviceScope.launch {
+            try {
+                database.pendingScrobbleDao().insert(
+                    PendingScrobble(
+                        title = listen.title,
+                        artist = listen.artist,
+                        album = listen.album,
+                        durationMs = listen.durationMs,
+                        startedAtEpochSeconds = listen.startedAtEpochSeconds,
+                        // Due immediately; the first failed attempt is what starts the backoff.
+                        nextAttemptAtMs = 0L,
+                    )
+                )
+            } catch (e: Exception) {
+                android.util.Log.w("PlaybackService", "Could not queue a listen for retry", e)
+            }
+        }
+    }
+
+    /**
+     * Tries to submit every queued listen that is due.
+     *
+     * Runs on service start and whenever connectivity returns. Each failure pushes that row's next
+     * attempt further out, doubling up to [SCROBBLE_BACKOFF_MAX_MS]; the delay lives on the row, so
+     * a service restart cannot turn a queue built up offline into a burst of requests the moment the
+     * app comes back. A rejected token stops the whole pass -- retrying cannot fix a bad credential,
+     * which is the same reasoning that pauses live scrobbling for the session.
+     */
+    private fun flushPendingScrobbles() {
+        if (!scrobblingEnabled || scrobblingRejected) return
+        val token = listenBrainzToken ?: return
+
+        serviceScope.launch {
+            scrobbleFlushMutex.withLock {
+                try {
+                    val dao = database.pendingScrobbleDao()
+                    val nowMs = System.currentTimeMillis()
+
+                    // A listen that has been failing for weeks is failing for a reason a retry will
+                    // not fix, and the queue should not grow without bound.
+                    dao.deleteOlderThan((nowMs - SCROBBLE_MAX_AGE_MS) / 1000L)
+
+                    for (pending in dao.getDue(nowMs, SCROBBLE_FLUSH_LIMIT)) {
+                        val listen = ListenBrainzScrobbler.Listen(
+                            title = pending.title,
+                            artist = pending.artist,
+                            album = pending.album,
+                            durationMs = pending.durationMs,
+                            startedAtEpochSeconds = pending.startedAtEpochSeconds,
+                        )
+                        when (scrobbler.submitListen(token, listenBrainzServer, listen)) {
+                            is ListenBrainzScrobbler.Result.Success -> dao.deleteById(pending.id)
+
+                            is ListenBrainzScrobbler.Result.InvalidToken -> {
+                                scrobblingRejected = true
+                                android.util.Log.w(
+                                    "PlaybackService",
+                                    "ListenBrainz rejected the token; queued listens stay queued"
+                                )
+                                return@withLock
+                            }
+
+                            is ListenBrainzScrobbler.Result.Transient -> {
+                                val attempts = pending.attempts + 1
+                                val backoff = ListenBrainzScrobbler.retryDelayMs(attempts)
+                                dao.recordAttempt(pending.id, attempts, nowMs + backoff)
+                                // The network is evidently still unhappy; stop rather than walk the
+                                // rest of the queue failing once per row.
+                                return@withLock
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("PlaybackService", "Could not flush queued listens", e)
+                }
             }
         }
     }
@@ -921,6 +1297,9 @@ class PlaybackService : MediaLibraryService() {
                 val dur = exoPlayer.duration.let { if (it > 0) it else 0L }
                 maybeSkipSponsorSegment(pos)
                 maybeScrobble(pos, dur)
+                if (crossfadeEnabled) {
+                    crossfader.maybeStart(exoPlayer, crossfadeDurationMs, replayGainProcessor.trackScale())
+                }
                 val delta = (pos - lastTickPositionMs).coerceIn(0L, 2000L)
                 lastTickPositionMs = pos
                 if (delta > 0) {
@@ -959,6 +1338,11 @@ class PlaybackService : MediaLibraryService() {
 
     private fun recordPlay() {
         if (trackedMediaId == null) return
+        // Same threshold as a counted play (30s or half the track), once per play, cloud only.
+        val videoId = trackedYoutubeId?.takeIf { it.isNotBlank() }
+        if (youtubeHistoryEnabled && videoId != null) {
+            serviceScope.launch(Dispatchers.IO) { youtubeHistoryReporter.report(videoId) }
+        }
         serviceScope.launch(Dispatchers.IO) {
             val songId = resolveTrackedSongId() ?: return@launch
             trackedSongId = songId
@@ -1053,6 +1437,26 @@ class PlaybackService : MediaLibraryService() {
                 "PlaybackService",
                 "SponsorBlock: skipped ${segment.displayName} (${segment.startMs}-${segment.endMs}ms)"
             )
+            announceSegmentSkipped(segment)
+        }
+    }
+
+    /**
+     * Tells every connected controller that [segment] was just skipped.
+     *
+     * Best-effort and deliberately silent on failure: a session that has gone away, or a controller
+     * that cannot be reached, must never take a skip -- or playback -- down with it.
+     */
+    private fun announceSegmentSkipped(segment: SponsorBlockManager.Segment) {
+        val session = mediaLibrarySession ?: return
+        try {
+            val extras = Bundle().apply {
+                putString(EXTRA_SEGMENT_CATEGORY, segment.category)
+                putString(EXTRA_SEGMENT_LABEL, segment.displayName)
+            }
+            session.broadcastCustomCommand(SessionCommand(ACTION_SEGMENT_SKIPPED, extras), extras)
+        } catch (e: Exception) {
+            android.util.Log.d("PlaybackService", "Could not announce a SponsorBlock skip", e)
         }
     }
 
@@ -1119,8 +1523,14 @@ class PlaybackService : MediaLibraryService() {
                 .setSessionCommand(SessionCommand(ACTION_TOGGLE_REPEAT_MODE, Bundle.EMPTY))
                 .build()
 
+            val radioButton = CommandButton.Builder(CommandButton.ICON_RADIO)
+                .setDisplayName("Start radio")
+                .setIconResId(R.drawable.ic_radio)
+                .setSessionCommand(SessionCommand(ACTION_START_RADIO, Bundle.EMPTY))
+                .build()
+
             withContext(Dispatchers.Main) {
-                session.setCustomLayout(ImmutableList.of(likeButton, repeatButton))
+                session.setCustomLayout(ImmutableList.of(likeButton, repeatButton, radioButton))
             }
         }
     }
@@ -1142,6 +1552,7 @@ class PlaybackService : MediaLibraryService() {
         // the network once playback is over.
         castPlayer?.release()
         castPlayer = null
+        if (::crossfader.isInitialized) crossfader.release()
         mediaServer?.close()
         mediaServer = null
         mediaLibrarySession?.run {
@@ -1173,6 +1584,7 @@ class PlaybackService : MediaLibraryService() {
             val defaultResult = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).build()
             val availableSessionCommands = defaultResult.availableSessionCommands.buildUpon()
                 .add(SessionCommand(ACTION_TOGGLE_LIKE, Bundle.EMPTY))
+                .add(SessionCommand(ACTION_START_RADIO, Bundle.EMPTY))
                 .add(SessionCommand(ACTION_TOGGLE_REPEAT_MODE, Bundle.EMPTY))
                 .build()
             return MediaSession.ConnectionResult.accept(availableSessionCommands, defaultResult.availablePlayerCommands)
@@ -1206,8 +1618,23 @@ class PlaybackService : MediaLibraryService() {
             params: LibraryParams?
         ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
             return serviceScope.future {
-                val items = when {
+                val items = childrenOf(parentId).map { item ->
+                    // Playable children carry their folder, so a tap can queue the folder.
+                    if (item.mediaMetadata.isPlayable == true) {
+                        item.buildUpon().setMediaId(parentId + FOLDER_SEPARATOR + item.mediaId).build()
+                    } else item
+                }
+                LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
+            }
+        }
+
+        /** The items in one car folder, with plain media ids. */
+        private suspend fun childrenOf(parentId: String): List<MediaItem> = when {
                     parentId == ROOT_ID -> buildRootCategories()
+                    parentId == CATEGORY_RECOMMENDED -> fetchRecommended()
+                    parentId == CATEGORY_DISCOVER -> fetchDiscoverShelves()
+                    parentId.startsWith("discover_") -> fetchDiscoverShelf(parentId.removePrefix("discover_"))
+                    parentId.startsWith("smart_") -> fetchSmartPlaylist(parentId.removePrefix("smart_"))
                     parentId == CATEGORY_DOWNLOADED -> fetchDownloadedSongs()
                     parentId == CATEGORY_LIKED -> fetchLikedSongs()
                     parentId == CATEGORY_RECENT -> fetchRecentlyPlayedSongs()
@@ -1220,9 +1647,6 @@ class PlaybackService : MediaLibraryService() {
                     parentId.startsWith("producer_") -> fetchSongsForProducer(parentId.removePrefix("producer_"))
                     else -> emptyList()
                 }
-                LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
-            }
-        }
 
         override fun onGetItem(
             session: MediaLibrarySession,
@@ -1230,7 +1654,7 @@ class PlaybackService : MediaLibraryService() {
             mediaId: String
         ): ListenableFuture<LibraryResult<MediaItem>> {
             return serviceScope.future {
-                val song = database.songDao().getSongByUri(mediaId)
+                val song = database.songDao().getSongByUri(stripFolder(mediaId))
                 if (song != null) {
                     LibraryResult.ofItem(song.toMediaItem(), null)
                 } else {
@@ -1247,7 +1671,7 @@ class PlaybackService : MediaLibraryService() {
             return serviceScope.future {
                 val resolvedItems = mutableListOf<MediaItem>()
                 for (item in mediaItems) {
-                    val mediaId = item.mediaId
+                    val mediaId = stripFolder(item.mediaId)
                     val searchQuery = item.requestMetadata.searchQuery
                     if (mediaId.isNotEmpty()) {
                         val song = database.songDao().getSongByUri(mediaId)
@@ -1255,6 +1679,7 @@ class PlaybackService : MediaLibraryService() {
                             resolvedItems.add(song.toMediaItem())
                         } else {
                             val resolvedItem = item.buildUpon()
+                                .setMediaId(mediaId)
                                 .setUri(Uri.parse(mediaId))
                                 .build()
                             resolvedItems.add(resolvedItem)
@@ -1288,6 +1713,23 @@ class PlaybackService : MediaLibraryService() {
             startIndex: Int,
             startPositionMs: Long
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            // A song tapped in a car folder: queue the whole folder from that song, as the app
+            // does when a song is tapped in a list.
+            val single = mediaItems.singleOrNull()
+            if (single != null && single.mediaId.contains(FOLDER_SEPARATOR)) {
+                val folder = single.mediaId.substringBefore(FOLDER_SEPARATOR)
+                val wanted = stripFolder(single.mediaId)
+                return serviceScope.future {
+                    val siblings = childrenOf(folder).filter { it.mediaMetadata.isPlayable == true }
+                    val at = siblings.indexOfFirst { it.mediaId == wanted }
+                    if (at < 0) {
+                        val resolved = onAddMediaItems(mediaSession, controller, mediaItems).await()
+                        MediaSession.MediaItemsWithStartPosition(resolved, 0, startPositionMs)
+                    } else {
+                        MediaSession.MediaItemsWithStartPosition(siblings, at, startPositionMs)
+                    }
+                }
+            }
             val searchQuery = mediaItems.firstOrNull()?.requestMetadata?.searchQuery
             if (!searchQuery.isNullOrBlank()) {
                 return serviceScope.future {
@@ -1330,6 +1772,21 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
+        /**
+         * Android Auto's play button (and a headset button) with nothing loaded, e.g. after the
+         * phone was off: resume the last queue where it stopped, as YouTube Music does. With
+         * nothing saved, Listen Again stands in so the button still plays something.
+         */
+        override fun onPlaybackResumption(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = serviceScope.future {
+            loadResumeState() ?: run {
+                val recent = fetchRecentlyPlayedSongs()
+                MediaSession.MediaItemsWithStartPosition(recent, 0, 0L)
+            }
+        }
+
         override fun onCustomCommand(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
@@ -1355,6 +1812,36 @@ class PlaybackService : MediaLibraryService() {
                             trackedSongId = songId
                             repository.toggleLikeSong(songId)
                             updateCustomLayout()
+                        }
+                    }
+                    return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                }
+
+                ACTION_START_RADIO -> {
+                    // Start Radio from the car, as from the app: a queue of songs related to the
+                    // one playing, at the user's saved variety.
+                    val currentItem = player.currentMediaItem
+                        ?: return Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
+                    serviceScope.launch {
+                        val metadata = currentItem.mediaMetadata
+                        val seed = SongMediaExtras.toSong(
+                            mediaUri = currentItem.mediaId,
+                            title = metadata.title?.toString() ?: "Unknown",
+                            artist = metadata.artist?.toString() ?: "Unknown",
+                            album = metadata.albumTitle?.toString() ?: "",
+                            extras = metadata.extras
+                        )
+                        val seedId = resolveTrackedSongId() ?: repository.ensurePersisted(seed)
+                        val variety = AppPreferences(applicationContext).radioVarietyFlow.first()
+                        val queue = repository.buildRadioQueue(seed.copy(id = seedId), variety = variety)
+                        if (queue.size < 2) return@launch
+                        withContext(Dispatchers.Main) {
+                            // The seed keeps playing; the radio replaces what comes after it.
+                            val keepIndex = player.currentMediaItemIndex
+                            if (player.mediaItemCount > keepIndex + 1) {
+                                player.removeMediaItems(keepIndex + 1, player.mediaItemCount)
+                            }
+                            player.addMediaItems(queue.drop(1).map { it.toMediaItem() })
                         }
                     }
                     return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
@@ -1401,7 +1888,11 @@ class PlaybackService : MediaLibraryService() {
          * Playlists, Producers & Artists) show their children as rich album-art tiles; List-style
          * categories (Downloaded, Most Played, All Songs) show dense, scannable text rows.
          */
-        private fun buildRootCategories(): List<MediaItem> = listOf(
+        private fun buildRootCategories(): List<MediaItem> = listOfNotNull(
+            // The same two cloud sections the app's Home and Discover show; left out when the
+            // user has asked for nothing from the network.
+            folderItem(CATEGORY_RECOMMENDED, "Recommended for you", gridStyle = true).takeUnless { downloadedOnly },
+            folderItem(CATEGORY_DISCOVER, "Discover", gridStyle = false).takeUnless { downloadedOnly },
             folderItem(CATEGORY_DOWNLOADED, "Downloaded Only", gridStyle = false),
             folderItem(CATEGORY_LIKED, "Liked Music", gridStyle = true),
             folderItem(CATEGORY_RECENT, "Listen Again", gridStyle = true),
@@ -1427,7 +1918,19 @@ class PlaybackService : MediaLibraryService() {
         }
 
         private suspend fun fetchPlaylists(): List<MediaItem> = withContext(Dispatchers.IO) {
-            database.playlistDao().getAllPlaylistsList()
+            val smart = database.playlistDao().getAllPlaylistsList()
+                .filter { it.isSmart }
+                .map { playlist ->
+                    // Smart playlists hold no rows of their own; they are computed, as in the app.
+                    val count = repository.playlistWithSongsFlow(playlist).first().songs.size
+                    folderItem(
+                        id = "smart_${playlist.playlistId}",
+                        title = playlist.name,
+                        subtitle = "$count Songs",
+                        gridStyle = false
+                    )
+                }
+            smart + database.playlistDao().getAllPlaylistsList()
                 .filter { !it.isSmart }
                 .map { playlist ->
                     val songCount = database.playlistDao().getSongIdsInPlaylist(playlist.playlistId).size
@@ -1458,6 +1961,52 @@ class PlaybackService : MediaLibraryService() {
                 .sorted()
                 .map { producer -> folderItem(id = "producer_$producer", title = "$producer (Producer)", gridStyle = false) }
             artistItems + producerItems
+        }
+
+        private suspend fun fetchSmartPlaylist(playlistId: String): List<MediaItem> = withContext(Dispatchers.IO) {
+            val playlist = database.playlistDao().getAllPlaylistsList()
+                .firstOrNull { it.playlistId == playlistId.toLongOrNull() } ?: return@withContext emptyList()
+            repository.playlistWithSongsFlow(playlist).first().songs.map { it.toMediaItem() }
+        }
+
+        /** The app's "Recommended for you" row: cloud tracks the library does not have. */
+        private suspend fun fetchRecommended(): List<MediaItem> =
+            if (downloadedOnly) emptyList()
+            else cloudRecommendations.recommendedTracks(limit = 30).map { cloudItem(it) }
+
+        /** YouTube Music's home shelves, one folder each (as on the app's Discover view). */
+        private suspend fun fetchDiscoverShelves(): List<MediaItem> {
+            if (downloadedOnly) return emptyList()
+            val shelves = musicBrowser.fetchHomeFeed().filter { it.tracks.isNotEmpty() }
+            discoverShelves = shelves
+            return shelves.mapIndexed { index, shelf ->
+                folderItem(id = "discover_$index", title = shelf.title, subtitle = "${shelf.tracks.size} songs", gridStyle = true)
+            }
+        }
+
+        private suspend fun fetchDiscoverShelf(index: String): List<MediaItem> {
+            if (discoverShelves.isEmpty()) fetchDiscoverShelves()
+            return discoverShelves.getOrNull(index.toIntOrNull() ?: -1)?.tracks.orEmpty().map { cloudItem(it) }
+        }
+
+        /**
+         * A cloud track as a playable car item. Its URI is the watch URL; the app's resolver, or
+         * [ServiceStreamResolver] when the app is closed, turns it into a stream before it plays.
+         */
+        private fun cloudItem(track: com.example.tgmusicai.data.youtube.YouTubeSearchResult): MediaItem {
+            val watchUrl = "https://www.youtube.com/watch?v=${track.videoId}"
+            val song = Song(
+                id = 0,
+                title = track.title,
+                artist = track.uploader,
+                album = "YouTube Cloud",
+                durationMs = track.durationSeconds * 1000L,
+                mediaUri = watchUrl,
+                youtubeId = track.videoId,
+                artworkUri = track.thumbnailUri,
+                isDownloaded = false
+            )
+            return song.toMediaItem()
         }
 
         private suspend fun fetchAllSongs(): List<MediaItem> = withContext(Dispatchers.IO) {

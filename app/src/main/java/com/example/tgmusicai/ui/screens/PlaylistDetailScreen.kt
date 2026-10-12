@@ -32,11 +32,13 @@ import androidx.compose.material.icons.rounded.HeartBroken
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicOff
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.ThumbUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -395,6 +397,18 @@ fun PlaylistDetailScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Play All (${songs.size})")
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+                    FilledTonalButton(
+                        onClick = { playerViewModel.smartShuffle(songs, fromPlaylistId = playlistId) }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Shuffle,
+                            contentDescription = null
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Smart Shuffle")
                     }
 
                     val undownloadedCount = songs.count { !it.isDownloaded }

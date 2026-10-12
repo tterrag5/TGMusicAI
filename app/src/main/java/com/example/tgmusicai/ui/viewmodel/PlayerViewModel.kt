@@ -10,17 +10,21 @@ import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricLine
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
+import com.example.tgmusicai.data.repository.VarietyMode
+import com.example.tgmusicai.data.scrobble.LastFmSimilarClient
 import com.example.tgmusicai.data.scrobble.ListenBrainzScrobbler
 import com.example.tgmusicai.playback.MediaControllerManager
 import com.example.tgmusicai.playback.SleepTimerManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -114,11 +118,10 @@ class PlayerViewModel(
     val remainingSleepTimeMs: StateFlow<Long?> = sleepTimerManager.remainingMs
 
     /**
-     * Crossfade: not a true overlapping crossfade (that needs two simultaneous ExoPlayer
-     * instances) -- instead the outgoing track fades to silent right as it ends and the incoming
-     * one fades in from silent, so there's never a jarring hard cut even though the two never
-     * actually play at once. [AppPreferences.crossfadeDurationSecFlow] controls how long each half
-     * of that fade is.
+     * Crossfade: a true overlap, run by the playback service ([com.example.tgmusicai.playback.OverlapCrossfader]):
+     * near the end of a track the next one starts and the two are blended with equal-power curves
+     * over [AppPreferences.crossfadeDurationSecFlow] seconds. Nothing here touches the volume for
+     * it; the service owns the fade so it works with the app closed.
      */
     val crossfadeEnabled: StateFlow<Boolean> = appPreferences?.crossfadeEnabledFlow
         ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
@@ -136,35 +139,58 @@ class PlayerViewModel(
         viewModelScope.launch { appPreferences?.setCrossfadeDurationSec(seconds) }
     }
 
+    /**
+     * How many finished listens are queued for ListenBrainz because submitting them failed.
+     *
+     * Shown in Settings so a user whose history looks behind can see that it is waiting rather than
+     * gone -- which is the whole point of keeping the queue.
+     */
+    val pendingScrobbleCount: StateFlow<Int> = (repository?.pendingScrobbleCount ?: flowOf(0))
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    /**
+     * SponsorBlock segments skipped during playback, for the UI to announce as they happen.
+     *
+     * A skip is the one playback action the user did not ask for and cannot see the cause of -- the
+     * track simply jumps -- so saying what happened is what makes it legible rather than a glitch.
+     */
+    val skippedSegments: SharedFlow<MediaControllerManager.SkippedSegment> =
+        mediaControllerManager.skippedSegments
+
+    /**
+     * Stops skipping [category] from here on, by dropping it from the saved SponsorBlock
+     * categories. Reachable from the skip announcement itself, because the moment a user decides a
+     * category is skipping things they wanted is the moment it just happened -- making them find
+     * the setting afterwards is how a well-meaning feature becomes one they switch off entirely.
+     */
+    fun disableSponsorCategory(category: String) {
+        val preferences = appPreferences ?: return
+        viewModelScope.launch {
+            val current = preferences.sponsorBlockCategoriesFlow.first()
+            preferences.setSponsorBlockCategories(current - category)
+        }
+    }
+
+    /** How far Start Radio may stray from what the user already plays. */
+    val radioVariety: StateFlow<VarietyMode> = appPreferences?.radioVarietyFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), VarietyMode.BLEND)
+        ?: MutableStateFlow(VarietyMode.BLEND).asStateFlow()
+
+    fun setRadioVariety(mode: VarietyMode) {
+        viewModelScope.launch { appPreferences?.setRadioVariety(mode) }
+    }
+
     init {
-        // Combined volume fade: the sleep timer's fade-to-silent near the countdown's end, and
-        // (if crossfade is enabled) the fade-out/fade-in described above. Both effects multiply
-        // into a single effective volume instead of each independently calling setVolume, so they
-        // can't fight over Player.volume if they ever happen to overlap (e.g. the sleep timer
-        // expires right as a track is also fading out).
+        // The sleep timer's fade-to-silent near the end of its countdown. Crossfade used to be
+        // folded in here as a fade-out-then-fade-in; it is now a real overlap in the service.
         var lastAppliedVolume = 1f
         viewModelScope.launch {
-            combine(
-                remainingSleepTimeMs,
-                currentPositionMs,
-                durationMs,
-                crossfadeEnabled,
-                crossfadeDurationSec
-            ) { remaining, positionMs, totalMs, fadeEnabled, fadeSec ->
-                val sleepFactor = if (remaining != null && remaining <= SLEEP_FADE_WINDOW_MS) {
+            remainingSleepTimeMs.map { remaining ->
+                if (remaining != null && remaining <= SLEEP_FADE_WINDOW_MS) {
                     (remaining.toFloat() / SLEEP_FADE_WINDOW_MS).coerceIn(0f, 1f)
                 } else {
                     1f
                 }
-                val fadeMs = fadeSec * 1000L
-                val crossfadeFactor = if (fadeEnabled && fadeMs > 0 && totalMs > 0) {
-                    val fadeInFactor = (positionMs.toFloat() / fadeMs).coerceIn(0f, 1f)
-                    val fadeOutFactor = ((totalMs - positionMs).toFloat() / fadeMs).coerceIn(0f, 1f)
-                    minOf(fadeInFactor, fadeOutFactor)
-                } else {
-                    1f
-                }
-                sleepFactor * crossfadeFactor
             }.collect { volume ->
                 if (kotlin.math.abs(volume - lastAppliedVolume) > 0.001f) {
                     mediaControllerManager.setVolume(volume)
@@ -201,11 +227,16 @@ class PlayerViewModel(
      * gap that follows it, so a drawn-out delivery no longer looks like a stretch of pure music to
      * [LyricsRepository.withInstrumentalMarkers]. The track duration feeds both -- it bounds the
      * last line's span and gives the outro its markers.
+     *
+     * Word timings come last, once no further stage can insert or re-time a line underneath them.
      */
     val parsedLyrics: StateFlow<List<LyricLine>> = combine(_lyrics, durationMs) { raw, duration ->
         val parsed = LyricsRepository.parseLyrics(raw)
-        LyricsRepository.withInstrumentalMarkers(
-            LyricsRepository.splitDenseLines(parsed, duration),
+        LyricsRepository.withWordTimings(
+            LyricsRepository.withInstrumentalMarkers(
+                LyricsRepository.splitDenseLines(parsed, duration),
+                duration,
+            ),
             duration,
         )
     }.stateIn(
@@ -247,6 +278,18 @@ class PlayerViewModel(
                             lyricsLookupKey(song) !in emptyLyricsLookups
                         ) {
                             fetchLyrics(song, isAutomatic = true)
+                        }
+                        // Stored but unsynced (fetched before the synced sources existed): look
+                        // once per session for a synced version and swap it in quietly.
+                        if (clean != null && lyricsRepository != null && !LyricsRepository.isSynced(clean)) {
+                            viewModelScope.launch {
+                                val upgraded = lyricsRepository.fetchAndSaveLyrics(song)
+                                if (LyricsRepository.isSynced(upgraded) &&
+                                    currentSong.value?.let(::lyricsLookupKey) == lyricsLookupKey(song)
+                                ) {
+                                    publishLyricsFor(song, upgraded)
+                                }
+                            }
                         }
                         if (repository != null) {
                             _isCurrentSongLiked.value = repository.isSongLikedSync(song.id)
@@ -398,6 +441,71 @@ class PlayerViewModel(
             } finally {
                 _isConnectingScrobbler.value = false
             }
+        }
+    }
+
+    /** Whether a YouTube Music session is stored (signed in via Import from YouTube). */
+    val isYouTubeSignedIn: StateFlow<Boolean> = appPreferences?.youtubeMusicSapisidFlow
+        ?.map { !it.isNullOrBlank() }
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    val youtubeHistoryEnabled: StateFlow<Boolean> = appPreferences?.youtubeHistoryEnabledFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    fun setYouTubeHistoryEnabled(enabled: Boolean) {
+        viewModelScope.launch { appPreferences?.setYouTubeHistoryEnabled(enabled) }
+    }
+
+    /** Whether a Last.fm key is stored (the key itself is never shown back). */
+    val hasLastFmApiKey: StateFlow<Boolean> = appPreferences?.lastFmApiKeyFlow
+        ?.map { it != null }
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    val lastFmRecommendationsEnabled: StateFlow<Boolean> = appPreferences?.lastFmRecommendationsEnabledFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        ?: MutableStateFlow(false).asStateFlow()
+
+    private val _isCheckingLastFmKey = MutableStateFlow(false)
+    val isCheckingLastFmKey: StateFlow<Boolean> = _isCheckingLastFmKey.asStateFlow()
+
+    private val _lastFmKeyStatus = MutableStateFlow<String?>(null)
+
+    /** Result of the last key check, shown under the field. */
+    val lastFmKeyStatus: StateFlow<String?> = _lastFmKeyStatus.asStateFlow()
+
+    /** Checks [apiKey] with Last.fm and stores it only if Last.fm accepts it. */
+    fun connectLastFm(apiKey: String) {
+        val preferences = appPreferences ?: return
+        val key = apiKey.trim()
+        if (key.isBlank()) return
+        viewModelScope.launch {
+            _isCheckingLastFmKey.value = true
+            try {
+                _lastFmKeyStatus.value = when (LastFmSimilarClient().verifyKey(key)) {
+                    LastFmSimilarClient.KeyCheck.VALID -> {
+                        preferences.setLastFmApiKey(key)
+                        null
+                    }
+                    LastFmSimilarClient.KeyCheck.REJECTED -> "Last.fm rejected that key."
+                    LastFmSimilarClient.KeyCheck.UNREACHABLE -> "Couldn't reach Last.fm. Try again."
+                }
+            } finally {
+                _isCheckingLastFmKey.value = false
+            }
+        }
+    }
+
+    fun setLastFmRecommendationsEnabled(enabled: Boolean) {
+        viewModelScope.launch { appPreferences?.setLastFmRecommendationsEnabled(enabled) }
+    }
+
+    fun removeLastFmKey() {
+        viewModelScope.launch {
+            appPreferences?.clearLastFmApiKey()
+            _lastFmKeyStatus.value = null
         }
     }
 
@@ -731,15 +839,55 @@ class PlayerViewModel(
         _statusMessage.value = null
     }
 
-    /** "Start Radio": builds and plays a queue of songs related to [song] (see [MusicRepository.buildRadioQueue]). */
+    /**
+     * "Start Radio": builds and plays a queue of songs related to [song] (see
+     * [MusicRepository.buildRadioQueue]), as adventurous as the user's saved variety setting says.
+     */
     fun startRadio(song: Song) {
         val repo = repository ?: return
         viewModelScope.launch {
-            val queue = repo.buildRadioQueue(song)
+            val variety = appPreferences?.radioVarietyFlow?.first() ?: VarietyMode.BLEND
+            val queue = repo.buildRadioQueue(song, variety = variety)
             if (queue.isNotEmpty()) {
                 playQueue(queue, startIndex = 0)
                 _statusMessage.value = "Starting radio based on \"${song.title}\""
             }
+        }
+    }
+
+    /**
+     * "Start Radio" from several songs: every one of [songs] is a seed (see
+     * [MusicRepository.buildRadioQueue]), up to [MusicRepository.MAX_RADIO_SEEDS].
+     */
+    fun startRadio(songs: List<Song>) {
+        val repo = repository ?: return
+        if (songs.isEmpty()) return
+        if (songs.size == 1) return startRadio(songs.first())
+        viewModelScope.launch {
+            val variety = appPreferences?.radioVarietyFlow?.first() ?: VarietyMode.BLEND
+            val queue = repo.buildRadioQueue(songs, variety = variety)
+            if (queue.isNotEmpty()) {
+                playQueue(queue, startIndex = 0)
+                val seedCount = minOf(songs.distinctBy { it.id }.size, MusicRepository.MAX_RADIO_SEEDS)
+                _statusMessage.value = "Starting radio based on $seedCount songs"
+            }
+        }
+    }
+
+    /**
+     * Plays [songs] (a playlist) with Smart Shuffle: shuffled, with a related track from the
+     * library after every few playlist tracks. See [MusicRepository.buildSmartShuffleQueue].
+     */
+    fun smartShuffle(songs: List<Song>, fromPlaylistId: Long? = null) {
+        val repo = repository ?: return
+        if (songs.isEmpty()) return
+        viewModelScope.launch {
+            val variety = appPreferences?.radioVarietyFlow?.first() ?: VarietyMode.BLEND
+            val queue = repo.buildSmartShuffleQueue(songs, variety)
+            if (queue.isEmpty()) return@launch
+            playQueue(queue, startIndex = 0, fromPlaylistId = fromPlaylistId)
+            val added = queue.size - songs.distinctBy { it.id }.size
+            _statusMessage.value = if (added > 0) "Smart Shuffle: $added related songs mixed in" else "Shuffling"
         }
     }
 

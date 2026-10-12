@@ -38,6 +38,9 @@ class ReplayGainAudioProcessor : BaseAudioProcessor() {
         this.scale = scale.coerceIn(MIN_SCALE, MAX_SCALE)
     }
 
+    /** The multiplier currently applied, so a second player can carry on the same track at the same level. */
+    fun trackScale(): Float = scale
+
     /** Restores unmodified playback, for a track whose loudness is unknown or when the user turns normalization off. */
     fun clearTrackScale() {
         scale = 1f

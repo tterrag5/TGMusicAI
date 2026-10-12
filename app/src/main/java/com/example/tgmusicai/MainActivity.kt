@@ -1,7 +1,9 @@
 package com.example.tgmusicai
 
+import android.app.SearchManager
 import android.content.Intent
 import android.os.Bundle
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -35,6 +37,7 @@ import com.example.tgmusicai.data.repository.TagEditorManager
 import com.example.tgmusicai.data.repository.CloudRecommendationSource
 import com.example.tgmusicai.data.repository.RecommendationEngine
 import com.example.tgmusicai.playback.MediaControllerManager
+import com.example.tgmusicai.playback.VoiceSearchQuery
 import com.example.tgmusicai.ui.onboarding.OnboardingScreen
 import com.example.tgmusicai.ui.screens.MainScreen
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
@@ -51,6 +54,7 @@ import com.example.tgmusicai.ui.viewmodel.StatsViewModel
 import com.example.tgmusicai.ui.viewmodel.YouTubeViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Main Activity of TGMusicAI.
@@ -63,6 +67,19 @@ import kotlinx.coroutines.launch
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class MainActivity : ComponentActivity() {
 
+    private companion object {
+        /** Actions a voice assistant may launch this Activity with to ask for playback. */
+        val VOICE_SEARCH_ACTIONS = setOf(
+            MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH,
+            MediaStore.INTENT_ACTION_MEDIA_SEARCH,
+            Intent.ACTION_SEARCH,
+        )
+
+        /** How long to wait for the media session before giving up on a voice request. */
+        const val VOICE_SEARCH_CONNECT_TIMEOUT_MS = 10_000L
+    }
+
+
     private lateinit var mediaControllerManager: MediaControllerManager
     private lateinit var networkObserver: NetworkObserver
     private val openNowPlayingRequest = mutableIntStateOf(0)
@@ -72,6 +89,46 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         if (intent.action == com.example.tgmusicai.playback.PlaybackService.ACTION_OPEN_NOW_PLAYING) {
             openNowPlayingRequest.intValue++
+        }
+        handleVoiceSearchIntent(intent)
+    }
+
+    /**
+     * Starts playing what a voice assistant asked for, when the request launched the app rather
+     * than reaching the media session directly.
+     *
+     * The search itself runs on the service side -- see [MediaControllerManager.playFromSearch] --
+     * so there is exactly one implementation of "what does this query mean" rather than one per
+     * entry point. Nothing happens for an intent that carries no usable query: opening the app and
+     * playing something arbitrary is worse than opening the app.
+     *
+     * Waits for the controller to bind first. On a cold start the intent arrives while the service
+     * connection is still being made, so acting immediately would drop the request and leave the
+     * user watching the app open and do nothing.
+     */
+    private fun handleVoiceSearchIntent(intent: Intent?) {
+        if (intent == null) return
+        if (intent.action !in VOICE_SEARCH_ACTIONS) return
+
+        val query = VoiceSearchQuery.build(
+            focus = intent.getStringExtra(MediaStore.EXTRA_MEDIA_FOCUS),
+            title = intent.getStringExtra(MediaStore.EXTRA_MEDIA_TITLE),
+            artist = intent.getStringExtra(MediaStore.EXTRA_MEDIA_ARTIST),
+            album = intent.getStringExtra(MediaStore.EXTRA_MEDIA_ALBUM),
+            genre = intent.getStringExtra(MediaStore.EXTRA_MEDIA_GENRE),
+            rawQuery = intent.getStringExtra(SearchManager.QUERY),
+        ) ?: return
+
+        // Consume it, so a configuration change or a later onCreate cannot replay the request and
+        // restart the track the user has since skipped past.
+        intent.removeExtra(SearchManager.QUERY)
+        intent.action = null
+
+        lifecycleScope.launch {
+            val connected = withTimeoutOrNull(VOICE_SEARCH_CONNECT_TIMEOUT_MS) {
+                mediaControllerManager.isConnected.first { it }
+            }
+            if (connected == true) mediaControllerManager.playFromSearch(query)
         }
     }
 
@@ -100,7 +157,8 @@ class MainActivity : ComponentActivity() {
             alarmDao = database.alarmDao(),
             listeningHistoryDao = database.listeningHistoryDao(),
             database = database,
-            recommendationEngine = recommendationEngine
+            recommendationEngine = recommendationEngine,
+            pendingScrobbleDao = database.pendingScrobbleDao(),
         )
 
         networkObserver = NetworkObserver(this)
@@ -124,6 +182,10 @@ class MainActivity : ComponentActivity() {
 
         mediaControllerManager = MediaControllerManager(this)
 
+        // Only now that there is a controller to wait on. A voice request that launched the app
+        // cold arrives in this same onCreate, before the service connection exists.
+        handleVoiceSearchIntent(intent)
+
         // Shared by the Library's cloud-search section (the old Explore tab) so searching doesn't
         // spin up a second extractor with its own connection pool.
         val youTubeExtractor = com.example.tgmusicai.data.youtube.YouTubeExtractor()
@@ -142,7 +204,9 @@ class MainActivity : ComponentActivity() {
         val cloudRecommendationSource = CloudRecommendationSource(
             browser = youTubeMusicBrowser,
             songDao = database.songDao(),
-            recommendationEngine = recommendationEngine
+            recommendationEngine = recommendationEngine,
+            lastFm = com.example.tgmusicai.data.scrobble.LastFmSimilarClient(),
+            lastFmApiKey = { appPreferences.activeLastFmApiKey() }
         )
         val youTubePlaylistSyncManager = YouTubePlaylistSyncManager(
             songDao = database.songDao(),
