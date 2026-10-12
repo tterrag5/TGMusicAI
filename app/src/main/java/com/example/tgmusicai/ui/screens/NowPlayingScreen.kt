@@ -102,6 +102,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.Player
 import coil.compose.AsyncImage
+import com.example.tgmusicai.ui.components.LiquidGlass
+import com.example.tgmusicai.ui.components.LiquidGlassPanel
 import com.example.tgmusicai.ui.components.AddToPlaylistDialog
 import com.example.tgmusicai.ui.components.CastButton
 import com.example.tgmusicai.ui.components.karaokeLine
@@ -455,17 +457,24 @@ fun NowPlayingScreen(
             // Album Artwork / Lyrics Transcript Area (toggled by the Lyrics pill below, or a
             // horizontal swipe -- see pointerInput above)
             if (showLyricsTab) {
-                Card(
+                // Liquid glass: the cover art, blurred and drifting, behind a frosted pane. Text on
+                // it is light whatever the theme, so the scheme is overridden for this panel only.
+                LiquidGlassPanel(
+                    artworkUri = FormatUtils.cacheBustedArtworkUri(currentSong?.artworkUri),
+                    fallbackColors = listOf(ambientPrimary, ambientSecondary),
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
                         .padding(vertical = 12.dp),
                     shape = RoundedCornerShape(24.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
                 ) {
+                    MaterialTheme(
+                        colorScheme = MaterialTheme.colorScheme.copy(
+                            onSurface = LiquidGlass.text,
+                            onSurfaceVariant = LiquidGlass.textDim,
+                            outline = LiquidGlass.textFaint,
+                        )
+                    ) {
                     Box(modifier = Modifier.fillMaxSize()) {
                         if (parsedLyrics.isNotEmpty()) {
                             Box(
@@ -480,7 +489,7 @@ fun NowPlayingScreen(
                                         Icon(
                                             imageVector = Icons.Rounded.Translate,
                                             contentDescription = "Translate lyrics",
-                                            tint = if (translatedLyrics != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                            tint = if (translatedLyrics != null) LiquidGlass.text else LiquidGlass.textDim
                                         )
                                     }
                                 }
@@ -667,7 +676,7 @@ fun NowPlayingScreen(
                                     // read as choppy/stuttery scrolling rather than a clean
                                     // line-by-line highlight.
                                     val animatedColor by animateColorAsState(
-                                        targetValue = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        targetValue = if (isActive) LiquidGlass.text else LiquidGlass.textDim,
                                         animationSpec = tween(250),
                                         label = "lyricLineColor"
                                     )
@@ -704,8 +713,8 @@ fun NowPlayingScreen(
                                                 karaokeLine(
                                                     line = line,
                                                     positionMs = smoothedPositionMs,
-                                                    sungColor = MaterialTheme.colorScheme.primary,
-                                                    unsungColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    sungColor = LiquidGlass.text,
+                                                    unsungColor = LiquidGlass.textDim,
                                                 )
                                             } else {
                                                 AnnotatedString(line.text)
@@ -713,11 +722,11 @@ fun NowPlayingScreen(
                                             // A music marker is a symbol standing in for singing,
                                             // not a lyric: sized up so it reads as one, and never
                                             // bolded, so real words still stand out when active.
-                                            style = if (line.isInstrumental) {
+                                            style = (if (line.isInstrumental) {
                                                 MaterialTheme.typography.titleMedium
                                             } else {
                                                 MaterialTheme.typography.bodyMedium
-                                            },
+                                            }).copy(shadow = LiquidGlass.textShadow),
                                             fontWeight = if (isActive && !line.isInstrumental) FontWeight.Bold else FontWeight.Normal,
                                             color = if (line.isInstrumental) animatedColor.copy(alpha = 0.7f) else animatedColor,
                                             modifier = Modifier.fillMaxWidth(),
@@ -727,7 +736,7 @@ fun NowPlayingScreen(
                                         translatedLyrics?.takeIf { !line.isInstrumental }?.getOrNull(index)?.let { translatedText ->
                                             Text(
                                                 text = translatedText,
-                                                style = MaterialTheme.typography.bodySmall,
+                                                style = MaterialTheme.typography.bodySmall.copy(shadow = LiquidGlass.textShadow),
                                                 color = animatedColor.copy(alpha = 0.75f),
                                                 modifier = Modifier.fillMaxWidth(),
                                                 textAlign = TextAlign.Center
@@ -737,6 +746,7 @@ fun NowPlayingScreen(
                                 }
                             }
                         }
+                    }
                     }
                 }
             } else {
