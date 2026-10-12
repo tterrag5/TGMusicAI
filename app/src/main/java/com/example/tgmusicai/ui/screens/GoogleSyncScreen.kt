@@ -100,6 +100,8 @@ fun GoogleSyncScreen(
     }
 
     Scaffold(
+
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("Import from YouTube", style = MaterialTheme.typography.headlineSmall) },
@@ -120,7 +122,7 @@ fun GoogleSyncScreen(
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
             )
         },
         modifier = modifier

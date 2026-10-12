@@ -61,6 +61,8 @@ fun AlarmsScreen(
     var editingAlarm by remember { mutableStateOf<Alarm?>(null) }
 
     Scaffold(
+
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         topBar = {
             TopAppBar(
                 title = {

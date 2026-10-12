@@ -559,6 +559,17 @@ class PlayerViewModel(
         }
     }
 
+    /** Whether the theme backdrop animates; see `ui/components/scene/ThemeBackdrop`. */
+    val sceneMotionEnabled: StateFlow<Boolean> = appPreferences?.sceneMotionFlow
+        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+        ?: MutableStateFlow(true).asStateFlow()
+
+    fun setSceneMotionEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            appPreferences?.setSceneMotion(enabled)
+        }
+    }
+
     /**
      * A song streamed directly (not downloaded or added to a playlist first) is a transient
      * `id == 0L` object never inserted into Room -- saving fetched lyrics against that id would

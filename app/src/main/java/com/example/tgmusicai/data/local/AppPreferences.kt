@@ -47,6 +47,7 @@ class AppPreferences(private val context: Context) {
         // switching palette doesn't reset the user's light/dark choice or vice versa.
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
+        val SCENE_MOTION = booleanPreferencesKey("scene_motion")
         // Grid-vs-list choice for the Library and Playlists screens. Persisted because it used to
         // live only in a ViewModel StateFlow and silently reverted on every app restart.
         val LIBRARY_GRID_VIEW = booleanPreferencesKey("library_grid_view")
@@ -282,6 +283,12 @@ class AppPreferences(private val context: Context) {
             preferences[DYNAMIC_COLOR] ?: false
         }
 
+    /** Whether the theme's backdrop scene animates (petals, stars, rain); off leaves it still. */
+    val sceneMotionFlow: Flow<Boolean> = context.dataStore.data
+        .map { preferences ->
+            preferences[SCENE_MOTION] ?: true
+        }
+
     /** Library grid vs list; defaults to grid, which shows far more of a music library at once. */
     val libraryGridViewFlow: Flow<Boolean> = context.dataStore.data
         .map { preferences ->
@@ -449,6 +456,12 @@ class AppPreferences(private val context: Context) {
     suspend fun setDynamicColor(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[DYNAMIC_COLOR] = enabled
+        }
+    }
+
+    suspend fun setSceneMotion(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[SCENE_MOTION] = enabled
         }
     }
 

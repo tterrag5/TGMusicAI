@@ -75,6 +75,8 @@ fun DownloadsScreen(
     val entries = downloadingEntries + queuedEntries + pausedEntries + doneEntries
 
     Scaffold(
+
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("Downloads") },
@@ -84,7 +86,7 @@ fun DownloadsScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = androidx.compose.ui.graphics.Color.Transparent
                 )
             )
         },

@@ -193,6 +193,8 @@ fun LibraryScreen(
     }
 
     Scaffold(
+
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         topBar = {
             if (isSelectionMode) {
                 TopAppBar(
@@ -275,7 +277,7 @@ fun LibraryScreen(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface
+                        containerColor = androidx.compose.ui.graphics.Color.Transparent
                     )
                 )
             }

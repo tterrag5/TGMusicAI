@@ -9,6 +9,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -75,6 +76,8 @@ import com.example.tgmusicai.BuildConfig
 import com.example.tgmusicai.data.repository.VarietyMode
 import com.example.tgmusicai.data.sponsorblock.SponsorBlockManager
 import com.example.tgmusicai.ui.theme.AppTheme
+import com.example.tgmusicai.ui.components.scene.ThemeBackdrop
+import androidx.compose.ui.graphics.luminance
 import com.example.tgmusicai.ui.theme.ThemeMode
 import com.example.tgmusicai.ui.viewmodel.HomeViewModel
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
@@ -105,6 +108,7 @@ fun SettingsScreen(
     val onSelectTheme: (String) -> Unit = playerViewModel::setSelectedTheme
     val themeMode by playerViewModel.themeMode.collectAsState()
     val dynamicColorEnabled by playerViewModel.dynamicColorEnabled.collectAsState()
+    val sceneMotion by playerViewModel.sceneMotionEnabled.collectAsState()
     val skipSilenceEnabled by playerViewModel.skipSilenceEnabled.collectAsState()
     val volumeNormalizationEnabled by playerViewModel.volumeNormalizationEnabled.collectAsState()
     val sponsorBlockEnabled by playerViewModel.sponsorBlockEnabled.collectAsState()
@@ -189,10 +193,11 @@ fun SettingsScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = androidx.compose.ui.graphics.Color.Transparent
                 )
             )
         },
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         modifier = modifier
     ) { innerPadding ->
         LazyColumn(
@@ -221,6 +226,8 @@ fun SettingsScreen(
                     ThemePaletteCard(
                         selectedTheme = currentTheme,
                         dynamicColorEnabled = dynamicColorEnabled,
+                        sceneMotion = sceneMotion,
+                        onSceneMotionChange = playerViewModel::setSceneMotionEnabled,
                         onSelectTheme = onSelectTheme
                     )
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -848,81 +855,129 @@ private fun ThemeModeCard(
 }
 
 /**
- * Palette picker. Each entry shows the theme's actual accent color, so the list reads as a set of
- * colors rather than a list of names.
+ * Theme picker. Each card is a small live copy of that theme's backdrop scene, so a theme is
+ * chosen by seeing it rather than by reading its name.
  */
 @Composable
 private fun ThemePaletteCard(
     selectedTheme: String,
     dynamicColorEnabled: Boolean,
+    sceneMotion: Boolean,
+    onSceneMotionChange: (Boolean) -> Unit,
     onSelectTheme: (String) -> Unit
 ) {
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     Card(
         shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("Color palette", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+            Text("Theme", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
             if (dynamicColorEnabled) {
                 Text(
-                    "Material You is on, so these palettes aren't being applied.",
+                    "Material You is on, so these themes aren't being applied.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
-            AppTheme.entries.forEach { theme ->
-                val isSelected = AppTheme.fromName(selectedTheme) == theme
-                Surface(
-                    onClick = { onSelectTheme(theme.name) },
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                    color = if (isSelected) {
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-                    } else {
-                        androidx.compose.ui.graphics.Color.Transparent
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 2.dp)
+            AppTheme.entries.chunked(2).forEach { pair ->
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(bottom = 10.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(androidx.compose.foundation.shape.CircleShape)
-                                .background(theme.accentPreview)
-                                .border(
-                                    width = 1.dp,
-                                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                                    shape = androidx.compose.foundation.shape.CircleShape
-                                )
-                        )
-                        Spacer(modifier = Modifier.width(14.dp))
-                        Text(
-                            text = theme.displayName,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (isSelected) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurface
-                            },
+                    pair.forEach { theme ->
+                        ThemePreviewCard(
+                            theme = theme,
+                            selected = AppTheme.fromName(selectedTheme) == theme,
+                            dark = dark,
+                            animate = sceneMotion,
+                            onClick = { onSelectTheme(theme.name) },
                             modifier = Modifier.weight(1f)
                         )
-                        if (isSelected) {
-                            Icon(
-                                imageVector = Icons.Rounded.Check,
-                                contentDescription = "Currently selected",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
                     }
+                    if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
                 }
+            }
+            SettingsToggleRow(
+                title = "Moving backgrounds",
+                subtitle = "Petals, snow, stars and rain drifting behind everything",
+                checked = sceneMotion,
+                onCheckedChange = onSceneMotionChange
+            )
+        }
+    }
+}
+
+@Composable
+private fun ThemePreviewCard(
+    theme: AppTheme,
+    selected: Boolean,
+    dark: Boolean,
+    animate: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp)
+    val accent = if (dark) theme.dark.accent else theme.light.accent
+    val ring by androidx.compose.animation.core.animateDpAsState(
+        targetValue = if (selected) 3.dp else 1.dp,
+        label = "themeRing"
+    )
+    Box(
+        modifier = modifier
+            .height(124.dp)
+            .clip(shape)
+            .border(ring, if (selected) accent else androidx.compose.ui.graphics.Color.White.copy(alpha = 0.14f), shape)
+            .clickable(onClickLabel = "Use ${theme.displayName}", onClick = onClick)
+    ) {
+        ThemeBackdrop(theme = theme, dark = dark, animate = animate)
+        // A scrim along the bottom so the name reads over whatever is drifting behind it.
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        0.35f to androidx.compose.ui.graphics.Color.Transparent,
+                        1f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.7f)
+                    )
+                )
+        )
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(10.dp)
+        ) {
+            Text(
+                theme.displayName,
+                color = androidx.compose.ui.graphics.Color.White,
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(
+                theme.blurb,
+                color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+        }
+        if (selected) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .size(22.dp)
+                    .clip(androidx.compose.foundation.shape.CircleShape)
+                    .background(accent)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = "Current theme",
+                    tint = if (dark) theme.dark.onAccent else theme.light.onAccent,
+                    modifier = Modifier.size(15.dp)
+                )
             }
         }
     }

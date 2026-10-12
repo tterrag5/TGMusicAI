@@ -7,6 +7,7 @@ import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
@@ -232,7 +233,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 val onboardingCompleted by appPreferences.onboardingCompletedFlow.collectAsState(initial = null)
 
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                Box(modifier = Modifier.fillMaxSize()) {
                     if (onboardingCompleted == null) {
                         // Loading state checking DataStore preferences
                     } else if (onboardingCompleted == true) {
@@ -346,7 +347,7 @@ class MainActivity : ComponentActivity() {
                                     appPreferences.setSelectedTheme(themeKey)
                                 }
                             },
-                            modifier = Modifier.padding(innerPadding)
+                            modifier = Modifier.fillMaxSize()
                         )
 
                         // Trigger media scan when main UI opens
@@ -520,7 +521,7 @@ class MainActivity : ComponentActivity() {
                                     appPreferences.setOnboardingCompleted(true)
                                 }
                             },
-                            modifier = Modifier.padding(innerPadding)
+                            modifier = Modifier.fillMaxSize()
                         )
                     }
                 }
