@@ -41,6 +41,11 @@ class CloudRecommendationSource(
     private var cached: List<YouTubeSearchResult> = emptyList()
     private var cachedAtMs: Long = 0L
 
+    // The last radio fetched, keyed by its seed. Autoplay can ask twice for the same seed (queue
+    // extension, then the end-of-queue fallback), and a radio is ~50 tracks in one response.
+    private var radioSeed: String? = null
+    private var radioTracks: List<YouTubeSearchResult> = emptyList()
+
     /**
      * Up to [limit] recommended cloud tracks, best first, none of which are in the local library.
      *
@@ -80,11 +85,37 @@ class CloudRecommendationSource(
         }
     }
 
+    /**
+     * YouTube Music's radio seeded from one track ([seedVideoId]), with owned tracks removed: what
+     * should follow *this* song, rather than the user's taste in general. Up to [limit] tracks in
+     * YouTube's own order, which is built to flow on from the seed. Empty on any failure, so
+     * callers fall back to [recommendedTracks].
+     */
+    suspend fun radioFor(seedVideoId: String, limit: Int = DEFAULT_LIMIT): List<YouTubeSearchResult> =
+        withContext(Dispatchers.IO) {
+            if (limit <= 0 || seedVideoId.isBlank()) return@withContext emptyList()
+            cacheLock.withLock {
+                if (radioSeed != seedVideoId || radioTracks.isEmpty()) {
+                    val fetched = try {
+                        excludeOwned(browser.fetchRadio(seedVideoId))
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "Could not build the radio for $seedVideoId", e)
+                        emptyList()
+                    }
+                    radioSeed = seedVideoId
+                    radioTracks = fetched
+                }
+                radioTracks.take(limit)
+            }
+        }
+
     /** Throws away the cached list, so the next request goes back to the network. */
     suspend fun invalidate() {
         cacheLock.withLock {
             cached = emptyList()
             cachedAtMs = 0L
+            radioSeed = null
+            radioTracks = emptyList()
         }
     }
 

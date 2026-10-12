@@ -707,11 +707,14 @@ class PlaybackService : MediaLibraryService() {
         if (currentIndex < 0 || currentIndex == lastAutoExtendedAtIndex) return
         lastAutoExtendedAtIndex = currentIndex
 
-        val existingIds = (0 until exoPlayer.mediaItemCount).map { exoPlayer.getMediaItemAt(it).mediaId }.toSet()
+        val queued = (0 until exoPlayer.mediaItemCount).map { exoPlayer.getMediaItemAt(it) }
+        val existingIds = queued.map { it.mediaId }.toSet()
+        val existingVideoIds = queued.mapNotNull { SongMediaExtras.youtubeId(it.mediaMetadata.extras) }.toSet()
+        val seedVideoId = SongMediaExtras.youtubeId(exoPlayer.currentMediaItem?.mediaMetadata?.extras)
         serviceScope.launch {
             val local = database.songDao().getRandomDownloadedSongs(AUTOPLAY_LOCAL_COUNT)
                 .filter { it.mediaUri !in existingIds }
-            val cloud = resolvedRecommendations(AUTOPLAY_CLOUD_COUNT, existingIds)
+            val cloud = resolvedRecommendations(AUTOPLAY_CLOUD_COUNT, existingIds, existingVideoIds, seedVideoId)
             val candidates = interleave(cloud, local)
             if (candidates.isEmpty()) return@launch
             withContext(Dispatchers.Main) {
@@ -732,10 +735,11 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun playRandomSongAsAutoplay(exoPlayer: ExoPlayer) {
         val lastMediaId = exoPlayer.currentMediaItem?.mediaId
+        val lastVideoId = SongMediaExtras.youtubeId(exoPlayer.currentMediaItem?.mediaMetadata?.extras)
         serviceScope.launch {
             val excluded = setOfNotNull(lastMediaId)
             val candidates = database.songDao().getRandomDownloadedSongs(3)
-            val next = resolvedRecommendations(1, excluded).firstOrNull()
+            val next = resolvedRecommendations(1, excluded, setOfNotNull(lastVideoId), lastVideoId).firstOrNull()
                 ?: candidates.firstOrNull { it.mediaUri !in excluded }
                 ?: candidates.firstOrNull()
             if (next == null) return@launch
@@ -772,22 +776,39 @@ class PlaybackService : MediaLibraryService() {
      * exactly the cascade that the guard in `onPlayerError` exists to contain -- autoplay adding
      * its own would be self-inflicted. Anything that cannot be resolved is dropped.
      *
+     * When the track that just played is a cloud track ([seedVideoId]), YouTube Music's radio for
+     * it comes first, in YouTube's order: it is built to follow on from that one song, which the
+     * taste-seeded list is not. The taste-seeded list fills whatever the radio could not. Tracks
+     * whose video id is in [excludedVideoIds] are skipped before resolving, since resolving is the
+     * expensive part.
+     *
      * Returns nothing when "Downloaded only" is set, when the device is offline, or when the whole
      * attempt outruns [RECOMMENDATION_RESOLVE_TIMEOUT_MS]. The caller treats an empty list as "use
      * local tracks", which is what keeps autoplay working with no network.
      */
-    private suspend fun resolvedRecommendations(limit: Int, excludedMediaIds: Set<String>): List<Song> {
+    private suspend fun resolvedRecommendations(
+        limit: Int,
+        excludedMediaIds: Set<String>,
+        excludedVideoIds: Set<String> = emptySet(),
+        seedVideoId: String? = null
+    ): List<Song> {
         if (limit <= 0 || downloadedOnly) return emptyList()
         return try {
             withTimeoutOrNull(RECOMMENDATION_RESOLVE_TIMEOUT_MS) {
+                val radio = seedVideoId?.let {
+                    cloudRecommendations.radioFor(it, limit = limit * RECOMMENDATION_OVERFETCH)
+                }.orEmpty()
                 val tracks = cloudRecommendations.recommendedTracks(
                     limit = limit * RECOMMENDATION_OVERFETCH
                 )
                 val resolved = mutableListOf<Song>()
-                // Shuffled so a queue that runs dry three times in one evening does not append the
-                // same few tracks each time; the cached recommendation list barely changes.
-                for (track in tracks.shuffled()) {
+                // The taste list is shuffled so a queue that runs dry three times in one evening
+                // does not append the same few tracks each time; the cached list barely changes.
+                // The radio is not: its order is the point, and its seed changes every time.
+                val ordered = (radio + tracks.shuffled()).distinctBy { it.videoId }
+                for (track in ordered) {
                     if (resolved.size >= limit) break
+                    if (track.videoId in excludedVideoIds) continue
                     val song = resolveRecommendation(track) ?: continue
                     if (song.mediaUri in excludedMediaIds) continue
                     if (resolved.any { it.mediaUri == song.mediaUri }) continue

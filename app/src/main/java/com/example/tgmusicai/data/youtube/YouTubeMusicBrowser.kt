@@ -360,6 +360,31 @@ class YouTubeMusicBrowser(
         }
     }
 
+    /**
+     * YouTube Music's own radio for [videoId]: the "up next" mix the web player builds when a track
+     * is started, which is the `RDAMVM` + id playlist served through `/youtubei/v1/next`.
+     *
+     * This is the closest thing to "more like this one track" that the catalogue offers, and it is
+     * tuned by YouTube to flow on from the seed, which taste-seeded artist lookups cannot do. The
+     * seed itself (always the first entry) is left out. Empty on any failure.
+     */
+    suspend fun fetchRadio(videoId: String): List<YouTubeSearchResult> {
+        if (videoId.isBlank()) return emptyList()
+        val payload = JSONObject().apply {
+            put("context", webRemixContext())
+            put("videoId", videoId)
+            put("playlistId", RADIO_PLAYLIST_PREFIX + videoId)
+            put("isAudioOnly", true)
+        }
+        val root = post(NEXT_URL, payload, "next($videoId)") ?: return emptyList()
+        return try {
+            parseRadioTracks(root, videoId)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Could not parse the radio for $videoId", e)
+            emptyList()
+        }
+    }
+
     /** The current top-songs chart. Empty if charts are unavailable in the user's region. */
     suspend fun fetchTopChart(): List<YouTubeSearchResult> {
         val root = browse(BROWSE_ID_CHARTS) ?: return emptyList()
@@ -482,50 +507,61 @@ class YouTubeMusicBrowser(
         browseId: String,
         continuation: String? = null,
         params: String? = null
-    ): JSONObject? = withContext(Dispatchers.IO) {
+    ): JSONObject? {
         val payload = JSONObject().apply {
-            put("context", JSONObject().apply {
-                put("client", JSONObject().apply {
-                    put("clientName", "WEB_REMIX")
-                    put("clientVersion", CLIENT_VERSION)
-                    put("hl", "en")
-                    put("gl", "US")
-                })
-            })
+            put("context", webRemixContext())
             put("browseId", browseId)
             if (!continuation.isNullOrBlank()) put("continuation", continuation)
             if (!params.isNullOrBlank()) put("params", params)
         }
-
-        val builder = Request.Builder()
-            .url("$BROWSE_URL?key=$INNERTUBE_API_KEY&prettyPrint=false")
-            .header("X-Origin", YOUTUBE_MUSIC_ORIGIN)
-            .header("Origin", YOUTUBE_MUSIC_ORIGIN)
-            .header("Referer", "$YOUTUBE_MUSIC_ORIGIN/")
-            .header("User-Agent", NewPipeOkHttpDownloader.REALISTIC_USER_AGENT)
-            .post(payload.toString().toRequestBody("application/json".toMediaType()))
-
-        val cookieHeader = cookieManager?.getCookieHeader()
-        val authHeader = cookieManager?.getAuthorizationHeader()
-        if (cookieHeader != null && authHeader != null) {
-            builder.header("Cookie", cookieHeader)
-                .header("Authorization", authHeader)
-                .header("X-Goog-AuthUser", "0")
-        }
-
-        try {
-            okHttpClient.newCall(builder.build()).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "browse($browseId) failed: HTTP ${response.code}")
-                    return@withContext null
-                }
-                JSONObject(response.body?.string() ?: "{}")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "browse($browseId) failed: ${e.message}")
-            null
-        }
+        return post(BROWSE_URL, payload, "browse($browseId)")
     }
+
+    private fun webRemixContext(): JSONObject = JSONObject().apply {
+        put("client", JSONObject().apply {
+            put("clientName", "WEB_REMIX")
+            put("clientVersion", CLIENT_VERSION)
+            put("hl", "en")
+            put("gl", "US")
+        })
+    }
+
+    /**
+     * POSTs [payload] to an InnerTube endpoint, attaching session headers when there is a session
+     * (to personalise, never to enable -- see [browse]). Null on any failure; [label] names the
+     * call in the log.
+     */
+    private suspend fun post(url: String, payload: JSONObject, label: String): JSONObject? =
+        withContext(Dispatchers.IO) {
+            val builder = Request.Builder()
+                .url("$url?key=$INNERTUBE_API_KEY&prettyPrint=false")
+                .header("X-Origin", YOUTUBE_MUSIC_ORIGIN)
+                .header("Origin", YOUTUBE_MUSIC_ORIGIN)
+                .header("Referer", "$YOUTUBE_MUSIC_ORIGIN/")
+                .header("User-Agent", NewPipeOkHttpDownloader.REALISTIC_USER_AGENT)
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+
+            val cookieHeader = cookieManager?.getCookieHeader()
+            val authHeader = cookieManager?.getAuthorizationHeader()
+            if (cookieHeader != null && authHeader != null) {
+                builder.header("Cookie", cookieHeader)
+                    .header("Authorization", authHeader)
+                    .header("X-Goog-AuthUser", "0")
+            }
+
+            try {
+                okHttpClient.newCall(builder.build()).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        Log.w(TAG, "$label failed: HTTP ${response.code}")
+                        return@withContext null
+                    }
+                    JSONObject(response.body?.string() ?: "{}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "$label failed: ${e.message}")
+                null
+            }
+        }
 
     companion object {
         private const val TAG = "YouTubeMusicBrowser"
@@ -536,6 +572,40 @@ class YouTubeMusicBrowser(
         private const val INNERTUBE_API_KEY = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
 
         private const val SEARCH_URL = "https://music.youtube.com/youtubei/v1/search"
+        private const val NEXT_URL = "https://music.youtube.com/youtubei/v1/next"
+
+        /** Prefix that turns a video id into the id of YouTube Music's radio seeded from it. */
+        const val RADIO_PLAYLIST_PREFIX = "RDAMVM"
+
+        /**
+         * Reads the tracks of a `/next` radio response, skipping [seedVideoId].
+         *
+         * Each entry is a `playlistPanelVideoRenderer`. Its `shortBylineText` holds the artist
+         * alone; `longBylineText` adds view and like counts, which is why it is not used.
+         */
+        internal fun parseRadioTracks(root: JSONObject, seedVideoId: String): List<YouTubeSearchResult> {
+            val rows = mutableListOf<JSONObject>()
+            collectRenderers(root, "playlistPanelVideoRenderer", rows)
+            val seen = mutableSetOf(seedVideoId)
+            return rows.mapNotNull { row ->
+                val videoId = row.optString("videoId").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                if (!seen.add(videoId)) return@mapNotNull null
+                val title = runsText(row.optJSONObject("title")).takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+                val artist = runsText(row.optJSONObject("shortBylineText"))
+                    .split("•")
+                    .map { it.trim() }
+                    .firstOrNull { it.isNotBlank() }
+                    ?: "Unknown Artist"
+                YouTubeSearchResult(
+                    videoId = videoId,
+                    title = title,
+                    uploader = artist,
+                    durationSeconds = extractDurationSeconds(row),
+                    thumbnailUri = findThumbnailUrl(row.optJSONObject("thumbnail")).orEmpty()
+                )
+            }
+        }
 
         /** YouTube Music's own well-known browse ids for its home, moods/genres and charts pages. */
         const val BROWSE_ID_HOME = "FEmusic_home"
