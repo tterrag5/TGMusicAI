@@ -2,6 +2,7 @@ package com.example.tgmusicai
 
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.example.tgmusicai.data.repository.CloudRecommendationSource
 import com.example.tgmusicai.data.youtube.YouTubeExtractor
 import com.example.tgmusicai.data.youtube.YouTubeMusicBrowser
 import kotlinx.coroutines.runBlocking
@@ -32,6 +33,19 @@ class YouTubeRadioTest {
 
         val stream = withTimeout(TIMEOUT_MS) { YouTubeExtractor().extractAudioStream(radio.first().videoId) }
         assertNotNull("The first radio track did not resolve to a stream", stream)
+    }
+
+    /** A local track has no video id: it is found by name, and only a confident match seeds a radio. */
+    @Test
+    fun aTrackKnownOnlyByNameIsFoundAndSeedsARadio() = runBlocking {
+        val browser = YouTubeMusicBrowser()
+        val match = withTimeout(TIMEOUT_MS) { browser.searchSongs("Karma Police Radiohead") }
+            .firstOrNull { CloudRecommendationSource.isSameTrack("Karma Police", "Radiohead", it) }
+        Log.i(TAG, "Name lookup matched $match")
+        assertNotNull("No confident YouTube Music match for a well-known track", match)
+
+        val radio = withTimeout(TIMEOUT_MS) { browser.fetchRadio(match!!.videoId) }
+        assertTrue("Expected a radio of at least 10 tracks, got ${radio.size}", radio.size >= 10)
     }
 
     private companion object {

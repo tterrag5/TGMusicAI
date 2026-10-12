@@ -124,6 +124,22 @@ class CloudRecommendationSource(
             }
         }
 
+    /**
+     * [radioFor] a track known only by name -- a local file with no video id. The track is looked
+     * up on YouTube Music first, and only a confident match ([isSameTrack]) is used as the seed:
+     * a radio built from the wrong song is worse than none. Empty when there is no such match.
+     */
+    suspend fun radioForTrack(title: String, artist: String, limit: Int = DEFAULT_LIMIT): List<YouTubeSearchResult> {
+        if (title.isBlank()) return emptyList()
+        val match = try {
+            browser.searchSongs("$title $artist").firstOrNull { isSameTrack(title, artist, it) }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Could not look up '$title' for a radio", e)
+            null
+        } ?: return emptyList()
+        return radioFor(match.videoId, limit)
+    }
+
     /** Throws away the cached list, so the next request goes back to the network. */
     suspend fun invalidate() {
         cacheLock.withLock {
@@ -258,6 +274,35 @@ class CloudRecommendationSource(
         }
 
     internal companion object {
+        private fun normalise(text: String): String =
+            text.lowercase()
+                // "(Remastered 2011)", "[Official Audio]", "feat. X" say nothing about which song it is.
+                .replace(Regex("""[(\[][^)\]]*[)\]]"""), " ")
+                .replace(Regex("""\b(feat|ft)\.?\s.*$"""), " ")
+                .replace(Regex("""['’]"""), "")
+                .replace(Regex("""[^\p{L}\p{N}]+"""), " ")
+                .trim()
+
+        /**
+         * Whether [candidate] is the song [title] by [artist]: titles equal once bracketed
+         * annotations and punctuation are dropped, and the artists overlap (one contains the
+         * other, which covers "A & B" against "A"). A blank or placeholder artist matches on
+         * title alone only when the title is long enough to be distinctive.
+         */
+        internal fun isSameTrack(title: String, artist: String, candidate: YouTubeSearchResult): Boolean {
+            val wantedTitle = normalise(title)
+            if (wantedTitle.isBlank() || wantedTitle != normalise(candidate.title)) return false
+            val wantedArtist = normalise(artist)
+            if (wantedArtist.isBlank() || wantedArtist == "unknown" || wantedArtist == "unknown artist") {
+                return wantedTitle.length >= MIN_TITLE_ONLY_MATCH_LENGTH
+            }
+            val candidateArtist = normalise(candidate.uploader)
+            return candidateArtist.isNotBlank() &&
+                (candidateArtist.contains(wantedArtist) || wantedArtist.contains(candidateArtist))
+        }
+
+        const val MIN_TITLE_ONLY_MATCH_LENGTH = 12
+
         /** Takes each list's next item in turn, so every seed's best match comes before any second-best. */
         internal fun <T> roundRobin(lists: List<List<T>>): List<T> {
             val depth = lists.maxOfOrNull { it.size } ?: 0

@@ -711,6 +711,10 @@ class PlaybackService : MediaLibraryService() {
         // The radio follows on from the last track in the queue, since that is what the added
         // tracks will come after.
         val seedVideoId = queued.asReversed().firstNotNullOfOrNull { SongMediaExtras.youtubeId(it.mediaMetadata.extras) }
+        // A queue of local files has no video id; the last one is looked up by name instead.
+        val seedTrack = if (seedVideoId != null) null else queued.lastOrNull()?.mediaMetadata?.let { metadata ->
+            metadata.title?.toString()?.let { title -> title to metadata.artist?.toString().orEmpty() }
+        }
         autoplayTopUpJob = serviceScope.launch {
             val local = database.songDao().getRandomDownloadedSongs(need)
                 .filter { it.mediaUri !in existingIds }
@@ -718,7 +722,8 @@ class PlaybackService : MediaLibraryService() {
                 AutoplayPlanner.cloudCount(need, local.size),
                 existingIds,
                 existingVideoIds,
-                seedVideoId
+                seedVideoId,
+                seedTrack
             )
             val candidates = AutoplayPlanner.mix(cloud, local, need)
             if (candidates.isEmpty()) return@launch
@@ -784,8 +789,8 @@ class PlaybackService : MediaLibraryService() {
      * exactly the cascade that the guard in `onPlayerError` exists to contain -- autoplay adding
      * its own would be self-inflicted. Anything that cannot be resolved is dropped.
      *
-     * When the track that just played is a cloud track ([seedVideoId]), YouTube Music's radio for
-     * it comes first, in YouTube's order: it is built to follow on from that one song, which the
+     * When there is a cloud seed ([seedVideoId]) -- or a local one ([seedTrack], title to artist)
+     * that YouTube Music confidently recognises -- YouTube Music's radio for it comes first, in YouTube's order: it is built to follow on from that one song, which the
      * taste-seeded list is not. The taste-seeded list fills whatever the radio could not. Tracks
      * whose video id is in [excludedVideoIds] are skipped before resolving, since resolving is the
      * expensive part.
@@ -798,16 +803,21 @@ class PlaybackService : MediaLibraryService() {
         limit: Int,
         excludedMediaIds: Set<String>,
         excludedVideoIds: Set<String> = emptySet(),
-        seedVideoId: String? = null
+        seedVideoId: String? = null,
+        seedTrack: Pair<String, String>? = null
     ): List<Song> {
         if (limit <= 0 || downloadedOnly) return emptyList()
         // Outside the timeout, so a pass that runs out of time still keeps what it resolved.
         val resolved = mutableListOf<Song>()
         return try {
             withTimeoutOrNull(RECOMMENDATION_RESOLVE_TIMEOUT_MS) {
-                val radio = seedVideoId?.let {
-                    cloudRecommendations.radioFor(it, limit = limit * RECOMMENDATION_OVERFETCH)
-                }.orEmpty()
+                val radio = when {
+                    seedVideoId != null ->
+                        cloudRecommendations.radioFor(seedVideoId, limit = limit * RECOMMENDATION_OVERFETCH)
+                    seedTrack != null ->
+                        cloudRecommendations.radioForTrack(seedTrack.first, seedTrack.second, limit = limit * RECOMMENDATION_OVERFETCH)
+                    else -> emptyList()
+                }
                 val tracks = cloudRecommendations.recommendedTracks(
                     limit = limit * RECOMMENDATION_OVERFETCH
                 )
