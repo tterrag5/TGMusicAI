@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
@@ -63,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -70,8 +73,14 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.ui.NavDisplay
+import com.example.tgmusicai.R
 import com.example.tgmusicai.data.repository.MusicRepository
 import com.example.tgmusicai.playback.MediaControllerManager
+import com.example.tgmusicai.ui.components.scene.ThemeBackdrop
+import com.example.tgmusicai.ui.components.scene.rememberSceneTouchState
+import com.example.tgmusicai.ui.components.scene.sceneTouches
+import com.example.tgmusicai.ui.theme.AppTheme
+import androidx.compose.ui.graphics.luminance
 import com.example.tgmusicai.ui.components.CreatePlaylistDialog
 import com.example.tgmusicai.ui.components.MiniPlayer
 import com.example.tgmusicai.ui.components.PlaylistCoverArt
@@ -172,9 +181,35 @@ fun MainScreen(
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
+    // The theme's painted scene sits behind every screen; screens leave their own background
+    // transparent and cards are part-transparent (see asGlass in Theme.kt), so it shows through.
+    val selectedTheme by playerViewModel.selectedTheme.collectAsState()
+    val sceneMotion by playerViewModel.sceneMotionEnabled.collectAsState()
+    val dynamicColor by playerViewModel.dynamicColorEnabled.collectAsState()
+    val sceneTouches = rememberSceneTouchState()
+    val backgroundColor = MaterialTheme.colorScheme.background
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundColor)
+            .sceneTouches(sceneTouches)
+    ) {
+        // Material You replaces the palette with wallpaper colors, which the painted scenes
+        // weren't drawn for, so it gets the plain background instead.
+        if (!dynamicColor) {
+            ThemeBackdrop(
+                theme = AppTheme.fromName(selectedTheme),
+                dark = backgroundColor.luminance() < 0.5f,
+                // Nothing behind the full-screen player is visible, so don't animate it.
+                animate = sceneMotion && !showNowPlayingFull,
+                scrim = backgroundColor.copy(alpha = if (backgroundColor.luminance() < 0.5f) 0.3f else 0.38f),
+                touches = sceneTouches
+            )
+        }
+
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
             ModalDrawerSheet(
                 drawerContainerColor = MaterialTheme.colorScheme.background,
                 drawerContentColor = MaterialTheme.colorScheme.onBackground
@@ -191,11 +226,12 @@ fun MainScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.PlayCircle,
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_logo),
                             contentDescription = "TGMusic",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
@@ -397,6 +433,7 @@ fun MainScreen(
         }
     ) {
         Scaffold(
+            containerColor = Color.Transparent,
             bottomBar = {
                 // The whole bar (MiniPlayer + bottom NavigationBar) is hidden entirely -- not just
                 // visually covered -- while the full Now Playing screen is expanded, giving it
@@ -422,9 +459,8 @@ fun MainScreen(
                     )
 
                     NavigationBar(
-                        // Theme colors, not a hardcoded near-black: with light mode selectable the
-                        // fixed dark bar sat under a light app as an unrelated black slab.
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        // Translucent liquid glass container color
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f),
                         contentColor = MaterialTheme.colorScheme.onSurface
                     ) {
                         NavigationBarItem(
@@ -674,6 +710,7 @@ fun MainScreen(
                     )
                 }
             }
+        }
         }
     }
 

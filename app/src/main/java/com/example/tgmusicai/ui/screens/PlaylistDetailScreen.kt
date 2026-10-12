@@ -207,6 +207,8 @@ fun PlaylistDetailScreen(
     }
 
     Scaffold(
+
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         topBar = {
             if (isSelectionMode) {
                 TopAppBar(
@@ -290,7 +292,7 @@ fun PlaylistDetailScreen(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface
+                        containerColor = androidx.compose.ui.graphics.Color.Transparent
                     )
                 )
             }

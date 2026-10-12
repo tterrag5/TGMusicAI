@@ -120,6 +120,8 @@ fun StatsScreen(
     }
 
     Scaffold(
+
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("Stats", style = MaterialTheme.typography.headlineMedium) },
@@ -132,7 +134,7 @@ fun StatsScreen(
                 }
             },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = androidx.compose.ui.graphics.Color.Transparent
                 )
             )
         },

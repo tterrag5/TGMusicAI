@@ -123,11 +123,14 @@ data class ThemeSpec(
  */
 enum class AppTheme(
     val displayName: String,
+    /** One line saying what the theme's backdrop scene shows, under its name in the picker. */
+    val blurb: String,
     val dark: ThemeSpec,
     val light: ThemeSpec
 ) {
     YT_DARK(
-        "YT Red",
+        "Encore",
+        "Stage lights sweep a crowd while notes float up",
         dark = ThemeSpec(
             background = Color(0xFF0F0F0F),
             surface = Color(0xFF0F0F0F),
@@ -150,7 +153,8 @@ enum class AppTheme(
         )
     ),
     PASTEL_MIDNIGHT(
-        "Pastel Midnight",
+        "Midnight Rain",
+        "Rain on the window over a sleeping city",
         dark = ThemeSpec(
             background = Color(0xFF121824),
             surface = Color(0xFF121824),
@@ -173,7 +177,8 @@ enum class AppTheme(
         )
     ),
     WARM_AMBER(
-        "Warm Amber",
+        "Golden Hour",
+        "Low sun, long grass in the wind, warm drifting light",
         dark = ThemeSpec(
             background = Color(0xFF1C1917),
             surface = Color(0xFF1C1917),
@@ -196,7 +201,8 @@ enum class AppTheme(
         )
     ),
     NORDIC_SLATE(
-        "Nordic Slate",
+        "Nordic Snow",
+        "Snow falling over quiet peaks and pines",
         dark = ThemeSpec(
             background = Color(0xFF1E222A),
             surface = Color(0xFF1E222A),
@@ -219,7 +225,8 @@ enum class AppTheme(
         )
     ),
     VIOLET_DUSK(
-        "Violet Dusk",
+        "Moonlight",
+        "Aurora, drifting clouds and shooting stars",
         dark = ThemeSpec(
             background = Color(0xFF15111F),
             surface = Color(0xFF15111F),
@@ -243,20 +250,21 @@ enum class AppTheme(
     ),
     FOREST(
         "Forest",
+        "Looking out over a misty pine valley",
         dark = ThemeSpec(
-            background = Color(0xFF0F1A14),
-            surface = Color(0xFF0F1A14),
-            card = Color(0xFF1A281F),
+            background = Color(0xFF09140B),
+            surface = Color(0xFF0F2417),
+            card = Color(0xFF143A24),
             accent = Color(0xFF4ADE80),
             onAccent = Color(0xFF052B14),
             onBackground = Color(0xFFE6F2EA),
-            muted = Color(0xFF8FA899),
-            outline = Color(0xFF5B7566)
+            muted = Color(0xFF9DB8A7),
+            outline = Color(0xFF4F6E5C)
         ),
         light = ThemeSpec(
-            background = Color(0xFFF5FBF7),
+            background = Color(0xFFF0FDF4),
             surface = Color(0xFFFFFFFF),
-            card = Color(0xFFE4F1E9),
+            card = Color(0xFFDCF5E4),
             accent = Color(0xFF15803D),
             onAccent = Color.White,
             onBackground = Color(0xFF122018),
@@ -266,6 +274,7 @@ enum class AppTheme(
     ),
     ROSE_QUARTZ(
         "Rose Quartz",
+        "Glowing crystals and hearts drifting upward",
         dark = ThemeSpec(
             background = Color(0xFF1B1317),
             surface = Color(0xFF1B1317),
@@ -288,7 +297,8 @@ enum class AppTheme(
         )
     ),
     MONO(
-        "Mono",
+        "Classic",
+        "Plain graphite, nothing moving",
         dark = ThemeSpec(
             background = Color(0xFF101010),
             surface = Color(0xFF101010),
@@ -309,6 +319,78 @@ enum class AppTheme(
             muted = Color(0xFF636363),
             outline = Color(0xFFC4C4C4)
         )
+    ),
+    SAKURA(
+        "Sakura",
+        "A setting sun and cherry blossoms on the breeze",
+        dark = ThemeSpec(
+            background = Color(0xFF1B0F1A),
+            surface = Color(0xFF231221),
+            card = Color(0xFF331A30),
+            accent = Color(0xFFF472B6),
+            onAccent = Color(0xFF2A081A),
+            onBackground = Color(0xFFFCE7F3),
+            muted = Color(0xFFC9A3B9),
+            outline = Color(0xFF7E5A70)
+        ),
+        light = ThemeSpec(
+            background = Color(0xFFFDF2F8),
+            surface = Color(0xFFFFFFFF),
+            card = Color(0xFFFBE3EF),
+            accent = Color(0xFFDB2777),
+            onAccent = Color.White,
+            onBackground = Color(0xFF310D20),
+            muted = Color(0xFF7A5C6B),
+            outline = Color(0xFFE6BFD2)
+        )
+    ),
+    ISLAND(
+        "Tropical",
+        "Palms and waves under a sunset sky",
+        dark = ThemeSpec(
+            background = Color(0xFF071322),
+            surface = Color(0xFF0B1D36),
+            card = Color(0xFF112A4A),
+            accent = Color(0xFF38BDF8),
+            onAccent = Color(0xFF082F49),
+            onBackground = Color(0xFFF0F9FF),
+            muted = Color(0xFF93B4C9),
+            outline = Color(0xFF4F6E88)
+        ),
+        light = ThemeSpec(
+            background = Color(0xFFF0F9FF),
+            surface = Color(0xFFFFFFFF),
+            card = Color(0xFFDDEFFB),
+            accent = Color(0xFF0284C7),
+            onAccent = Color.White,
+            onBackground = Color(0xFF0C2A4A),
+            muted = Color(0xFF52708A),
+            outline = Color(0xFFB5D3E6)
+        )
+    ),
+    GALAXY(
+        "Galaxy",
+        "Nebulae, a ringed planet and shooting stars",
+        dark = ThemeSpec(
+            background = Color(0xFF0B0813),
+            surface = Color(0xFF120E20),
+            card = Color(0xFF221A38),
+            accent = Color(0xFFC084FC),
+            onAccent = Color(0xFF1E0B36),
+            onBackground = Color(0xFFFAF5FF),
+            muted = Color(0xFFA99BC4),
+            outline = Color(0xFF6A5A8C)
+        ),
+        light = ThemeSpec(
+            background = Color(0xFFFAF5FF),
+            surface = Color(0xFFFFFFFF),
+            card = Color(0xFFEFE4FC),
+            accent = Color(0xFF7E22CE),
+            onAccent = Color.White,
+            onBackground = Color(0xFF210D38),
+            muted = Color(0xFF6A5C80),
+            outline = Color(0xFFD2C2EC)
+        )
     );
 
     /** The color the Settings picker shows in this theme's swatch. */
@@ -323,12 +405,30 @@ enum class AppTheme(
 /** Resolves [themeName] and the effective light/dim/dark [mode] into a Material 3 scheme. */
 fun getSoftColorScheme(themeName: String, mode: ThemeMode = ThemeMode.DARK): ColorScheme {
     val theme = AppTheme.fromName(themeName)
-    return when (mode) {
+    val scheme = when (mode) {
         ThemeMode.LIGHT -> theme.light.toColorScheme(isDark = false)
         ThemeMode.DIM -> theme.dark.toDim().toColorScheme(isDark = true)
         // SYSTEM is resolved to a concrete mode before reaching here.
         else -> theme.dark.toColorScheme(isDark = true)
     }
+    return if (theme == AppTheme.MONO) scheme else scheme.asGlass(isDark = mode != ThemeMode.LIGHT)
+}
+
+/**
+ * Makes the card-like containers see-through, so the theme's backdrop scene shows behind cards,
+ * rows and bars like smoked glass. Only the roles cards and bars use: [ColorScheme.surfaceContainer]
+ * (menus) and the primary container (the FAB) stay opaque, since content behind those would compete
+ * with what's on them.
+ */
+private fun ColorScheme.asGlass(isDark: Boolean): ColorScheme {
+    val alpha = if (isDark) 0.7f else 0.76f
+    return copy(
+        surfaceVariant = surfaceVariant.copy(alpha = alpha),
+        surfaceContainerHigh = surfaceContainerHigh.copy(alpha = alpha),
+        surfaceContainerHighest = surfaceContainerHighest.copy(alpha = alpha),
+        secondaryContainer = secondaryContainer.copy(alpha = alpha),
+        tertiaryContainer = tertiaryContainer.copy(alpha = alpha),
+    )
 }
 
 private const val CHART_HUE_STEP = 0.618033988749895f * 360f
