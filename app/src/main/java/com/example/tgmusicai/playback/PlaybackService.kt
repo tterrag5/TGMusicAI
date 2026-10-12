@@ -158,6 +158,16 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var volumeNormalizationEnabled: Boolean = true
 
+    /** Crossfade settings, mirrored for the playback ticker, which cannot suspend on DataStore. */
+    @Volatile
+    private var crossfadeEnabled: Boolean = false
+
+    @Volatile
+    private var crossfadeDurationMs: Long = AppPreferences.DEFAULT_CROSSFADE_DURATION_SEC * 1000L
+
+    /** Plays the outgoing track's tail over the incoming one; see [OverlapCrossfader]. */
+    private lateinit var crossfader: OverlapCrossfader
+
     /**
      * (Re)attaches the fixed-gain loudness booster to [audioSessionId], releasing any previous
      * instance.
@@ -258,6 +268,7 @@ class PlaybackService : MediaLibraryService() {
         // Only http(s):// (YouTube streams) goes through the disk cache; local file:// / content://
         // tracks (downloaded/scanned songs) bypass it entirely -- see SchemeAwareCacheDataSource.
         val cacheDataSourceFactory = SchemeAwareCacheDataSourceFactory(this, AudioCacheManager.getCache(this))
+        crossfader = OverlapCrossfader(this, cacheDataSourceFactory, serviceScope)
 
         // Initialize ExoPlayer with Safe Driving Audio Focus: automatic focus handling ducks
         // music for GPS voice prompts (AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK), pauses for phone calls
@@ -314,6 +325,7 @@ class PlaybackService : MediaLibraryService() {
                 var consecutivePlaybackErrors = 0
                 addListener(object : Player.Listener {
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        crossfader.cancel(this@apply)
                         android.util.Log.e("PlaybackService", "Playback error encountered: ${error.message}", error)
 
                         // A track whose URI is still a raw YouTube watch URL has not failed -- it
@@ -382,6 +394,11 @@ class PlaybackService : MediaLibraryService() {
                         if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
                             consecutivePlaybackErrors = 0
                         }
+                        // Any transition other than the crossfade's own handover (a user skip,
+                        // a new queue) ends the fade at once.
+                        if (crossfader.isActive && !crossfader.isOwnTransition(mediaItem)) {
+                            crossfader.cancel(this@apply)
+                        }
                         // Proactively extend the queue as soon as playback reaches what is
                         // currently the last item, so there's always a "next" track queued up
                         // well before the current one ends -- keeps music going seamlessly
@@ -397,6 +414,25 @@ class PlaybackService : MediaLibraryService() {
 
                     override fun onRepeatModeChanged(repeatMode: Int) {
                         updateCustomLayout()
+                    }
+
+                    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                        // A pause mid-fade would leave the tail playing on its own.
+                        if (!playWhenReady) crossfader.cancel(this@apply)
+                    }
+
+                    override fun onPositionDiscontinuity(
+                        oldPosition: Player.PositionInfo,
+                        newPosition: Player.PositionInfo,
+                        reason: Int
+                    ) {
+                        // Scrubbing within the incoming track mid-fade: the overlap no longer
+                        // lines up with anything, so it ends. The handover itself changes item.
+                        if (reason == Player.DISCONTINUITY_REASON_SEEK &&
+                            oldPosition.mediaItemIndex == newPosition.mediaItemIndex
+                        ) {
+                            crossfader.cancel(this@apply)
+                        }
                     }
                 })
             }
@@ -420,6 +456,17 @@ class PlaybackService : MediaLibraryService() {
                 applyReplayGain(player.currentMediaItem)
                 attachLoudnessEnhancer(player.audioSessionId)
             }
+        }
+
+        // Crossfade settings. Turning it off mid-fade lets the fade already running finish.
+        serviceScope.launch(Dispatchers.Main) {
+            val preferences = AppPreferences(applicationContext)
+            preferences.crossfadeEnabledFlow
+                .combine(preferences.crossfadeDurationSecFlow) { enabled, seconds -> enabled to seconds }
+                .collect { (enabled, seconds) ->
+                    crossfadeEnabled = enabled
+                    crossfadeDurationMs = seconds * 1000L
+                }
         }
 
         // SponsorBlock settings. Switching the feature on mid-track fetches segments for what is
@@ -1099,6 +1146,9 @@ class PlaybackService : MediaLibraryService() {
                 val dur = exoPlayer.duration.let { if (it > 0) it else 0L }
                 maybeSkipSponsorSegment(pos)
                 maybeScrobble(pos, dur)
+                if (crossfadeEnabled) {
+                    crossfader.maybeStart(exoPlayer, crossfadeDurationMs, replayGainProcessor.trackScale())
+                }
                 val delta = (pos - lastTickPositionMs).coerceIn(0L, 2000L)
                 lastTickPositionMs = pos
                 if (delta > 0) {
@@ -1340,6 +1390,7 @@ class PlaybackService : MediaLibraryService() {
         // the network once playback is over.
         castPlayer?.release()
         castPlayer = null
+        if (::crossfader.isInitialized) crossfader.release()
         mediaServer?.close()
         mediaServer = null
         mediaLibrarySession?.run {

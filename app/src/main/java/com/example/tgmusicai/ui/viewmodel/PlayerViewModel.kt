@@ -118,11 +118,10 @@ class PlayerViewModel(
     val remainingSleepTimeMs: StateFlow<Long?> = sleepTimerManager.remainingMs
 
     /**
-     * Crossfade: not a true overlapping crossfade (that needs two simultaneous ExoPlayer
-     * instances) -- instead the outgoing track fades to silent right as it ends and the incoming
-     * one fades in from silent, so there's never a jarring hard cut even though the two never
-     * actually play at once. [AppPreferences.crossfadeDurationSecFlow] controls how long each half
-     * of that fade is.
+     * Crossfade: a true overlap, run by the playback service ([com.example.tgmusicai.playback.OverlapCrossfader]):
+     * near the end of a track the next one starts and the two are blended with equal-power curves
+     * over [AppPreferences.crossfadeDurationSecFlow] seconds. Nothing here touches the volume for
+     * it; the service owns the fade so it works with the app closed.
      */
     val crossfadeEnabled: StateFlow<Boolean> = appPreferences?.crossfadeEnabledFlow
         ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
@@ -182,34 +181,16 @@ class PlayerViewModel(
     }
 
     init {
-        // Combined volume fade: the sleep timer's fade-to-silent near the countdown's end, and
-        // (if crossfade is enabled) the fade-out/fade-in described above. Both effects multiply
-        // into a single effective volume instead of each independently calling setVolume, so they
-        // can't fight over Player.volume if they ever happen to overlap (e.g. the sleep timer
-        // expires right as a track is also fading out).
+        // The sleep timer's fade-to-silent near the end of its countdown. Crossfade used to be
+        // folded in here as a fade-out-then-fade-in; it is now a real overlap in the service.
         var lastAppliedVolume = 1f
         viewModelScope.launch {
-            combine(
-                remainingSleepTimeMs,
-                currentPositionMs,
-                durationMs,
-                crossfadeEnabled,
-                crossfadeDurationSec
-            ) { remaining, positionMs, totalMs, fadeEnabled, fadeSec ->
-                val sleepFactor = if (remaining != null && remaining <= SLEEP_FADE_WINDOW_MS) {
+            remainingSleepTimeMs.map { remaining ->
+                if (remaining != null && remaining <= SLEEP_FADE_WINDOW_MS) {
                     (remaining.toFloat() / SLEEP_FADE_WINDOW_MS).coerceIn(0f, 1f)
                 } else {
                     1f
                 }
-                val fadeMs = fadeSec * 1000L
-                val crossfadeFactor = if (fadeEnabled && fadeMs > 0 && totalMs > 0) {
-                    val fadeInFactor = (positionMs.toFloat() / fadeMs).coerceIn(0f, 1f)
-                    val fadeOutFactor = ((totalMs - positionMs).toFloat() / fadeMs).coerceIn(0f, 1f)
-                    minOf(fadeInFactor, fadeOutFactor)
-                } else {
-                    1f
-                }
-                sleepFactor * crossfadeFactor
             }.collect { volume ->
                 if (kotlin.math.abs(volume - lastAppliedVolume) > 0.001f) {
                     mediaControllerManager.setVolume(volume)

@@ -377,10 +377,8 @@ class AppPreferences(private val context: Context) {
     }
 
     /**
-     * Whether consecutive tracks fade out/in into each other instead of cutting directly from one
-     * to the next. Implemented as a sequential fade-to-silent-then-fade-in (not a true overlapping
-     * crossfade, which would need two simultaneous ExoPlayer instances) -- see
-     * [com.example.tgmusicai.ui.viewmodel.PlayerViewModel]'s combined volume-fade logic.
+     * Whether consecutive tracks overlap and blend into each other instead of cutting directly
+     * from one to the next -- see [com.example.tgmusicai.playback.OverlapCrossfader].
      */
     val crossfadeEnabledFlow: Flow<Boolean> = context.dataStore.data
         .map { preferences -> preferences[CROSSFADE_ENABLED] ?: false }
