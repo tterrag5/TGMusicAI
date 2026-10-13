@@ -756,6 +756,28 @@ class PlaybackService : MediaLibraryService() {
         const val CATEGORY_DISCOVER = "category_discover"
         const val ACTION_START_RADIO = "com.example.tgmusicai.ACTION_START_RADIO"
 
+        /**
+         * A spoken play request from another app (Lantern, T027). Args: [EXTRA_REQ_TITLE] +
+         * optional [EXTRA_REQ_ARTIST] for a song, or [EXTRA_REQ_PLAYLIST] (a browse id such as
+         * `playlist_5` / `smart_2`, as listed under [CATEGORY_PLAYLISTS]), or [EXTRA_REQ_QUERY]
+         * for anything else; [EXTRA_REQ_SHUFFLE] optional. The service plays it itself, so it
+         * works with the app closed and on Android Auto. A song not in the library is found on
+         * YouTube Music and added to the library first. The result's extras say what played.
+         */
+        const val ACTION_PLAY_REQUEST = "com.example.tgmusicai.ACTION_PLAY_REQUEST"
+        const val EXTRA_REQ_TITLE = "title"
+        const val EXTRA_REQ_ARTIST = "artist"
+        const val EXTRA_REQ_PLAYLIST = "playlist_id"
+        const val EXTRA_REQ_QUERY = "query"
+        const val EXTRA_REQ_SHUFFLE = "shuffle"
+        /** Result extras: "playing" or "not_found", plus what played and where it came from. */
+        const val EXTRA_RES_STATUS = "status"
+        const val EXTRA_RES_TITLE = "title"
+        const val EXTRA_RES_ARTIST = "artist"
+        /** "library", "added" (found online and added to the library) or "playlist". */
+        const val EXTRA_RES_SOURCE = "source"
+        const val EXTRA_RES_COUNT = "count"
+
         /** Tracks saved either side of the current one for playback resumption. */
         private const val RESUME_KEEP_BEHIND = 20
         private const val RESUME_KEEP_AHEAD = 50
@@ -1586,6 +1608,7 @@ class PlaybackService : MediaLibraryService() {
                 .add(SessionCommand(ACTION_TOGGLE_LIKE, Bundle.EMPTY))
                 .add(SessionCommand(ACTION_START_RADIO, Bundle.EMPTY))
                 .add(SessionCommand(ACTION_TOGGLE_REPEAT_MODE, Bundle.EMPTY))
+                .add(SessionCommand(ACTION_PLAY_REQUEST, Bundle.EMPTY))
                 .build()
             return MediaSession.ConnectionResult.accept(availableSessionCommands, defaultResult.availablePlayerCommands)
         }
@@ -1730,6 +1753,13 @@ class PlaybackService : MediaLibraryService() {
                     }
                 }
             }
+            // A whole folder handed over by id (a playlist picked by voice, say): play its songs.
+            if (single != null && isPlayableFolderId(single.mediaId)) {
+                return serviceScope.future {
+                    val songs = childrenOf(single.mediaId).filter { it.mediaMetadata.isPlayable == true }
+                    MediaSession.MediaItemsWithStartPosition(songs, 0, C.TIME_UNSET)
+                }
+            }
             val searchQuery = mediaItems.firstOrNull()?.requestMetadata?.searchQuery
             if (!searchQuery.isNullOrBlank()) {
                 return serviceScope.future {
@@ -1794,6 +1824,8 @@ class PlaybackService : MediaLibraryService() {
             args: Bundle
         ): ListenableFuture<SessionResult> {
             when (customCommand.customAction) {
+                ACTION_PLAY_REQUEST -> return serviceScope.future { handlePlayRequest(args) }
+
                 ACTION_TOGGLE_LIKE -> {
                     val currentItem = player.currentMediaItem
                     if (currentItem != null) {
@@ -1858,6 +1890,88 @@ class PlaybackService : MediaLibraryService() {
                 }
             }
             return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
+        }
+
+        private fun isPlayableFolderId(id: String): Boolean =
+            id.startsWith("playlist_") || id.startsWith("smart_") || id.startsWith("artist_") ||
+                id.startsWith("producer_") || id == CATEGORY_LIKED || id == CATEGORY_DOWNLOADED ||
+                id == CATEGORY_MOST_PLAYED || id == CATEGORY_RECENT || id == CATEGORY_ALL_SONGS
+
+        /** [ACTION_PLAY_REQUEST]: resolve, queue and play, then say what happened. */
+        private suspend fun handlePlayRequest(args: Bundle): SessionResult {
+            val playlistId = args.getString(EXTRA_REQ_PLAYLIST)?.takeIf { it.isNotBlank() }
+            val title = args.getString(EXTRA_REQ_TITLE)?.takeIf { it.isNotBlank() }
+            val artist = args.getString(EXTRA_REQ_ARTIST)?.takeIf { it.isNotBlank() }
+            val query = args.getString(EXTRA_REQ_QUERY)?.takeIf { it.isNotBlank() }
+            val shuffle = args.getBoolean(EXTRA_REQ_SHUFFLE, false)
+
+            var source = "library"
+            var items: List<MediaItem> = when {
+                playlistId != null -> {
+                    source = "playlist"
+                    childrenOf(playlistId).filter { it.mediaMetadata.isPlayable == true }
+                }
+                title != null -> {
+                    val local = withContext(Dispatchers.IO) {
+                        PlayRequestMatcher.localMatches(database.songDao().getAllSongsList(), title, artist)
+                    }
+                    if (local.isNotEmpty()) {
+                        listOf(local.first().toMediaItem())
+                    } else {
+                        source = "added"
+                        listOfNotNull(findOnlineAndAdd(title, artist))
+                    }
+                }
+                query != null -> searchSongsAndPlaylists(query)
+                else -> emptyList()
+            }
+            if (items.isEmpty()) {
+                return SessionResult(SessionResult.RESULT_SUCCESS, Bundle().apply { putString(EXTRA_RES_STATUS, "not_found") })
+            }
+            if (shuffle) items = items.shuffled()
+            withContext(Dispatchers.Main) {
+                player.shuffleModeEnabled = false
+                player.setMediaItems(items, 0, C.TIME_UNSET)
+                player.prepare()
+                player.play()
+            }
+            val first = items.first().mediaMetadata
+            return SessionResult(SessionResult.RESULT_SUCCESS, Bundle().apply {
+                putString(EXTRA_RES_STATUS, "playing")
+                putString(EXTRA_RES_TITLE, first.title?.toString())
+                putString(EXTRA_RES_ARTIST, first.artist?.toString())
+                putString(EXTRA_RES_SOURCE, source)
+                putInt(EXTRA_RES_COUNT, items.size)
+            })
+        }
+
+        /**
+         * A song the library doesn't have: YouTube Music's song search first (official audio),
+         * the general video search as a fallback; the best fit is saved to the library the same
+         * way the app's own search does it, then played.
+         */
+        private suspend fun findOnlineAndAdd(title: String, artist: String?): MediaItem? {
+            if (downloadedOnly) return null
+            val query = listOfNotNull(title, artist).joinToString(" ")
+            val pick = PlayRequestMatcher.bestRemote(runCatching { musicBrowser.searchSongs(query) }.getOrDefault(emptyList()), title, artist)
+                ?: PlayRequestMatcher.bestRemote(runCatching { youtubeExtractor.search(query) }.getOrDefault(emptyList()), title, artist)
+                ?: return null
+            val stream = withContext(Dispatchers.IO) { youtubeExtractor.extractAudioStream(pick.videoId) } ?: return null
+            val cleaned = com.example.tgmusicai.data.local.AiMetadataCleaner.cleanOffline(pick.title, pick.uploader)
+            val song = Song(
+                id = 0,
+                title = cleaned.cleanTitle,
+                artist = cleaned.artist ?: pick.uploader,
+                album = "YouTube Cloud",
+                durationMs = pick.durationSeconds * 1000L,
+                mediaUri = stream.url,
+                producer = cleaned.producer,
+                youtubeId = pick.videoId,
+                artworkUri = pick.thumbnailUri,
+                isDownloaded = false
+            )
+            val id = withContext(Dispatchers.IO) { repository.ensurePersisted(song) }
+            return song.copy(id = id).toMediaItem()
         }
 
         // --- Helper methods for automotive category generation ---
