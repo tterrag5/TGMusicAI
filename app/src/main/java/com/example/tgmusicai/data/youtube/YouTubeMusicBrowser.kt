@@ -355,6 +355,7 @@ class YouTubeMusicBrowser(
         val root = browse(BROWSE_ID_HOME) ?: return emptyList()
         return try {
             sectionShelves(root)
+                .filterNot { PODCAST_SHELF.containsMatchIn(it.title) }
                 .filter { it.tracks.isNotEmpty() || it.items.isNotEmpty() }
                 .map { shelf ->
                     YouTubeHomeShelf(
@@ -526,6 +527,8 @@ class YouTubeMusicBrowser(
             val videoId = row.optJSONObject("playlistItemData")?.optString("videoId")?.takeIf { it.isNotBlank() }
                 ?: findFirstString(row, "videoId")
                 ?: return@mapNotNull null
+            // Podcast episodes and other non-music audio don't resolve to a playable stream here.
+            if (isUnplayableTrack(row)) return@mapNotNull null
             if (!seen.add(videoId)) return@mapNotNull null
             val title = flexColumnText(row, 0).takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val artist = flexColumnText(row, 1)
@@ -543,6 +546,29 @@ class YouTubeMusicBrowser(
         }
     }
 
+    /**
+     * True for a track row that is a podcast episode or other non-music audio (T035). Only those
+     * two markers: a row's subtitle links to its uploader's channel, so a channel page type there
+     * says nothing about the row itself.
+     */
+    private fun isUnplayableTrack(row: JSONObject): Boolean =
+        findFirstString(row, "musicVideoType") == "MUSIC_VIDEO_TYPE_PODCAST_EPISODE" ||
+            findFirstString(row, "pageType") == "MUSIC_PAGE_TYPE_NON_MUSIC_AUDIO_TRACK_PAGE"
+
+    /**
+     * True for a tile that opens a podcast show or a user channel (T035), read from the tile's own
+     * navigation target. Its subtitle runs link elsewhere (a playlist's author channel), so the
+     * first page type found anywhere in the tile is not the tile's.
+     */
+    private fun isUnplayableTile(tile: JSONObject): Boolean {
+        val pageType = tile.optJSONObject("navigationEndpoint")
+            ?.optJSONObject("browseEndpoint")
+            ?.optJSONObject("browseEndpointContextSupportedConfigs")
+            ?.optJSONObject("browseEndpointContextMusicConfig")
+            ?.optString("pageType")
+        return pageType in UNPLAYABLE_PAGE_TYPES
+    }
+
     /** Reads every `musicTwoRowItemRenderer` tile under [node] as an album, single or playlist. */
     private fun parseTileItems(node: JSONObject): List<YouTubeAlbumRef> {
         val tiles = mutableListOf<JSONObject>()
@@ -554,6 +580,8 @@ class YouTubeMusicBrowser(
                 ?.optString("browseId")
                 ?.takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
+            // Podcast shows and user channels open pages this app has no screen for.
+            if (browseId.startsWith("MPSP") || isUnplayableTile(tile)) return@mapNotNull null
             if (!seen.add(browseId)) return@mapNotNull null
             val title = runsText(tile.optJSONObject("title")).takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
@@ -655,6 +683,12 @@ class YouTubeMusicBrowser(
         }
 
     companion object {
+        private val UNPLAYABLE_PAGE_TYPES = setOf(
+            "MUSIC_PAGE_TYPE_PODCAST_SHOW_DETAIL_PAGE",
+            "MUSIC_PAGE_TYPE_NON_MUSIC_AUDIO_TRACK_PAGE",
+            "MUSIC_PAGE_TYPE_USER_CHANNEL",
+        )
+        private val PODCAST_SHELF = Regex("""\b(podcasts?|episodes?)\b""", RegexOption.IGNORE_CASE)
         private const val TAG = "YouTubeMusicBrowser"
         private const val BROWSE_URL = "https://music.youtube.com/youtubei/v1/browse"
         private const val CLIENT_VERSION = "1.20240901.01.00"
