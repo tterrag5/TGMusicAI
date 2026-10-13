@@ -12,7 +12,9 @@ import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.TranslatorOptions
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import com.example.tgmusicai.data.lyrics.LyricsProvider
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -82,6 +84,14 @@ class LyricsRepository(
         com.example.tgmusicai.data.lyrics.BetterLyricsClient(),
     private val kuGou: com.example.tgmusicai.data.lyrics.KuGouLyricsClient =
         com.example.tgmusicai.data.lyrics.KuGouLyricsClient(),
+    private val qq: com.example.tgmusicai.data.lyrics.QQLyricsClient =
+        com.example.tgmusicai.data.lyrics.QQLyricsClient(),
+    private val netEase: com.example.tgmusicai.data.lyrics.NetEaseLyricsClient =
+        com.example.tgmusicai.data.lyrics.NetEaseLyricsClient(),
+    /** The user's provider order and on/off switches; defaults to Morphe's list when unset. */
+    private val providerSettings: suspend () -> List<com.example.tgmusicai.data.lyrics.LyricsProviderSetting> = {
+        com.example.tgmusicai.data.local.AppPreferences(context).lyricsProvidersFlow.first()
+    },
 ) {
 
     /**
@@ -537,15 +547,7 @@ class LyricsRepository(
         }
 
         val (synced, plain) = firstSynced(song)
-        var fetchedLyrics = synced ?: plain
-
-        if (fetchedLyrics.isNullOrBlank()) {
-            try {
-                fetchedLyrics = fetchFromYouTubeCaptions(song)
-            } catch (e: Exception) {
-                Log.e(TAG, "YouTube captions fetch failed for ${song.title}", e)
-            }
-        }
+        val fetchedLyrics = synced ?: plain
 
         if (!fetchedLyrics.isNullOrBlank()) {
             musicRepository.updateSongLyrics(song.id, fetchedLyrics)
@@ -564,13 +566,22 @@ class LyricsRepository(
         val durationSec = song.durationMs / 1000
         var plain: String? = null
 
-        val sources: List<Pair<String, suspend () -> String?>> = listOf(
-            "Better Lyrics" to { betterLyrics.fetch(title, artist, durationSec) },
-            "YouTube Music" to { fetchFromYouTubeMusic(song, title, artist) { plain = plain ?: it } },
-            "LrcLib" to { fetchFromLrcLib(song) },
-            "KuGou" to { kuGou.fetch(title, artist, durationSec) },
-            "file tags" to { fetchFromEmbeddedId3(song) },
-        )
+        val sources: List<Pair<String, suspend () -> String?>> = providerSettings()
+            .filter { it.enabled }
+            .map { setting ->
+                val provider = setting.provider
+                provider.label to when (provider) {
+                    LyricsProvider.YOUTUBE_MUSIC -> suspend { fetchFromYouTubeMusic(song, title, artist) { plain = plain ?: it } }
+                    // Apple Music's word-synced TTML, served by Better Lyrics.
+                    LyricsProvider.APPLE_MUSIC -> suspend { betterLyrics.fetch(title, artist, durationSec) }
+                    LyricsProvider.LRCLIB -> suspend { fetchFromLrcLib(song) }
+                    LyricsProvider.QQ -> suspend { qq.fetch(title, artist, durationSec) }
+                    LyricsProvider.NETEASE -> suspend { netEase.fetch(title, artist, durationSec) }
+                    LyricsProvider.KUGOU -> suspend { kuGou.fetch(title, artist, durationSec) }
+                    LyricsProvider.FILE_TAGS -> suspend { fetchFromEmbeddedId3(song) }
+                    LyricsProvider.YOUTUBE_CAPTIONS -> suspend { fetchFromYouTubeCaptions(song) }
+                }
+            }
         for ((name, fetch) in sources) {
             val result = try {
                 fetch()

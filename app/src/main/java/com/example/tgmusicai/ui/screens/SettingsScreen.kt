@@ -23,6 +23,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.rounded.Lyrics
+import androidx.compose.material.icons.rounded.DragIndicator
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -129,6 +137,7 @@ fun SettingsScreen(
     var lastFmKeyInput by remember { mutableStateOf("") }
     var listenBrainzServerInput by remember(listenBrainzServer) { mutableStateOf(listenBrainzServer) }
     val crossfadeEnabled by playerViewModel.crossfadeEnabled.collectAsState()
+    val lyricsProviders by playerViewModel.lyricsProviders.collectAsState()
     val radioVariety by playerViewModel.radioVariety.collectAsState()
     val crossfadeDurationSec by playerViewModel.crossfadeDurationSec.collectAsState()
     var draggedCrossfadeDurationSec by remember(crossfadeDurationSec) { mutableStateOf(crossfadeDurationSec.toFloat()) }
@@ -420,6 +429,22 @@ fun SettingsScreen(
                 }
             }
 
+            item {
+                SettingsSection(
+                    sectionId = SettingsSectionId.LYRICS,
+                    title = "Lyrics",
+                    icon = Icons.Rounded.Lyrics,
+                    summary = lyricsProviders.filter { it.enabled }.joinToString(" > ") { it.provider.label },
+                    expanded = expandedSection == SettingsSectionId.LYRICS,
+                    onToggle = { expandedSection = it }
+                ) {
+                    LyricsProviderList(
+                        settings = lyricsProviders,
+                        onChange = playerViewModel::setLyricsProviders,
+                    )
+                }
+            }
+
             if (recognitionViewModel != null) {
                 item {
                     val indexedCount by recognitionViewModel.indexedSongCount.collectAsState()
@@ -696,7 +721,7 @@ private fun formatBuildTime(millis: Long): String =
  * matching on the title meant renaming a heading silently re-pointed it at another section's
  * expand state, and every new section defaulted into whichever branch the `else` happened to name.
  */
-private enum class SettingsSectionId { APPEARANCE, PLAYBACK, RECOGNITION, SCROBBLING, BACKUP, ABOUT }
+private enum class SettingsSectionId { APPEARANCE, PLAYBACK, LYRICS, RECOGNITION, SCROBBLING, BACKUP, ABOUT }
 
 /**
  * A collapsible Settings group: a tappable header showing the section name and its current state,
@@ -1040,6 +1065,117 @@ private fun SettingsRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Morphe-style lyrics service list: every source with a switch, tried top to bottom. Drag a row by
+ * its handle to change the order; a row swaps with its neighbour once it has been dragged past half
+ * of that neighbour's height.
+ */
+@Composable
+private fun LyricsProviderList(
+    settings: List<com.example.tgmusicai.data.lyrics.LyricsProviderSetting>,
+    onChange: (List<com.example.tgmusicai.data.lyrics.LyricsProviderSetting>) -> Unit,
+) {
+    // Local copy while dragging, so the list follows the finger without a DataStore round trip
+    // per swap; saved once when the drag ends.
+    var rows by remember(settings) { mutableStateOf(settings) }
+    var draggedIndex by remember { mutableStateOf<Int?>(null) }
+    var dragOffset by remember { mutableStateOf(0f) }
+    val rowHeights = remember { mutableStateMapOf<com.example.tgmusicai.data.lyrics.LyricsProvider, Int>() }
+
+    Card(
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+    ) {
+        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+            Text(
+                text = "Lyrics service",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+            Text(
+                text = rows.filter { it.enabled }.joinToString(" > ") { it.provider.label }
+                    .ifBlank { "All sources are off" },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            rows.forEachIndexed { index, setting ->
+              // Keyed by provider so a row's composable (and its in-progress drag gesture) moves
+              // with it when the list reorders, instead of the gesture restarting at each swap.
+              androidx.compose.runtime.key(setting.provider) {
+                val isDragged = draggedIndex == index
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .zIndex(if (isDragged) 1f else 0f)
+                        .graphicsLayer { translationY = if (isDragged) dragOffset else 0f }
+                        .background(
+                            if (isDragged) MaterialTheme.colorScheme.surfaceContainerHighest
+                            else androidx.compose.ui.graphics.Color.Transparent
+                        )
+                        .onSizeChanged { rowHeights[setting.provider] = it.height }
+                        .padding(start = 4.dp, end = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.DragIndicator,
+                        contentDescription = "Drag to reorder ${setting.provider.label}",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .padding(12.dp)
+                            .pointerInput(setting.provider) {
+                                detectDragGestures(
+                                    onDragStart = { draggedIndex = rows.indexOfFirst { it.provider == setting.provider }; dragOffset = 0f },
+                                    onDragEnd = { draggedIndex = null; dragOffset = 0f; onChange(rows) },
+                                    onDragCancel = { draggedIndex = null; dragOffset = 0f; rows = settings },
+                                ) { change, amount ->
+                                    change.consume()
+                                    val from = draggedIndex ?: return@detectDragGestures
+                                    dragOffset += amount.y
+                                    val down = from + 1
+                                    val up = from - 1
+                                    if (dragOffset > 0 && down < rows.size &&
+                                        dragOffset > (rowHeights[rows[down].provider] ?: Int.MAX_VALUE) / 2f
+                                    ) {
+                                        val passed = rowHeights[rows[down].provider] ?: 0
+                                        rows = rows.toMutableList().apply { add(down, removeAt(from)) }
+                                        dragOffset -= passed
+                                        draggedIndex = down
+                                    } else if (dragOffset < 0 && up >= 0 &&
+                                        -dragOffset > (rowHeights[rows[up].provider] ?: Int.MAX_VALUE) / 2f
+                                    ) {
+                                        val passed = rowHeights[rows[up].provider] ?: 0
+                                        rows = rows.toMutableList().apply { add(up, removeAt(from)) }
+                                        dragOffset += passed
+                                        draggedIndex = up
+                                    }
+                                }
+                            }
+                    )
+                    Text(
+                        text = setting.provider.label,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (setting.enabled) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = setting.enabled,
+                        onCheckedChange = { on ->
+                            rows = rows.map { if (it.provider == setting.provider) it.copy(enabled = on) else it }
+                            onChange(rows)
+                        }
+                    )
+                }
+              }
             }
         }
     }

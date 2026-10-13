@@ -575,7 +575,7 @@ fun NowPlayingScreen(
                             // lead the active-line search uses is applied here too, or the word
                             // fill would run behind the line highlight it belongs to.
                             val activeLineHasWordTimings =
-                                parsedLyrics.getOrNull(activeIndex)?.words?.isNotEmpty() == true
+                                parsedLyrics.getOrNull(activeIndex)?.let { it.hasRealWordTimings && it.words.isNotEmpty() } == true
                             val smoothedPositionMs = rememberSmoothedPositionMs(
                                 reportedPositionMs = currentPositionMs + LYRICS_SYNC_LEAD_MS,
                                 isPlaying = isPlaying && activeLineHasWordTimings,
@@ -674,8 +674,12 @@ fun NowPlayingScreen(
                                         // every line on every frame would be wasted work. A line
                                         // with no word timings (unsynced lyrics, or a single-unit
                                         // line) falls through to the plain text it always used.
+                                        // Only when the source timed each word (Apple Music /
+                                        // YouTube Music word sync). Estimated timings drifted from
+                                        // the singer, so line-synced lyrics light the whole line.
                                         val karaoke = isActive &&
                                             !line.isInstrumental &&
+                                            line.hasRealWordTimings &&
                                             line.words.isNotEmpty()
                                         Text(
                                             text = if (karaoke) {

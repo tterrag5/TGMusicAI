@@ -80,6 +80,7 @@ class AppPreferences(private val context: Context) {
         val CROSSFADE_ENABLED = booleanPreferencesKey("crossfade_enabled")
         val CROSSFADE_DURATION_SEC = intPreferencesKey("crossfade_duration_sec")
         val LYRICS_TRANSLATION_LANGUAGE = stringPreferencesKey("lyrics_translation_language")
+        val LYRICS_PROVIDERS = stringPreferencesKey("lyrics_providers")
         val VOLUME_NORMALIZATION_ENABLED = booleanPreferencesKey("volume_normalization_enabled")
         val SPONSORBLOCK_ENABLED = booleanPreferencesKey("sponsorblock_enabled")
         val SPONSORBLOCK_CATEGORIES = stringPreferencesKey("sponsorblock_categories")
@@ -420,6 +421,16 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setLyricsTranslationLanguage(language: String) {
         context.dataStore.edit { preferences -> preferences[LYRICS_TRANSLATION_LANGUAGE] = language }
+    }
+
+    /** Lyrics sources in the order they are tried, each on or off (Settings → Lyrics). */
+    val lyricsProvidersFlow: Flow<List<com.example.tgmusicai.data.lyrics.LyricsProviderSetting>> = context.dataStore.data
+        .map { preferences -> com.example.tgmusicai.data.lyrics.LyricsProviderSettings.decode(preferences[LYRICS_PROVIDERS]) }
+
+    suspend fun setLyricsProviders(settings: List<com.example.tgmusicai.data.lyrics.LyricsProviderSetting>) {
+        context.dataStore.edit { preferences ->
+            preferences[LYRICS_PROVIDERS] = com.example.tgmusicai.data.lyrics.LyricsProviderSettings.encode(settings)
+        }
     }
 
     /** True once the one-time AI-tag backfill (tagging pre-existing songs added before the AI feature existed) has run. */

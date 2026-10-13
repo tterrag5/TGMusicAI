@@ -329,6 +329,16 @@ class PlayerViewModel(
      * DataStore flow directly -- this is just the UI-facing read/write surface for the Settings
      * screen switch.
      */
+    /** Lyrics sources in the order they are tried, each on or off (Settings → Lyrics). */
+    val lyricsProviders: StateFlow<List<com.example.tgmusicai.data.lyrics.LyricsProviderSetting>> =
+        appPreferences?.lyricsProvidersFlow
+            ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.tgmusicai.data.lyrics.LyricsProviderSettings.DEFAULT)
+            ?: MutableStateFlow(com.example.tgmusicai.data.lyrics.LyricsProviderSettings.DEFAULT).asStateFlow()
+
+    fun setLyricsProviders(settings: List<com.example.tgmusicai.data.lyrics.LyricsProviderSetting>) {
+        viewModelScope.launch { appPreferences?.setLyricsProviders(settings) }
+    }
+
     val skipSilenceEnabled: StateFlow<Boolean> = appPreferences?.skipSilenceEnabledFlow
         ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
         ?: MutableStateFlow(false).asStateFlow()

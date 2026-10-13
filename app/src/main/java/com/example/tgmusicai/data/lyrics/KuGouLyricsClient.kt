@@ -61,8 +61,14 @@ class KuGouLyricsClient {
 
         private val TIMED_LINE = Regex("""^\[\d{2}:\d{2}[.:]\d{2,3}].*""")
 
-        /** KuGou's own credit lines, e.g. "[00:00.00]作词 : …" / "作曲" / "编曲", are not lyrics. */
-        private val CREDIT_LINE = Regex("""^\[[^]]+]\s*(作词|作曲|编曲|词|曲|Lyrics|Composer|Arranger)\s*[:：].*""", RegexOption.IGNORE_CASE)
+        /**
+         * Credit lines providers put at the top, e.g. "[00:00.00]作词 : …", "作曲", "编曲" (KuGou,
+         * NetEase) or "Lyrics by：…", "Produced by：…" (QQ). They are not lyrics.
+         */
+        private val CREDIT_LINE = Regex(
+            """^\[[^]]+]\s*(作词|作曲|编曲|制作人|词|曲|Lyrics|Composer|Arranger|(Lyrics|Composed|Produced|Written|Arranged|Mixed|Mastered|Music) by)\s*[:：].*""",
+            RegexOption.IGNORE_CASE,
+        )
 
         /** "title - artist", with bracketed asides removed, as KuGou's search expects. */
         internal fun keyword(title: String, artist: String): String {
