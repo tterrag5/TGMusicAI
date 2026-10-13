@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
@@ -36,6 +37,7 @@ import kotlinx.coroutines.launch
  * and triggers cover art & lyrics scraping for selected tracks.
  */
 private const val CLOUD_ENTITY_RESULT_LIMIT = 5
+private const val CLOUD_SEARCH_DEBOUNCE_MS = 400L
 
 /**
  * How many tag chips to offer at once. The whole list can run to hundreds on an analysed library,
@@ -325,7 +327,7 @@ class LibraryViewModel(
         com.example.tgmusicai.data.repository.LibraryOrganizer.sortSongs(shown, stats, sort)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // --- Cloud (YouTube) search, folded in from the old separate Explore tab ---
+    // --- Cloud (YouTube Music) search: the Library's search box is the app's only search ---
 
     private val _cloudResults = MutableStateFlow<List<YouTubeSearchResult>>(emptyList())
     val cloudResults: StateFlow<List<YouTubeSearchResult>> = _cloudResults.asStateFlow()
@@ -335,55 +337,90 @@ class LibraryViewModel(
 
     private var cloudSearchJob: Job? = null
 
-    /**
-     * Artists and albums matching the query, shown above the individual tracks.
-     *
-     * A separate lookup from the track search: that one goes through NewPipeExtractor, which
-     * returns videos and has no notion of a YouTube Music artist or album page. Searching for an
-     * artist and being offered only a scattering of their songs is the gap this closes.
-     */
+    /** Artists, albums and playlists matching the query, from YouTube Music's own search. */
     private val _cloudArtists = MutableStateFlow<List<YouTubeArtistRef>>(emptyList())
     val cloudArtists: StateFlow<List<YouTubeArtistRef>> = _cloudArtists.asStateFlow()
 
     private val _cloudAlbums = MutableStateFlow<List<YouTubeAlbumRef>>(emptyList())
     val cloudAlbums: StateFlow<List<YouTubeAlbumRef>> = _cloudAlbums.asStateFlow()
 
+    private val _cloudPlaylists = MutableStateFlow<List<YouTubeAlbumRef>>(emptyList())
+    val cloudPlaylists: StateFlow<List<YouTubeAlbumRef>> = _cloudPlaylists.asStateFlow()
+
+    val recentSearches: StateFlow<List<String>> = (appPreferences?.recentSearchesFlow
+        ?: kotlinx.coroutines.flow.flowOf(emptyList()))
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     /**
      * Debounced so typing doesn't fire a network request per keystroke, and skipped entirely in
      * downloaded-only mode. Local filtering above is synchronous and unaffected by this.
+     *
+     * Songs come from YouTube Music's song search (proper tracks, not uploads); NewPipe's video
+     * search is the fallback when that returns nothing. YouTube filters a search to one result
+     * type at a time, so the four lookups run in parallel and each list fills as it arrives.
      */
     private fun scheduleCloudSearch(query: String) {
         cloudSearchJob?.cancel()
-        if (youtubeExtractor == null || query.length < 2 || downloadedOnly.value) {
-            _cloudResults.value = emptyList()
-            _cloudArtists.value = emptyList()
-            _cloudAlbums.value = emptyList()
-            _isSearchingCloud.value = false
+        val q = query.trim()
+        if ((youtubeExtractor == null && musicBrowser == null) || q.length < 2 || downloadedOnly.value) {
+            clearCloudResults()
             return
         }
         cloudSearchJob = viewModelScope.launch {
-            delay(500)
+            delay(CLOUD_SEARCH_DEBOUNCE_MS)
             _isSearchingCloud.value = true
             try {
-                _cloudResults.value = youtubeExtractor.search(query)
-            } catch (e: Exception) {
-                _cloudResults.value = emptyList()
+                coroutineScope {
+                    launch {
+                        val songs = musicBrowser?.let { runCatching { it.searchSongs(q) }.getOrDefault(emptyList()) }
+                            .orEmpty()
+                        _cloudResults.value = songs.ifEmpty {
+                            youtubeExtractor?.let { runCatching { it.search(q) }.getOrDefault(emptyList()) }.orEmpty()
+                        }
+                    }
+                    if (musicBrowser != null) {
+                        launch {
+                            _cloudArtists.value = runCatching { musicBrowser.searchArtists(q) }
+                                .getOrDefault(emptyList()).take(CLOUD_ENTITY_RESULT_LIMIT)
+                        }
+                        launch {
+                            _cloudAlbums.value = runCatching { musicBrowser.searchAlbums(q) }
+                                .getOrDefault(emptyList()).take(CLOUD_ENTITY_RESULT_LIMIT)
+                        }
+                        launch {
+                            _cloudPlaylists.value = runCatching { musicBrowser.searchPlaylists(q) }
+                                .getOrDefault(emptyList()).take(CLOUD_ENTITY_RESULT_LIMIT)
+                        }
+                    }
+                }
             } finally {
                 _isSearchingCloud.value = false
             }
-            // Deliberately after the track search rather than alongside it: tracks are what the
-            // user is usually after, and making them wait on two round trips to see any result at
-            // all would be a worse search for the sake of a less common case.
-            if (musicBrowser != null) {
-                _cloudArtists.value = musicBrowser.searchArtists(query).take(CLOUD_ENTITY_RESULT_LIMIT)
-                _cloudAlbums.value = musicBrowser.searchAlbums(query).take(CLOUD_ENTITY_RESULT_LIMIT)
-            }
         }
+    }
+
+    private fun clearCloudResults() {
+        _cloudResults.value = emptyList()
+        _cloudArtists.value = emptyList()
+        _cloudAlbums.value = emptyList()
+        _cloudPlaylists.value = emptyList()
+        _isSearchingCloud.value = false
     }
 
     fun onSearchQueryChanged(newQuery: String) {
         _searchQuery.value = newQuery
         scheduleCloudSearch(newQuery)
+    }
+
+    /** Remembers the query as a recent search (on submit, or when a result is opened). */
+    fun commitSearchQuery(query: String = _searchQuery.value) {
+        val q = query.trim()
+        if (q.isEmpty()) return
+        viewModelScope.launch { appPreferences?.addRecentSearch(q) }
+    }
+
+    fun removeRecentSearch(query: String) {
+        viewModelScope.launch { appPreferences?.removeRecentSearch(query) }
     }
 
     fun openAddToPlaylistDialog(song: Song) {

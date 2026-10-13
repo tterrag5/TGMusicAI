@@ -15,7 +15,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -130,6 +136,10 @@ fun LibraryScreen(
     val isSearchingCloud by libraryViewModel.isSearchingCloud.collectAsState()
     val cloudArtists by libraryViewModel.cloudArtists.collectAsState()
     val cloudAlbums by libraryViewModel.cloudAlbums.collectAsState()
+    val cloudPlaylists by libraryViewModel.cloudPlaylists.collectAsState()
+    val recentSearches by libraryViewModel.recentSearches.collectAsState()
+    var searchFocused by remember { mutableStateOf(false) }
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     val songForTagEdit by libraryViewModel.songForTagEdit.collectAsState()
     val pill by libraryViewModel.pill.collectAsState()
     val sort by libraryViewModel.sort.collectAsState()
@@ -291,10 +301,8 @@ fun LibraryScreen(
                 onToggleGrid = libraryViewModel::toggleGridView,
             )
 
-            // Search and the downloaded-only filter act on the local song list, so they are
-            // hidden in the views that have nothing for them to filter.
-            if (songsMode) {
-            // Search Input Field
+            // The app's only search: library matches plus YouTube Music's catalogue. Shown on
+            // every pill; typing replaces the pill's view with the results.
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = libraryViewModel::onSearchQueryChanged,
@@ -303,7 +311,7 @@ fun LibraryScreen(
                 // whole field noticeably taller than every other search bar in the app.
                 placeholder = {
                     Text(
-                        "Search",
+                        "Search songs, albums, artists",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -325,6 +333,11 @@ fun LibraryScreen(
                     }
                 },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = {
+                    libraryViewModel.commitSearchQuery()
+                    focusManager.clearFocus()
+                }),
                 shape = RoundedCornerShape(28.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -333,8 +346,12 @@ fun LibraryScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .onFocusChanged { searchFocused = it.isFocused }
             )
 
+            // The downloaded-only switch and tag chips act on the local song list, so they are
+            // hidden in the views that have nothing for them to filter.
+            if (songsMode) {
             // Downloaded-only lives here now rather than on Home, next to the list it actually
             // filters. With it on, cloud-only tracks are hidden and no YouTube search is issued.
             if (pill != LibraryPill.DOWNLOADS) Row(
@@ -405,7 +422,34 @@ fun LibraryScreen(
             // While searching, local and cloud results share one scrolling list so YouTube hits
             // read as a continuation of the library rather than a separate place to go. Browsing
             // (no query) keeps the grid/list layout.
-            if (pill == LibraryPill.PLAYLISTS && playlistViewModel != null) {
+            val showSearchResults = searchQuery.isNotBlank() &&
+                (!songsMode || (!downloadedOnly && pill != LibraryPill.DOWNLOADS))
+            if (!showSearchResults && searchFocused && searchQuery.isBlank() && recentSearches.isNotEmpty()) {
+                RecentSearchesList(
+                    recent = recentSearches,
+                    onPick = { libraryViewModel.onSearchQueryChanged(it) },
+                    onRemove = libraryViewModel::removeRecentSearch,
+                )
+            } else if (showSearchResults) {
+                LibrarySearchResults(
+                    songs = songs,
+                    currentSongId = currentSong?.id,
+                    selectedSongIds = selectedSongIds,
+                    isSelectionMode = isSelectionMode,
+                    libraryViewModel = libraryViewModel,
+                    playerViewModel = playerViewModel,
+                    downloadMap = downloadMap,
+                    cloudArtists = cloudArtists,
+                    cloudAlbums = cloudAlbums,
+                    cloudPlaylists = cloudPlaylists,
+                    cloudResults = cloudResults,
+                    isSearchingCloud = isSearchingCloud,
+                    onOpenArtist = { libraryViewModel.commitSearchQuery(); onOpenArtist(it) },
+                    onOpenAlbum = { libraryViewModel.commitSearchQuery(); onOpenAlbum(it) },
+                    onPlayCloudResult = { libraryViewModel.commitSearchQuery(); onPlayCloudResult(it) },
+                    onDownloadCloudResult = onDownloadCloudResult,
+                )
+            } else if (pill == LibraryPill.PLAYLISTS && playlistViewModel != null) {
                 PlaylistsContent(
                     playlistViewModel = playlistViewModel,
                     onPlaylistClick = onPlaylistClick,
@@ -431,99 +475,6 @@ fun LibraryScreen(
                 LibraryArtistList(libraryArtists) { libraryViewModel.showSongsMatching(it.name) }
             } else if (pill == LibraryPill.ALBUMS) {
                 LibraryAlbumList(libraryAlbums) { libraryViewModel.showSongsMatching(it.title) }
-            } else if (searchQuery.isNotBlank() && !downloadedOnly && pill != LibraryPill.DOWNLOADS) {
-                // Results are tiles, in the same three-column grid the library browses in, so a
-                // search does not change the shape of the screen under the user. Local matches
-                // come first, then the artists and albums that match, then YouTube's tracks.
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 96.dp)
-                ) {
-                    fun fullWidthItem(key: String, content: @Composable () -> Unit) {
-                        item(key = key, span = { GridItemSpan(maxLineSpan) }) { content() }
-                    }
-
-                    items(songs, key = { "local_${it.id}" }) { song ->
-                        SongGridItem(
-                            song = song,
-                            isPlaying = currentSong?.id == song.id,
-                            isSelected = song.id in selectedSongIds,
-                            onClick = {
-                                if (isSelectionMode) {
-                                    libraryViewModel.toggleSongSelected(song.id)
-                                } else {
-                                    playerViewModel.playSong(song = song, queue = songs)
-                                }
-                            },
-                            onLongClick = { libraryViewModel.startSelection(song.id) },
-                            onAddToPlaylistClicked = { libraryViewModel.openAddToPlaylistDialog(song) },
-                            onScrapeClicked = { libraryViewModel.scrapeArtworkAndLyrics(song) },
-                            onStartRadioClicked = { playerViewModel.startRadio(song) },
-                            onAddToQueueClicked = { playerViewModel.addToQueue(song) },
-                            onToggleLikeClicked = { libraryViewModel.toggleLikeSong(song) },
-                            liveDownloadStatus = song.youtubeId?.let { downloadMap[it]?.status }
-                        )
-                    }
-
-                    if (cloudArtists.isNotEmpty()) {
-                        fullWidthItem("heading_artists") { SearchSectionHeading("Artists") }
-                        items(cloudArtists, key = { "artist_${it.browseId}" }) { artist ->
-                            CloudTile(
-                                title = artist.name,
-                                subtitle = "Artist",
-                                artworkUrl = artist.thumbnailUrl,
-                                onClick = { onOpenArtist(artist) }
-                            )
-                        }
-                    }
-
-                    if (cloudAlbums.isNotEmpty()) {
-                        fullWidthItem("heading_albums") { SearchSectionHeading("Albums") }
-                        items(cloudAlbums, key = { "cloudalbum_${it.browseId}" }) { album ->
-                            CloudTile(
-                                title = album.title,
-                                subtitle = album.subtitle,
-                                artworkUrl = album.thumbnailUrl,
-                                onClick = { onOpenAlbum(album) }
-                            )
-                        }
-                    }
-
-                    if (isSearchingCloud || cloudResults.isNotEmpty()) {
-                        fullWidthItem("heading_youtube") {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 8.dp, vertical = 12.dp)
-                            ) {
-                                Text(
-                                    text = "From YouTube",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                if (isSearchingCloud) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp
-                                    )
-                                }
-                            }
-                        }
-                        items(cloudResults, key = { "cloud_${it.videoId}" }) { result ->
-                            CloudTile(
-                                title = result.title,
-                                subtitle = result.uploader,
-                                artworkUrl = result.thumbnailUri,
-                                onClick = { onPlayCloudResult(result) },
-                                showPlayOverlay = true,
-                                onDownload = { onDownloadCloudResult(result) }
-                            )
-                        }
-                    }
-                }
             } else if (songs.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -685,8 +636,181 @@ fun LibraryScreen(
 }
 
 
-@Preview(showBackground = true)
-/** A section label inside the search results grid ("Artists", "Albums", "From YouTube"). */
+
+/**
+ * Search results as tiles, in the same three-column grid the library browses in, so a search does
+ * not change the shape of the screen under the user. Library matches come first, then YouTube
+ * Music's artists, albums, playlists and songs.
+ */
+@Composable
+private fun LibrarySearchResults(
+    songs: List<com.example.tgmusicai.data.local.entity.Song>,
+    currentSongId: Long?,
+    selectedSongIds: Set<Long>,
+    isSelectionMode: Boolean,
+    libraryViewModel: LibraryViewModel,
+    playerViewModel: PlayerViewModel,
+    downloadMap: Map<String, com.example.tgmusicai.data.youtube.DownloadProgressState>,
+    cloudArtists: List<com.example.tgmusicai.data.youtube.YouTubeArtistRef>,
+    cloudAlbums: List<com.example.tgmusicai.data.youtube.YouTubeAlbumRef>,
+    cloudPlaylists: List<com.example.tgmusicai.data.youtube.YouTubeAlbumRef>,
+    cloudResults: List<com.example.tgmusicai.data.youtube.YouTubeSearchResult>,
+    isSearchingCloud: Boolean,
+    onOpenArtist: (com.example.tgmusicai.data.youtube.YouTubeArtistRef) -> Unit,
+    onOpenAlbum: (com.example.tgmusicai.data.youtube.YouTubeAlbumRef) -> Unit,
+    onPlayCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit,
+    onDownloadCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit,
+) {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(3),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 96.dp)
+        ) {
+            fun fullWidthItem(key: String, content: @Composable () -> Unit) {
+                item(key = key, span = { GridItemSpan(maxLineSpan) }) { content() }
+            }
+
+            items(songs, key = { "local_${it.id}" }) { song ->
+                SongGridItem(
+                    song = song,
+                    isPlaying = currentSongId == song.id,
+                    isSelected = song.id in selectedSongIds,
+                    onClick = {
+                        if (isSelectionMode) {
+                            libraryViewModel.toggleSongSelected(song.id)
+                        } else {
+                            playerViewModel.playSong(song = song, queue = songs)
+                        }
+                    },
+                    onLongClick = { libraryViewModel.startSelection(song.id) },
+                    onAddToPlaylistClicked = { libraryViewModel.openAddToPlaylistDialog(song) },
+                    onScrapeClicked = { libraryViewModel.scrapeArtworkAndLyrics(song) },
+                    onStartRadioClicked = { playerViewModel.startRadio(song) },
+                    onAddToQueueClicked = { playerViewModel.addToQueue(song) },
+                    onToggleLikeClicked = { libraryViewModel.toggleLikeSong(song) },
+                    liveDownloadStatus = song.youtubeId?.let { downloadMap[it]?.status }
+                )
+            }
+
+            if (cloudArtists.isNotEmpty()) {
+                fullWidthItem("heading_artists") { SearchSectionHeading("Artists") }
+                items(cloudArtists, key = { "artist_${it.browseId}" }) { artist ->
+                    CloudTile(
+                        title = artist.name,
+                        subtitle = "Artist",
+                        artworkUrl = artist.thumbnailUrl,
+                        onClick = { onOpenArtist(artist) }
+                    )
+                }
+            }
+
+            if (cloudAlbums.isNotEmpty()) {
+                fullWidthItem("heading_albums") { SearchSectionHeading("Albums") }
+                items(cloudAlbums, key = { "cloudalbum_${it.browseId}" }) { album ->
+                    CloudTile(
+                        title = album.title,
+                        subtitle = album.subtitle,
+                        artworkUrl = album.thumbnailUrl,
+                        onClick = { onOpenAlbum(album) }
+                    )
+                }
+            }
+
+            if (cloudPlaylists.isNotEmpty()) {
+            fullWidthItem("heading_playlists") { SearchSectionHeading("Playlists") }
+            items(cloudPlaylists, key = { "cloudplaylist_${it.browseId}" }) { playlist ->
+                CloudTile(
+                    title = playlist.title,
+                    subtitle = playlist.subtitle,
+                    artworkUrl = playlist.thumbnailUrl,
+                    onClick = { onOpenAlbum(playlist) }
+                )
+            }
+        }
+
+        if (isSearchingCloud || cloudResults.isNotEmpty()) {
+                fullWidthItem("heading_youtube") {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 12.dp)
+                    ) {
+                        Text(
+                            text = "Songs",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (isSearchingCloud) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                        }
+                    }
+                }
+                items(cloudResults, key = { "cloud_${it.videoId}" }) { result ->
+                    CloudTile(
+                        title = result.title,
+                        subtitle = result.uploader,
+                        artworkUrl = result.thumbnailUri,
+                        onClick = { onPlayCloudResult(result) },
+                        showPlayOverlay = true,
+                        onDownload = { onDownloadCloudResult(result) }
+                    )
+                }
+            }
+        }
+}
+
+/** Recent searches, shown while the empty search box has focus. */
+@Composable
+private fun RecentSearchesList(
+    recent: List<String>,
+    onPick: (String) -> Unit,
+    onRemove: (String) -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 96.dp)
+    ) {
+        item(key = "recent_heading") {
+            Text(
+                text = "Recent searches",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            )
+        }
+        items(recent, key = { "recent_$it" }) { item ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(item) }
+                    .padding(start = 16.dp, end = 4.dp, top = 2.dp, bottom = 2.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.History,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.size(16.dp))
+                Text(item, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                IconButton(onClick = { onRemove(item) }) {
+                    Icon(
+                        imageVector = Icons.Rounded.Clear,
+                        contentDescription = "Remove $item from recent searches",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** A section label inside the search results grid ("Artists", "Albums", "Songs"). */
 @Composable
 private fun SearchSectionHeading(text: String) {
     Text(
@@ -697,6 +821,7 @@ private fun SearchSectionHeading(text: String) {
     )
 }
 
+@Preview(showBackground = true)
 @Composable
 fun LibraryScreenEmptyPreview() {
     TGMusicAITheme {

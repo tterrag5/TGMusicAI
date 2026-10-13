@@ -38,10 +38,8 @@ import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.outlined.Alarm
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.rounded.Bookmark
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Settings
@@ -119,7 +117,6 @@ fun MainScreen(
     youTubeViewModel: YouTubeViewModel,
     googleSyncViewModel: GoogleSyncViewModel,
     discoverViewModel: com.example.tgmusicai.ui.viewmodel.DiscoverViewModel,
-    searchViewModel: com.example.tgmusicai.ui.viewmodel.SearchViewModel,
     recognitionViewModel: com.example.tgmusicai.ui.viewmodel.RecognitionViewModel,
     mediaControllerManager: MediaControllerManager,
     modifier: Modifier = Modifier,
@@ -505,7 +502,6 @@ fun MainScreen(
                         )
                         listOf(
                             Triple(Screen.Home, "Home", Icons.Rounded.Home to Icons.Outlined.Home),
-                            Triple(Screen.Search, "Search", Icons.Rounded.Search to Icons.Outlined.Search),
                             Triple(Screen.Library, "Library", Icons.Rounded.Bookmark to Icons.Outlined.BookmarkBorder),
                             Triple(Screen.Alarms, "Alarms", Icons.Rounded.Alarm to Icons.Outlined.Alarm),
                         ).forEach { (screen, label, icons) ->
@@ -655,27 +651,6 @@ fun MainScreen(
                                             onOpenAlbum = { album ->
                                                 backStack.add(Screen.AlbumDetail(album.browseId, album.title))
                                             }
-                                        )
-                                    }
-                                    is Screen.Search -> {
-                                        SearchScreen(
-                                            searchViewModel = searchViewModel,
-                                            homeViewModel = homeViewModel,
-                                            onPlayCloud = { result ->
-                                                youTubeViewModel.playTrack(result, mediaControllerManager)
-                                                playerViewModel.expandNowPlaying()
-                                            },
-                                            onDownloadCloud = { result -> youTubeViewModel.downloadTrack(result) },
-                                            onPlayLibrarySong = { song, queue ->
-                                                playerViewModel.playSong(song = song, queue = queue)
-                                                playerViewModel.expandNowPlaying()
-                                            },
-                                            onOpenArtist = { artist ->
-                                                backStack.add(Screen.ArtistDetail(artist.browseId, artist.name))
-                                            },
-                                            onOpenAlbum = { album ->
-                                                backStack.add(Screen.AlbumDetail(album.browseId, album.title))
-                                            },
                                         )
                                     }
                                     is Screen.Alarms -> {
