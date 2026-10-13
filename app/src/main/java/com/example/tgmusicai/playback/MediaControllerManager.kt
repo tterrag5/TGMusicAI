@@ -729,11 +729,13 @@ class MediaControllerManager(
      * listener rather than silently dropping it from the queue).
      */
     private suspend fun resolveSongForPlayback(song: Song): Song = withContext(Dispatchers.IO) {
-        if (isUnresolvedCloudUri(song.mediaUri) && !song.youtubeId.isNullOrBlank()) {
+        val videoId = song.youtubeId?.takeIf { it.isNotBlank() }
+            ?: ServiceStreamResolver.videoIdFromUrl(song.mediaUri)
+        if (isUnresolvedCloudUri(song.mediaUri) && videoId != null) {
             try {
-                val stream = youtubeExtractor.extractAudioStream(song.youtubeId)
+                val stream = youtubeExtractor.extractAudioStream(videoId)
                 if (stream != null && stream.url.isNotBlank()) {
-                    song.copy(mediaUri = stream.url)
+                    song.copy(mediaUri = stream.url, youtubeId = videoId)
                 } else {
                     song
                 }
@@ -746,7 +748,7 @@ class MediaControllerManager(
     }
 
     private fun isUnresolvedCloudUri(uri: String): Boolean {
-        return uri.startsWith("https://www.youtube.com/watch?v=") || uri.startsWith("https://youtu.be/")
+        return ServiceStreamResolver.isUnresolvedUri(uri)
     }
 
     /**

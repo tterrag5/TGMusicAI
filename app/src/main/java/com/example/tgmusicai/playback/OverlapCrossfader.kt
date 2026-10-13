@@ -109,7 +109,7 @@ class OverlapCrossfader(
         val next = main.getMediaItemAt(main.nextMediaItemIndex)
         // An unresolved watch URL would leave the incoming side silent while the outgoing fades.
         val nextUri = next.localConfiguration?.uri?.toString() ?: next.mediaId
-        if (nextUri.startsWith("https://www.youtube.com/watch") || nextUri.startsWith("https://youtu.be/")) return
+        if (ServiceStreamResolver.isUnresolvedUri(nextUri)) return
 
         val position = main.currentPosition
         val duration = main.duration

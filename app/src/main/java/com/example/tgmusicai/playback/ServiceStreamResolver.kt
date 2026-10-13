@@ -143,8 +143,17 @@ class ServiceStreamResolver(
         /** Connection hint the app's own [MediaControllerManager] sets, so the service can tell it apart. */
         const val HINT_APP_UI = "com.example.tgmusicai.hint.APP_UI"
 
+        /**
+         * A cloud track with no playable stream yet: a watch URL, or the `yt:<videoId>` id that
+         * voice / Android Auto search results carried (rows saved from those kept it as their URI,
+         * and nothing resolved them, so skipping onto one failed after ~3 s; T034).
+         */
         fun isUnresolvedUri(uri: String): Boolean =
-            uri.startsWith("https://www.youtube.com/watch?v=") || uri.startsWith("https://youtu.be/")
+            uri.startsWith("https://www.youtube.com/watch?v=") || uri.startsWith("https://youtu.be/") ||
+                uri.startsWith(YT_ID_PREFIX)
+
+        /** The prefix of the old `yt:<videoId>` media ids. */
+        const val YT_ID_PREFIX = "yt:"
 
         internal fun isUnresolved(item: MediaItem): Boolean =
             isUnresolvedUri(item.localConfiguration?.uri?.toString() ?: item.mediaId)
@@ -159,6 +168,7 @@ class ServiceStreamResolver(
                 url.substringAfter("v=").substringBefore('&').takeIf { it.isNotBlank() }
             url.startsWith("https://youtu.be/") ->
                 url.removePrefix("https://youtu.be/").substringBefore('?').takeIf { it.isNotBlank() }
+            url.startsWith(YT_ID_PREFIX) -> url.removePrefix(YT_ID_PREFIX).takeIf { it.isNotBlank() }
             else -> null
         }
     }

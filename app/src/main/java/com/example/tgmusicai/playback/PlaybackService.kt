@@ -450,7 +450,7 @@ class PlaybackService : MediaLibraryService() {
                         // next unresolved item, which fails the same way. Wait instead; the resolver
                         // patches a real stream in and starts playback itself.
                         val pendingResolution = currentMediaItem?.localConfiguration?.uri?.toString()
-                            ?.let { it.startsWith("https://www.youtube.com/watch?v=") || it.startsWith("https://youtu.be/") }
+                            ?.let(ServiceStreamResolver::isUnresolvedUri)
                             ?: false
                         if (pendingResolution) {
                             android.util.Log.d("PlaybackService", "Holding: current item is not resolved yet")
@@ -2306,7 +2306,9 @@ class PlaybackService : MediaLibraryService() {
                     val stream = youtubeExtractor.extractAudioStream(result.videoId) ?: continue
                     resolved.add(
                         MediaItem.Builder()
-                            .setMediaId("yt:${result.videoId}")
+                            // The watch URL as the id, like every other unresolved cloud track: the app
+                            // saves a song's id as its URI, and "yt:<id>" rows could never be resolved.
+                            .setMediaId("https://www.youtube.com/watch?v=${result.videoId}")
                             .setUri(Uri.parse(stream.url))
                             .setMediaMetadata(
                                 MediaMetadata.Builder()
@@ -2316,6 +2318,20 @@ class PlaybackService : MediaLibraryService() {
                                     .setIsBrowsable(false)
                                     .setIsPlayable(true)
                                     .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+                                    .setExtras(
+                                        SongMediaExtras.fromSong(
+                                            Song(
+                                                title = result.title,
+                                                artist = result.uploader,
+                                                album = "YouTube Cloud",
+                                                durationMs = result.durationSeconds * 1000L,
+                                                mediaUri = "https://www.youtube.com/watch?v=${result.videoId}",
+                                                youtubeId = result.videoId,
+                                                artworkUri = result.thumbnailUri,
+                                                isDownloaded = false,
+                                            )
+                                        )
+                                    )
                                     .build()
                             )
                             .build()

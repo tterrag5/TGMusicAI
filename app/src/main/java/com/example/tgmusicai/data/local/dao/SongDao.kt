@@ -125,6 +125,19 @@ interface SongDao {
     suspend fun deleteSong(song: Song)
 
     /** Updates just a song's stored lyrics text, leaving every other field untouched. */
+    /**
+     * Rewrites rows saved with a `yt:<videoId>` URI (voice / Android Auto search results, before
+     * those carried a watch URL) to the watch URL every other unresolved cloud song uses, so the
+     * resolvers pick them up. They were also saved as "downloaded" (no extras to say otherwise),
+     * which no `yt:` row ever is. Returns how many rows changed.
+     */
+    @Query(
+        "UPDATE songs SET youtube_id = COALESCE(NULLIF(youtube_id, ''), substr(mediaUri, 4)), " +
+            "mediaUri = 'https://www.youtube.com/watch?v=' || substr(mediaUri, 4), is_downloaded = 0 " +
+            "WHERE mediaUri LIKE 'yt:%'"
+    )
+    suspend fun repairYtIdUris(): Int
+
     @Query("UPDATE songs SET lyrics = :lyrics WHERE id = :id")
     suspend fun updateSongLyrics(id: Long, lyrics: String?)
 

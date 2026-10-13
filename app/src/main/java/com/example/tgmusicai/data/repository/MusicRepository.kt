@@ -546,6 +546,18 @@ class MusicRepository(
         if (song.id != 0L) return song.id
         // A still-resolving voice search is not a song; saving it created "Unknown Title" rows.
         if (com.example.tgmusicai.playback.MediaControllerManager.isSearchPlaceholder(song.mediaUri)) return 0L
+        // A "yt:<id>" media id is not a URI anything can play; store the watch URL instead (T034).
+        val ytId = song.mediaUri.takeIf { it.startsWith(com.example.tgmusicai.playback.ServiceStreamResolver.YT_ID_PREFIX) }
+            ?.removePrefix(com.example.tgmusicai.playback.ServiceStreamResolver.YT_ID_PREFIX)
+        if (ytId != null) {
+            return ensurePersisted(
+                song.copy(
+                    mediaUri = "https://www.youtube.com/watch?v=$ytId",
+                    youtubeId = song.youtubeId?.takeIf { it.isNotBlank() } ?: ytId,
+                    isDownloaded = false,
+                )
+            )
+        }
 
         val existing = song.youtubeId?.takeIf { it.isNotBlank() }?.let { songDao.getSongByYoutubeId(it) }
             ?: songDao.getSongByUri(song.mediaUri)

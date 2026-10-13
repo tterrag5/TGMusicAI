@@ -79,7 +79,9 @@ object SongMediaExtras {
             mediaUri = mediaUri,
             artworkUri = extras?.getString(KEY_ARTWORK_URI),
             youtubeId = extras?.getString(KEY_YOUTUBE_ID),
-            isDownloaded = extras?.getBoolean(KEY_IS_DOWNLOADED, true) ?: true,
+            // Without extras, only a local URI means downloaded: a stream / watch URL never is.
+            isDownloaded = extras?.takeIf { it.containsKey(KEY_IS_DOWNLOADED) }?.getBoolean(KEY_IS_DOWNLOADED)
+                ?: !(mediaUri.startsWith("http") || ServiceStreamResolver.isUnresolvedUri(mediaUri)),
             replayGainDb = replayGainDb(extras),
             replayPeak = replayPeak(extras)
         )

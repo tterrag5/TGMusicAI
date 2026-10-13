@@ -161,6 +161,11 @@ class MainActivity : ComponentActivity() {
             recommendationEngine = recommendationEngine,
             pendingScrobbleDao = database.pendingScrobbleDao(),
         )
+        // One-off repair of cloud songs saved with a "yt:<id>" URI; a no-op once none are left.
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val fixed = database.songDao().repairYtIdUris()
+            if (fixed > 0) android.util.Log.i("MainActivity", "Repaired $fixed song(s) saved with a yt: URI")
+        }
 
         networkObserver = NetworkObserver(this)
         val lyricsRepository = LyricsRepository(this, repository)
