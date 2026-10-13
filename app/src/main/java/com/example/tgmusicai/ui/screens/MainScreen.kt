@@ -89,6 +89,7 @@ import com.example.tgmusicai.ui.components.scene.ThemeBackdrop
 import com.example.tgmusicai.ui.components.scene.rememberSceneTouchState
 import com.example.tgmusicai.ui.components.scene.sceneTouches
 import com.example.tgmusicai.ui.theme.AppTheme
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.luminance
 import com.example.tgmusicai.ui.components.CreatePlaylistDialog
 import com.example.tgmusicai.ui.components.MiniPlayer
@@ -215,7 +216,8 @@ fun MainScreen(
                 dark = backgroundColor.luminance() < 0.5f,
                 // Nothing behind the full-screen player is visible, so don't animate it.
                 animate = sceneMotion && !showNowPlayingFull,
-                scrim = backgroundColor.copy(alpha = if (backgroundColor.luminance() < 0.5f) 0.3f else 0.38f),
+                // Strong enough that text sitting straight on the scene stays readable (T036).
+                scrim = backgroundColor.copy(alpha = if (backgroundColor.luminance() < 0.5f) 0.42f else 0.5f),
                 touches = sceneTouches
             )
         }
@@ -223,15 +225,42 @@ fun MainScreen(
         ModalNavigationDrawer(
             drawerState = drawerState,
             drawerContent = {
+            // Liquid glass: the scene stays visible through a smoked, see-through sheet with a
+            // light sheen and a bright edge, instead of an opaque panel (T036).
+            val glassBase = MaterialTheme.colorScheme.background
             ModalDrawerSheet(
-                drawerContainerColor = MaterialTheme.colorScheme.background,
+                drawerContainerColor = glassBase,
                 drawerContentColor = MaterialTheme.colorScheme.onBackground
             ) {
+                // Compose can only blur its own content, not what is behind it, so the sheet paints
+                // the theme's scene itself, blurred, under a smoked layer: frosted glass over the
+                // same scene the app sits on, without the screen underneath bleeding through.
+                Box {
+                if (!dynamicColor) {
+                    ThemeBackdrop(
+                        theme = AppTheme.fromName(selectedTheme),
+                        dark = glassBase.luminance() < 0.5f,
+                        animate = false,
+                        modifier = Modifier
+                            .matchParentSize()
+                            .then(
+                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) Modifier.blur(18.dp)
+                                else Modifier
+                            ),
+                        scrim = glassBase.copy(alpha = if (glassBase.luminance() < 0.5f) 0.55f else 0.6f),
+                    )
+                }
                 Column(
                     modifier = Modifier
                         .fillMaxHeight()
                         .width(280.dp)
-                        .background(MaterialTheme.colorScheme.background)
+                        .background(
+                            androidx.compose.ui.graphics.Brush.linearGradient(
+                                listOf(Color.White.copy(alpha = 0.10f), Color.White.copy(alpha = 0.02f), Color.Transparent),
+                                start = androidx.compose.ui.geometry.Offset.Zero,
+                                end = androidx.compose.ui.geometry.Offset(700f, 1400f),
+                            )
+                        )
                         .padding(16.dp)
                 ) {
                     // Left Sidebar Drawer Header
@@ -439,6 +468,7 @@ fun MainScreen(
                             )
                         }
                     }
+                }
                 }
             }
         }

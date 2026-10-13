@@ -484,7 +484,28 @@ fun TGMusicAITheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography,
+        typography = if (isDark) Typography.withLegibilityShadow() else Typography,
         content = content
+    )
+}
+
+/**
+ * A soft dark halo under every text style, so light text stays readable where it sits straight on
+ * the theme's animated scene (a bright window or spotlight passing behind a heading). Dark themes
+ * only: dark text on a light theme would just look smudged.
+ */
+private fun androidx.compose.material3.Typography.withLegibilityShadow(): androidx.compose.material3.Typography {
+    val shadow = androidx.compose.ui.graphics.Shadow(
+        color = Color.Black.copy(alpha = 0.55f),
+        offset = androidx.compose.ui.geometry.Offset(0f, 1f),
+        blurRadius = 8f,
+    )
+    fun androidx.compose.ui.text.TextStyle.lifted() = copy(shadow = shadow)
+    return copy(
+        displayLarge = displayLarge.lifted(), displayMedium = displayMedium.lifted(), displaySmall = displaySmall.lifted(),
+        headlineLarge = headlineLarge.lifted(), headlineMedium = headlineMedium.lifted(), headlineSmall = headlineSmall.lifted(),
+        titleLarge = titleLarge.lifted(), titleMedium = titleMedium.lifted(), titleSmall = titleSmall.lifted(),
+        bodyLarge = bodyLarge.lifted(), bodyMedium = bodyMedium.lifted(), bodySmall = bodySmall.lifted(),
+        labelLarge = labelLarge.lifted(), labelMedium = labelMedium.lifted(), labelSmall = labelSmall.lifted(),
     )
 }
