@@ -79,6 +79,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import com.example.tgmusicai.ui.components.LyricsSheet
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -115,27 +121,6 @@ import com.example.tgmusicai.ui.util.ShareUtils
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
 
 /** How long playback-driven lyric auto-scroll stays paused after the user scrolls the lyrics. */
-private const val LYRICS_MANUAL_SCROLL_GRACE_MS = 4000L
-
-/**
- * How long the lyrics take to glide from one line to the next. Long enough to read as movement
- * rather than a jump, short enough that the line is in place while it is still being sung -- at
- * 650ms the highlight visibly trailed the music.
- */
-private const val LYRICS_SCROLL_DURATION_MS = 420
-
-/**
- * How far ahead of playback a line is treated as active.
- *
- * The glide takes [LYRICS_SCROLL_DURATION_MS] to finish, and LRC timestamps generally mark where a
- * line sits in the file rather than the exact instant the vocal starts, so activating a line
- * exactly on its timestamp lands it late twice over. Leading by roughly the glide duration puts
- * the line in place as it begins.
- */
-private const val LYRICS_SYNC_LEAD_MS = 400L
-
-/** Where the active lyric line comes to rest, as a fraction down the lyrics viewport. */
-private const val LYRICS_ACTIVE_LINE_ANCHOR = 0.4f
 
 /**
  * Full-screen Now Playing view: YouTube-Music-style hero artwork, pill action bar (Like/Dislike,
@@ -152,6 +137,8 @@ fun NowPlayingScreen(
     equalizerViewModel: com.example.tgmusicai.ui.viewmodel.EqualizerViewModel,
     onCollapse: () -> Unit,
     onOpenQueue: () -> Unit = {},
+    /** Where the queue came from ("Liked Music", a playlist, ...), shown on the pull-up handle. */
+    playingFrom: String = "Up next",
     modifier: Modifier = Modifier
 ) {
     val currentSong by playerViewModel.currentSong.collectAsState()
@@ -317,10 +304,29 @@ fun NowPlayingScreen(
         )
     }
 
+    // YT Music's player: the cover's colour washing down into black behind everything, rather
+    // than a grey surface box. Always dark, whatever the app theme, so text and icons are light.
+    val playerTop = androidx.compose.ui.graphics.lerp(ambientPrimary, Color.Black, 0.35f)
+    val playerMid = androidx.compose.ui.graphics.lerp(ambientPrimary, Color.Black, 0.78f)
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    MaterialTheme(
+        colorScheme = MaterialTheme.colorScheme.copy(
+            surface = Color(0xFF121212),
+            onSurface = Color.White,
+            onSurfaceVariant = Color.White.copy(alpha = 0.7f),
+            outlineVariant = Color.White.copy(alpha = 0.24f),
+            surfaceContainerHigh = Color.White.copy(alpha = 0.12f),
+        )
+    ) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(playerTop, playerMid, Color.Black)))
+    ) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Now Playing", style = MaterialTheme.typography.titleLarge) },
+                title = {},
                 navigationIcon = {
                     IconButton(onClick = onCollapse) {
                         Icon(
@@ -338,12 +344,6 @@ fun NowPlayingScreen(
                             .size(48.dp)
                             .padding(12.dp)
                     )
-                    IconButton(onClick = onOpenQueue) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.QueueMusic,
-                            contentDescription = "Up Next"
-                        )
-                    }
                     Box {
                         IconButton(onClick = { showOverflowMenu = true }) {
                             Icon(
@@ -419,11 +419,13 @@ fun NowPlayingScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = Color.Transparent,
+                    navigationIconContentColor = Color.White,
+                    actionIconContentColor = Color.White
                 )
             )
         },
-        modifier = modifier
+        containerColor = Color.Transparent
     ) { innerPadding ->
         var lyricsSwipeDrag by remember { mutableStateOf(0f) }
         Column(
@@ -454,275 +456,7 @@ fun NowPlayingScreen(
         ) {
             // Album Artwork / Lyrics Transcript Area (toggled by the Lyrics pill below, or a
             // horizontal swipe -- see pointerInput above)
-            if (showLyricsTab) {
-                // Liquid glass: the cover art, blurred and drifting, behind a frosted pane. Text on
-                // it is light whatever the theme, so the scheme is overridden for this panel only.
-                LiquidGlassPanel(
-                    artworkUri = FormatUtils.cacheBustedArtworkUri(currentSong?.artworkUri),
-                    fallbackColors = listOf(ambientPrimary, ambientSecondary),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .padding(vertical = 12.dp),
-                    shape = RoundedCornerShape(24.dp),
-                ) {
-                    MaterialTheme(
-                        colorScheme = MaterialTheme.colorScheme.copy(
-                            onSurface = LiquidGlass.text,
-                            onSurfaceVariant = LiquidGlass.textDim,
-                            outline = LiquidGlass.textFaint,
-                        )
-                    ) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        if (parsedLyrics.isNotEmpty()) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(8.dp)
-                            ) {
-                                IconButton(onClick = { showTranslateMenu = true }) {
-                                    if (isTranslatingLyrics) {
-                                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                                    } else {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Translate,
-                                            contentDescription = "Translate lyrics",
-                                            tint = if (translatedLyrics != null) LiquidGlass.text else LiquidGlass.textDim
-                                        )
-                                    }
-                                }
-                                DropdownMenu(expanded = showTranslateMenu, onDismissRequest = { showTranslateMenu = false }) {
-                                    DropdownMenuItem(
-                                        text = { Text(if (translatedLyrics != null) "Hide translation" else "Translate to $translationLanguage") },
-                                        onClick = {
-                                            showTranslateMenu = false
-                                            playerViewModel.toggleLyricsTranslation()
-                                        }
-                                    )
-                                    HorizontalDivider()
-                                    listOf("Spanish", "French", "German", "Portuguese", "Italian", "Japanese", "Korean", "Chinese (Simplified)", "Arabic", "Hindi").forEach { language ->
-                                        DropdownMenuItem(
-                                            text = {
-                                                Text(
-                                                    text = language,
-                                                    fontWeight = if (language == translationLanguage) FontWeight.Bold else FontWeight.Normal,
-                                                    color = if (language == translationLanguage) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                                                )
-                                            },
-                                            onClick = {
-                                                showTranslateMenu = false
-                                                // Persists the pick and, if a translation is already showing,
-                                                // re-translates into it immediately (see PlayerViewModel).
-                                                playerViewModel.setTranslationLanguage(language)
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        if (parsedLyrics.isEmpty()) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(24.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.ChatBubbleOutline,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.outline,
-                                    modifier = Modifier.size(48.dp)
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                Text(
-                                    text = if (isScraping) "Looking for lyrics..." else "No lyrics found for this song",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    textAlign = TextAlign.Center
-                                )
-                                Spacer(modifier = Modifier.height(16.dp))
-                                Button(
-                                    onClick = {
-                                        currentSong?.let { playerViewModel.fetchLyrics(it, forceFetch = true) }
-                                    },
-                                    enabled = !isScraping,
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.primary
-                                    )
-                                ) {
-                                    Text("Search again")
-                                }
-                            }
-                        } else {
-                            val activeIndex = remember(currentPositionMs, parsedLyrics) {
-                                val cursorMs = currentPositionMs + LYRICS_SYNC_LEAD_MS
-                                var idx = -1
-                                for (i in parsedLyrics.indices) {
-                                    if (parsedLyrics[i].timestampMs >= 0 && parsedLyrics[i].timestampMs <= cursorMs) {
-                                        idx = i
-                                    } else if (parsedLyrics[i].timestampMs > cursorMs) {
-                                        break
-                                    }
-                                }
-                                idx
-                            }
-
-                            // The karaoke fill needs a finer clock than the 500ms position ticker,
-                            // but only while a line that actually has word timings is on screen:
-                            // gating it here keeps the frame loop, and the recomposition it drives,
-                            // switched off entirely for unsynced lyrics and while paused. The same
-                            // lead the active-line search uses is applied here too, or the word
-                            // fill would run behind the line highlight it belongs to.
-                            val activeLineHasWordTimings =
-                                parsedLyrics.getOrNull(activeIndex)?.let { it.hasRealWordTimings && it.words.isNotEmpty() } == true
-                            val smoothedPositionMs = rememberSmoothedPositionMs(
-                                reportedPositionMs = currentPositionMs + LYRICS_SYNC_LEAD_MS,
-                                isPlaying = isPlaying && activeLineHasWordTimings,
-                            )
-
-                            val listState = rememberLazyListState()
-
-                            // Tracks when the user last dragged the lyrics themselves. Checking
-                            // isScrollInProgress alone only paused auto-scroll during the drag
-                            // itself, so letting go snapped the view straight back to the active
-                            // line -- you could never actually read ahead. Auto-scroll now stays
-                            // out of the way for a few seconds after a manual scroll.
-                            var lastManualScrollMs by remember { mutableStateOf(0L) }
-                            LaunchedEffect(listState.isScrollInProgress) {
-                                if (listState.isScrollInProgress) {
-                                    lastManualScrollMs = System.currentTimeMillis()
-                                }
-                            }
-
-                            LaunchedEffect(activeIndex) {
-                                val sinceManualScroll = System.currentTimeMillis() - lastManualScrollMs
-                                if (activeIndex >= 0 &&
-                                    !listState.isScrollInProgress &&
-                                    sinceManualScroll > LYRICS_MANUAL_SCROLL_GRACE_MS
-                                ) {
-                                    // Glide by an exact pixel distance rather than calling
-                                    // animateScrollToItem, which lands on an item boundary using a
-                                    // spec this code cannot choose -- with lines of unequal height
-                                    // that produced the jerk between lines. Measuring where the
-                                    // active line actually sits and easing that exact delta gives
-                                    // one continuous movement instead.
-                                    val info = listState.layoutInfo
-                                    val active = info.visibleItemsInfo.firstOrNull { it.index == activeIndex }
-                                    if (active != null) {
-                                        // Rest the active line a little above centre so the lines
-                                        // coming next stay on screen, the way YouTube Music does.
-                                        val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
-                                        val restingPoint = info.viewportStartOffset + viewportHeight * LYRICS_ACTIVE_LINE_ANCHOR
-                                        val delta = (active.offset + active.size / 2f) - restingPoint
-                                        listState.animateScrollBy(
-                                            delta,
-                                            animationSpec = tween(
-                                                durationMillis = LYRICS_SCROLL_DURATION_MS,
-                                                easing = FastOutSlowInEasing,
-                                            ),
-                                        )
-                                    } else {
-                                        // Off screen entirely (a seek, or returning to the tab),
-                                        // so there is no distance to ease -- just get there.
-                                        listState.animateScrollToItem((activeIndex - 2).coerceAtLeast(0))
-                                    }
-                                }
-                            }
-
-                            LazyColumn(
-                                state = listState,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(16.dp)
-                            ) {
-                                itemsIndexed(parsedLyrics) { index, line ->
-                                    val isActive = index == activeIndex
-                                    // Color/scale animate smoothly; the text's own style/size never
-                                    // changes. Sizing the active line up via titleMedium used to
-                                    // reflow this item's height the instant it activated -- while
-                                    // the list was also mid-animateScrollToItem -- which is what
-                                    // read as choppy/stuttery scrolling rather than a clean
-                                    // line-by-line highlight.
-                                    val animatedColor by animateColorAsState(
-                                        targetValue = if (isActive) LiquidGlass.text else LiquidGlass.textDim,
-                                        animationSpec = tween(250),
-                                        label = "lyricLineColor"
-                                    )
-                                    val animatedScale by animateFloatAsState(
-                                        targetValue = if (isActive) 1.08f else 1f,
-                                        animationSpec = tween(250),
-                                        label = "lyricLineScale"
-                                    )
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .graphicsLayer {
-                                                scaleX = animatedScale
-                                                scaleY = animatedScale
-                                            }
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .clickable {
-                                                if (line.timestampMs >= 0) {
-                                                    playerViewModel.seekTo(line.timestampMs)
-                                                }
-                                            }
-                                            .padding(vertical = 8.dp, horizontal = 12.dp)
-                                    ) {
-                                        // Karaoke fill, on the active line only: the rest of the
-                                        // list has no highlight to advance, and building spans for
-                                        // every line on every frame would be wasted work. A line
-                                        // with no word timings (unsynced lyrics, or a single-unit
-                                        // line) falls through to the plain text it always used.
-                                        // Only when the source timed each word (Apple Music /
-                                        // YouTube Music word sync). Estimated timings drifted from
-                                        // the singer, so line-synced lyrics light the whole line.
-                                        val karaoke = isActive &&
-                                            !line.isInstrumental &&
-                                            line.hasRealWordTimings &&
-                                            line.words.isNotEmpty()
-                                        Text(
-                                            text = if (karaoke) {
-                                                karaokeLine(
-                                                    line = line,
-                                                    positionMs = smoothedPositionMs,
-                                                    sungColor = LiquidGlass.text,
-                                                    unsungColor = LiquidGlass.textDim,
-                                                )
-                                            } else {
-                                                AnnotatedString(line.text)
-                                            },
-                                            // A music marker is a symbol standing in for singing,
-                                            // not a lyric: sized up so it reads as one, and never
-                                            // bolded, so real words still stand out when active.
-                                            style = (if (line.isInstrumental) {
-                                                MaterialTheme.typography.titleMedium
-                                            } else {
-                                                MaterialTheme.typography.bodyMedium
-                                            }).copy(shadow = LiquidGlass.textShadow),
-                                            fontWeight = if (isActive && !line.isInstrumental) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (line.isInstrumental) animatedColor.copy(alpha = 0.7f) else animatedColor,
-                                            modifier = Modifier.fillMaxWidth(),
-                                            textAlign = TextAlign.Center
-                                        )
-                                        // Markers hold no words, so there is nothing to translate.
-                                        translatedLyrics?.takeIf { !line.isInstrumental }?.getOrNull(index)?.let { translatedText ->
-                                            Text(
-                                                text = translatedText,
-                                                style = MaterialTheme.typography.bodySmall.copy(shadow = LiquidGlass.textShadow),
-                                                color = animatedColor.copy(alpha = 0.75f),
-                                                modifier = Modifier.fillMaxWidth(),
-                                                textAlign = TextAlign.Center
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    }
-                }
-            } else {
+            // Cover art. Lyrics open in their own sheet (Lyrics pill, or swipe right).
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -771,11 +505,10 @@ fun NowPlayingScreen(
                         }
                     }
                 }
-            }
 
             // Title + Artist (+ Producer)
             Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
+                horizontalAlignment = Alignment.Start,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
@@ -783,7 +516,7 @@ fun NowPlayingScreen(
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
-                    textAlign = TextAlign.Center,
+                    textAlign = TextAlign.Start,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -792,7 +525,7 @@ fun NowPlayingScreen(
                     text = currentSong?.artist ?: "Unknown Artist",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
+                    textAlign = TextAlign.Start,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -802,7 +535,7 @@ fun NowPlayingScreen(
                         text = "Prod. ${currentSong?.producer}",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.primary,
-                        textAlign = TextAlign.Center,
+                        textAlign = TextAlign.Start,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -813,8 +546,9 @@ fun NowPlayingScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Surface(
@@ -897,7 +631,7 @@ fun NowPlayingScreen(
                 }
 
                 Surface(
-                    onClick = { showLyricsTab = !showLyricsTab },
+                    onClick = { showLyricsTab = true },
                     shape = CircleShape,
                     color = if (showLyricsTab) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
                     modifier = Modifier.size(38.dp)
@@ -930,6 +664,30 @@ fun NowPlayingScreen(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = "Save",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                Surface(
+                    onClick = { currentSong?.let { ShareUtils.shareSong(context, it) } },
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    modifier = Modifier.height(38.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Share,
+                            contentDescription = "Share",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Share",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -1049,7 +807,80 @@ fun NowPlayingScreen(
                     )
                 }
             }
+
+            // Pull-up handle (YT Music): drag up or tap to open the queue, instead of a button in
+            // the top bar. Shows where the queue is playing from.
+            var handleDrag by remember { mutableStateOf(0f) }
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onOpenQueue)
+                    .pointerInput(Unit) {
+                        detectVerticalDragGestures(
+                            onDragStart = { handleDrag = 0f },
+                            onDragEnd = { if (handleDrag < -24f) onOpenQueue(); handleDrag = 0f },
+                            onDragCancel = { handleDrag = 0f },
+                        ) { change, amount ->
+                            change.consume()
+                            handleDrag += amount
+                        }
+                    }
+                    .padding(vertical = 8.dp)
+                    .semantics { contentDescription = "Up next: $playingFrom. Swipe up or tap to open the queue" }
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(36.dp)
+                        .height(4.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.5f))
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = playingFrom,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color.White.copy(alpha = 0.85f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
+    }
+
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showLyricsTab,
+        enter = androidx.compose.animation.slideInVertically { it },
+        exit = androidx.compose.animation.slideOutVertically { it },
+    ) {
+        BackHandler { showLyricsTab = false }
+        LyricsSheet(
+            song = currentSong,
+            isPlaying = isPlaying,
+            positionMs = currentPositionMs,
+            lines = parsedLyrics,
+            translatedLines = translatedLyrics,
+            isSearching = isScraping,
+            isTranslating = isTranslatingLyrics,
+            translationLanguage = translationLanguage,
+            tint = playerTop,
+            onClose = { showLyricsTab = false },
+            onSeek = playerViewModel::seekTo,
+            onPlayPause = playerViewModel::togglePlayPause,
+            onPrevious = playerViewModel::restartOrPrevious,
+            onNext = playerViewModel::skipToNext,
+            onCopy = {
+                val text = parsedLyrics.filterNot { it.isInstrumental }.joinToString("\n") { it.text }
+                clipboard.setText(androidx.compose.ui.text.AnnotatedString(text))
+                android.widget.Toast.makeText(context, "Lyrics copied", android.widget.Toast.LENGTH_SHORT).show()
+            },
+            onToggleTranslation = playerViewModel::toggleLyricsTranslation,
+            onPickLanguage = playerViewModel::setTranslationLanguage,
+            onSearchAgain = { currentSong?.let { playerViewModel.fetchLyrics(it, forceFetch = true) } },
+        )
+    }
+    }
     }
 }
 

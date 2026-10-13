@@ -138,6 +138,7 @@ fun MainScreen(
     val isResolving by playerViewModel.isResolving.collectAsState()
     val playbackQueue by playerViewModel.playlist.collectAsState()
     var showQueueSheet by remember { mutableStateOf(false) }
+    val playingFrom by playerViewModel.playingFrom.collectAsState()
 
     val userPlaylists by playlistViewModel.playlists.collectAsState()
     val playlistCoverArtwork by playlistViewModel.playlistCoverArtwork.collectAsState()
@@ -714,25 +715,28 @@ fun MainScreen(
                     )
                 }
 
-                // Crossfade + slide rather than an instant cut, so expanding/collapsing the
-                // player reads as one continuous motion instead of a hard pop -- matching the
-                // "progressive transition" intent of a YouTube-Music-style player sheet without
-                // taking on a full BottomSheetScaffold drag-gesture rewrite this app's tap-to-
-                // expand (not drag-to-expand) player doesn't otherwise need.
-                AnimatedVisibility(
-                    visible = showNowPlayingFull,
-                    enter = fadeIn() + slideInVertically(initialOffsetY = { it / 6 }),
-                    exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 6 })
-                ) {
-                    NowPlayingScreen(
-                        playerViewModel = playerViewModel,
-                        equalizerViewModel = equalizerViewModel,
-                        onCollapse = playerViewModel::collapseNowPlaying,
-                        onOpenQueue = { showQueueSheet = true }
-                    )
-                }
             }
         }
+        }
+
+        // Drawn here, outside the Scaffold's insets, so the player runs edge to edge behind the
+        // status and navigation bars like YT Music's. Crossfade + slide rather than an instant cut, so expanding/collapsing the
+        // player reads as one continuous motion instead of a hard pop -- matching the
+        // "progressive transition" intent of a YouTube-Music-style player sheet without
+        // taking on a full BottomSheetScaffold drag-gesture rewrite this app's tap-to-
+        // expand (not drag-to-expand) player doesn't otherwise need.
+        AnimatedVisibility(
+            visible = showNowPlayingFull,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 6 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 6 })
+        ) {
+            NowPlayingScreen(
+                playerViewModel = playerViewModel,
+                equalizerViewModel = equalizerViewModel,
+                onCollapse = playerViewModel::collapseNowPlaying,
+                onOpenQueue = { showQueueSheet = true },
+                playingFrom = playingFrom
+            )
         }
     }
 
@@ -749,6 +753,7 @@ fun MainScreen(
     if (showQueueSheet) {
         QueueSheet(
             queue = playbackQueue,
+            playingFromSource = if (playingFrom == "Up next") "Your Queue" else playingFrom,
             currentSong = currentSong,
             onSongClick = { index ->
                 playerViewModel.skipToIndex(index)

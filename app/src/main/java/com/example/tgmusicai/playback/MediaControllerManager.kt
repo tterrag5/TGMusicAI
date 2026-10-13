@@ -969,7 +969,13 @@ class MediaControllerManager(
      * attribute a play to it. Set by the play entry points and cleared by any queue that did not
      * come from a playlist, so attribution can never be inherited by the next thing played.
      */
-    private var originPlaylistId: Long? = null
+    private var originPlaylistId: Long?
+        get() = _originPlaylistId.value
+        set(value) { _originPlaylistId.value = value }
+    private val _originPlaylistId = kotlinx.coroutines.flow.MutableStateFlow<Long?>(null)
+
+    /** [originPlaylistId], observable: the player's "playing from" label reads it. */
+    val originPlaylistIdFlow: kotlinx.coroutines.flow.StateFlow<Long?> = _originPlaylistId
 
     /**
      * Plays whatever best matches [query], resolving it on the service side.

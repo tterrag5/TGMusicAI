@@ -725,6 +725,13 @@ class PlayerViewModel(
     }
 
     /** Playlists available for the Now Playing screen's "Save to Playlist" action. */
+    /** Name of the playlist the queue was started from, or "Up next" (player handle, queue sheet). */
+    val playingFrom: StateFlow<String> by lazy {
+        combine(mediaControllerManager.originPlaylistIdFlow, playlists) { id, all ->
+            all.firstOrNull { it.playlistId == id }?.name ?: "Up next"
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "Up next")
+    }
+
     val playlists: StateFlow<List<Playlist>> = (repository?.allPlaylists ?: kotlinx.coroutines.flow.flowOf(emptyList()))
         .stateIn(
             scope = viewModelScope,
