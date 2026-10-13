@@ -526,6 +526,8 @@ class MusicRepository(
      */
     suspend fun ensurePersisted(song: Song): Long {
         if (song.id != 0L) return song.id
+        // A still-resolving voice search is not a song; saving it created "Unknown Title" rows.
+        if (com.example.tgmusicai.playback.MediaControllerManager.isSearchPlaceholder(song.mediaUri)) return 0L
 
         val existing = song.youtubeId?.takeIf { it.isNotBlank() }?.let { songDao.getSongByYoutubeId(it) }
             ?: songDao.getSongByUri(song.mediaUri)
@@ -603,6 +605,8 @@ class MusicRepository(
 
     /** Removes any song_stats/listening_history rows left over from the old play-tracking bug (a play recorded against a bogus/stale id). */
     suspend fun cleanupOrphanedStats() {
+        // Rows older builds saved for still-resolving voice searches ("Unknown Title").
+        songDao.deleteSearchPlaceholders()
         songStatsDao.deleteOrphanedStats()
         listeningHistoryDao?.deleteOrphanedHistory()
     }

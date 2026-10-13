@@ -931,6 +931,16 @@ class MediaControllerManager(
     }
 
     companion object {
+        /**
+         * Media id prefix of the search-only item [playFromSearch] hands the service. It stands in
+         * for "whatever the search finds" until the service swaps in the real track, so it has no
+         * title or audio: it must never be saved as a song or sent off for lyrics.
+         */
+        const val VOICE_SEARCH_PREFIX = "voice-search:"
+
+        fun isSearchPlaceholder(mediaUri: String?): Boolean =
+            mediaUri?.startsWith(VOICE_SEARCH_PREFIX) == true
+
         /** How often [currentPositionMs] is refreshed while playing -- see [startPositionTicker]. */
         private const val POSITION_TICK_INTERVAL_MS = 100L
 
@@ -986,7 +996,7 @@ class MediaControllerManager(
         _playlist.value = emptyList()
 
         val searchItem = MediaItem.Builder()
-            .setMediaId("voice-search:$trimmed")
+            .setMediaId("$VOICE_SEARCH_PREFIX$trimmed")
             .setRequestMetadata(
                 MediaItem.RequestMetadata.Builder()
                     .setSearchQuery(trimmed)

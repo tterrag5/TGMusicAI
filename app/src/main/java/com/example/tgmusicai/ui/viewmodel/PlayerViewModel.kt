@@ -271,7 +271,14 @@ class PlayerViewModel(
             currentSong
                 .distinctUntilChangedBy { it?.let(::lyricsLookupKey) }
                 .collect { song ->
-                    if (song != null) {
+                    if (song != null &&
+                        com.example.tgmusicai.playback.MediaControllerManager.isSearchPlaceholder(song.mediaUri)
+                    ) {
+                        // A voice search still resolving: no real song yet, so nothing to look up.
+                        // Looking one up used to save an "Unknown Title" row with a random match's lyrics.
+                        _lyrics.value = null
+                        _isCurrentSongLiked.value = false
+                    } else if (song != null) {
                         val clean = sanitizeLyrics(song.lyrics)
                         _lyrics.value = clean
                         if (clean == null && lyricsRepository != null &&

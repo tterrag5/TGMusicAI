@@ -104,6 +104,22 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE id NOT IN (SELECT songId FROM song_stats WHERE playCount > 0) ORDER BY title ASC")
     fun getUnplayedSongs(): Flow<List<Song>>
 
+    @Query("DELETE FROM playlist_song_cross_ref WHERE songId IN (SELECT id FROM songs WHERE mediaUri LIKE 'voice-search:%')")
+    suspend fun deleteSearchPlaceholderPlaylistEntries()
+
+    @Query("DELETE FROM songs WHERE mediaUri LIKE 'voice-search:%'")
+    suspend fun deleteSearchPlaceholderRows()
+
+    /**
+     * Removes "Unknown Title" rows older builds saved for still-resolving voice searches, and any
+     * playlist entries (e.g. Liked) pointing at them. Stats/history are cleaned by the orphan queries.
+     */
+    @androidx.room.Transaction
+    suspend fun deleteSearchPlaceholders() {
+        deleteSearchPlaceholderPlaylistEntries()
+        deleteSearchPlaceholderRows()
+    }
+
     /** Deletes a song row (matched by primary key). Does not clean up related `song_stats`, `playlist_song_cross_ref`, `ai_song_tags`, or `listening_history` rows -- callers must clean those up separately (see each DAO's orphan-deletion queries). */
     @Delete
     suspend fun deleteSong(song: Song)
