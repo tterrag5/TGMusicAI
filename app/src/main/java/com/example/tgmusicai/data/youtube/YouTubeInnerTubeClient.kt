@@ -137,15 +137,24 @@ class YouTubeInnerTubeClient(private val cookieManager: InnerTubeCookieManager) 
      * Best-effort, no-login extraction of a *public* YouTube/YouTube Music playlist given its
      * URL (either host) or bare playlist ID, for users who don't want to sign in at all. Reuses
      * the same NewPipeExtractor path [YouTubeExtractor] already relies on for search rather than
-     * a second hand-rolled unauthenticated InnerTube parser. Only the first page of results is
-     * returned -- adequate for the vast majority of playlists; very large ones may be truncated.
+     * a second hand-rolled unauthenticated InnerTube parser. Follows every page (up to
+     * [MAX_CONTINUATION_PAGES]).
      */
     suspend fun fetchPublicPlaylistTracks(urlOrId: String): List<GoogleYouTubePlaylistVideo> = withContext(Dispatchers.IO) {
         val listId = extractPlaylistId(urlOrId) ?: return@withContext emptyList()
         try {
             val extractor = ServiceList.YouTube.getPlaylistExtractor("https://www.youtube.com/playlist?list=$listId")
             extractor.fetchPage()
-            extractor.initialPage.items.mapNotNull { item ->
+            // Every page, not just the first 100 (T032), bounded like the signed-in path.
+            val items = extractor.initialPage.items.toMutableList()
+            var page = extractor.initialPage
+            var pages = 1
+            while (page.hasNextPage() && pages < MAX_CONTINUATION_PAGES) {
+                page = extractor.getPage(page.nextPage)
+                items += page.items
+                pages++
+            }
+            items.mapNotNull { item ->
                 val videoId = extractVideoId(item.url) ?: return@mapNotNull null
                 GoogleYouTubePlaylistVideo(
                     videoId = videoId,
@@ -346,8 +355,23 @@ internal fun collectAllRunTexts(node: Any?, out: MutableList<String>) {
     }
 }
 
-/** Finds the next page's continuation token, if [root]'s renderer tree includes one. */
+/**
+ * Finds the next page's continuation token, if [root]'s renderer tree includes one.
+ *
+ * The list's own `continuationItemRenderer` (its last row) comes first. YouTube Music moved list
+ * paging there; a playlist page still carries a `nextContinuationData`, but that one belongs to
+ * the next *section* (suggestions) and returns no tracks, which is why imports stopped at the
+ * first 100 rows (T032; checked live on public playlists: 100 -> 182 and 1000+ tracks).
+ */
 internal fun findContinuationToken(root: JSONObject): String? {
+    val items = mutableListOf<JSONObject>()
+    collectRenderers(root, "continuationItemRenderer", items)
+    items.firstNotNullOfOrNull { item ->
+        item.optJSONObject("continuationEndpoint")
+            ?.optJSONObject("continuationCommand")
+            ?.optString("token")
+            ?.takeIf { it.isNotBlank() }
+    }?.let { return it }
     val holders = mutableListOf<JSONObject>()
     collectRenderers(root, "nextContinuationData", holders)
     return holders.firstOrNull()?.optString("continuation")?.takeIf { it.isNotBlank() }
