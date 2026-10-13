@@ -115,6 +115,12 @@ class LyricsRepository(
         .build()
 
     companion object {
+        /** LrcLib search hits within this many seconds of the track count as the same recording. */
+        private const val LRCLIB_DURATION_TOLERANCE_SEC = 4.0
+
+        /** Splits "A, B & C" / "A feat. B" / "A x B" to take the lead artist. */
+        private val LEAD_ARTIST_SPLIT = Regex("""\s*(,|&|\bfeat\.?|\bft\.?|\bx\b|/)\s*""", RegexOption.IGNORE_CASE)
+
         private fun normaliseForMatch(text: String): String =
             text.lowercase()
                 .replace(Regex("""[(\[（【][^)\]）】]*[)\]）】]"""), " ")
@@ -654,11 +660,26 @@ class LyricsRepository(
         }
 
         val query = if (cleanArtist.isNotBlank()) "$cleanArtist $cleanTitle" else cleanTitle
-        val searchUrl = "https://lrclib.net/api/search?q=${URLEncoder.encode(query, "UTF-8")}"
-        executeLrcLibSearch(searchUrl)?.let { return it }
+        executeLrcLibSearch(lrcLibSearchUrl(query), durationSec)?.let { return it }
+
+        // "A, B & C" or "A feat. B" rarely matches LRCLIB's artist field as a whole; the lead
+        // artist usually does.
+        val leadArtist = cleanArtist.split(LEAD_ARTIST_SPLIT).first().trim()
+        if (leadArtist.isNotBlank() && leadArtist != cleanArtist) {
+            executeLrcLibSearch(lrcLibSearchUrl("$leadArtist $cleanTitle"), durationSec)?.let { return it }
+        }
+
+        // Title alone, last: only accepted when the duration matches, or it is a guess.
+        if (cleanArtist.isNotBlank() && durationSec > 0) {
+            executeLrcLibSearch(lrcLibSearchUrl(cleanTitle), durationSec, requireDurationMatch = true)
+                ?.let { return it }
+        }
 
         return null
     }
+
+    private fun lrcLibSearchUrl(query: String) =
+        "https://lrclib.net/api/search?q=${URLEncoder.encode(query, "UTF-8")}"
 
     /**
      * `JSONObject.optString(key, fallback)` does NOT return [fallback] when [key] is present with
@@ -709,7 +730,12 @@ class LyricsRepository(
      * JSON array rather than a single object, so this only proceeds if the body actually starts
      * with `[`.
      */
-    private fun executeLrcLibSearch(url: String): String? {
+    /**
+     * Runs an LrcLib `/api/search` and picks the best hit: duration within
+     * [LRCLIB_DURATION_TOLERANCE_SEC] of [durationSec] first, synced over plain lyrics second,
+     * LrcLib's own order last. With [requireDurationMatch], a hit of another length is never used.
+     */
+    private fun executeLrcLibSearch(url: String, durationSec: Int = 0, requireDurationMatch: Boolean = false): String? {
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", "TGMusicAI/1.0 (https://github.com/tterrag5/TGMusicAI)")
@@ -719,8 +745,18 @@ class LyricsRepository(
             val body = response.body?.string() ?: return null
             if (!body.startsWith("[")) return null
             val jsonArray = JSONArray(body)
-            if (jsonArray.length() == 0) return null
-            return extractLyricsFromLrcLibJson(jsonArray.getJSONObject(0))
+            val hits = (0 until jsonArray.length()).map { jsonArray.getJSONObject(it) }
+            fun durationMatches(hit: JSONObject) = durationSec > 0 &&
+                kotlin.math.abs(hit.optDouble("duration", -1000.0) - durationSec) <= LRCLIB_DURATION_TOLERANCE_SEC
+            val best = hits
+                .filter { !requireDurationMatch || durationMatches(it) }
+                .filter { extractLyricsFromLrcLibJson(it) != null }
+                .sortedWith(
+                    compareByDescending<JSONObject> { durationMatches(it) }
+                        .thenByDescending { it.stringOrEmpty("syncedLyrics").isNotBlank() }
+                )
+                .firstOrNull() ?: return null
+            return extractLyricsFromLrcLibJson(best)
         }
     }
 

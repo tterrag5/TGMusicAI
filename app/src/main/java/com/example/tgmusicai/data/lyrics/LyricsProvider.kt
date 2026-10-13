@@ -13,7 +13,9 @@ enum class LyricsProvider(val id: String, val label: String, val enabledByDefaul
     NETEASE("netease", "NetEase", true),
     KUGOU("kugou", "KuGou", true),
     FILE_TAGS("tags", "Lyrics saved in the file", true),
-    YOUTUBE_CAPTIONS("captions", "YouTube Captions (Auto)", false),
+    // On by default, last: the final fallback that used to always run before the provider list
+    // existed (T052). It only runs when every source above came back empty.
+    YOUTUBE_CAPTIONS("captions", "YouTube Captions (Auto)", true),
 }
 
 data class LyricsProviderSetting(val provider: LyricsProvider, val enabled: Boolean)

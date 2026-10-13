@@ -14,7 +14,7 @@ import org.junit.Test
 class LyricsProviderSettingsTest {
 
     @Test
-    fun defaultsFollowMorpheOrderWithCaptionsOff() {
+    fun defaultsFollowMorpheOrderWithCaptionsLast() {
         val defaults = LyricsProviderSettings.DEFAULT
         assertEquals(
             listOf(
@@ -24,8 +24,8 @@ class LyricsProviderSettingsTest {
             ),
             defaults.map { it.provider },
         )
-        assertFalse(defaults.last().enabled)
-        assertTrue(defaults.dropLast(1).all { it.enabled })
+        // Captions are the last-resort fallback, on by default (T052).
+        assertTrue(defaults.all { it.enabled })
     }
 
     @Test
