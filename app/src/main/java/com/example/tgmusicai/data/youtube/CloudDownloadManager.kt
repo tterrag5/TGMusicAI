@@ -355,7 +355,7 @@ class CloudDownloadManager(
             )
 
             Log.d(LOG_TAG, "Extracting audio stream candidates for video ID '$videoId'...")
-            val candidateStreams = youtubeExtractor.extractAudioStreams(videoId)
+            var candidateStreams = youtubeExtractor.extractAudioStreams(videoId)
             if (candidateStreams.isEmpty()) {
                 val errorMsg = "Failed to extract audio stream for video ID '$videoId': No stream URLs resolved across fallback endpoints"
                 Log.e(LOG_TAG, errorMsg)
@@ -386,7 +386,17 @@ class CloudDownloadManager(
             var downloadSucceeded = false
             var lastFailureReason = "Unknown network error"
 
-            // Step 4: Stream download with automatic retry on secondary endpoints
+            // Step 4: Stream download with automatic retry on secondary endpoints. The public
+            // mirrors are only asked (second pass) when every direct stream failed.
+            for (pass in 0..1) {
+            if (pass == 1) {
+                if (downloadSucceeded) break
+                val tried = candidateStreams.map { it.url }.toSet()
+                candidateStreams = youtubeExtractor.extractAudioStreams(videoId, includeMirrors = true)
+                    .filter { it.url !in tried }
+                if (candidateStreams.isEmpty()) break
+                Log.d(LOG_TAG, "Direct streams failed for '$videoId'; trying ${candidateStreams.size} mirror stream(s)")
+            }
             for ((index, audioStream) in candidateStreams.withIndex()) {
                 val fileName = "${sanitizedUploader}_${sanitizedTitle}_${videoId}.${audioStream.format}"
                 val outputFile = File(musicDir, fileName)
@@ -396,7 +406,7 @@ class CloudDownloadManager(
                 // If this candidate's expected path doesn't match, treat it as a fresh download
                 // (deleting any stale partial rather than risking corrupting it with mismatched
                 // data).
-                val isResumeCandidate = index == 0 && resumeFrom != null && resumeFrom == outputFile.path
+                val isResumeCandidate = pass == 0 && index == 0 && resumeFrom != null && resumeFrom == outputFile.path
                 val alreadyDownloadedBytes = if (isResumeCandidate && outputFile.exists()) outputFile.length() else 0L
                 if (!isResumeCandidate && outputFile.exists()) {
                     outputFile.delete()
@@ -417,12 +427,13 @@ class CloudDownloadManager(
                     )
                 )
 
+                // Always a Range header, even from byte 0: googlevideo throttles a plain GET to about
+                // playback speed (measured: 1.3 MB in 40 s), while the same URL with a Range answers
+                // 206 at full speed (2.2 MB in 0.3-0.5 s). T033.
                 val requestBuilder = Request.Builder()
                     .url(audioStream.url)
                     .addHeader("User-Agent", YouTubeExtractor.REALISTIC_USER_AGENT)
-                if (alreadyDownloadedBytes > 0L) {
-                    requestBuilder.addHeader("Range", "bytes=$alreadyDownloadedBytes-")
-                }
+                    .addHeader("Range", "bytes=$alreadyDownloadedBytes-")
                 val request = requestBuilder.build()
 
                 var response: okhttp3.Response? = null
@@ -453,16 +464,21 @@ class CloudDownloadManager(
                     body.byteStream().use { inputStream ->
                         RandomAccessFile(outputFile, "rw").use { raf ->
                             raf.seek(startOffset)
-                            val buffer = ByteArray(8192)
+                            val buffer = ByteArray(64 * 1024)
                             var bytesRead: Int
                             var totalBytesRead = startOffset
+                            // Progress goes out per whole percent, not per buffer: every update is
+                            // a StateFlow emission the UI recomposes for.
+                            var lastPercent = -1
 
                             while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                                 currentCoroutineContext().ensureActive() // let pause/cancel interrupt promptly
                                 raf.write(buffer, 0, bytesRead)
                                 totalBytesRead += bytesRead
 
-                                if (totalExpected > 0) {
+                                val percent = if (totalExpected > 0) (totalBytesRead * 100 / totalExpected).toInt() else -1
+                                if (totalExpected > 0 && percent != lastPercent) {
+                                    lastPercent = percent
                                     val fraction = totalBytesRead.toFloat() / totalExpected.toFloat()
                                     updateProgress(
                                         videoId,
@@ -530,7 +546,18 @@ class CloudDownloadManager(
 
                     MediaScanner.scanMediaStore(context, songDao)
 
-                    // Step 6: Cover Art Scraping
+                    updateProgress(
+                        videoId,
+                        DownloadProgressState(
+                            videoId = videoId,
+                            status = DownloadStatus.COMPLETED,
+                            progressFraction = 1.0f,
+                            localUri = localUri
+                        )
+                    )
+
+                    // Step 6: Cover Art Scraping -- after COMPLETED, so the song shows as downloaded (and
+                    // plays from disk) without waiting on an artwork lookup.
                     val scraper = coverArtScraper ?: try {
                         val db = AppDatabase.getDatabase(context)
                         val repository = MusicRepository(
@@ -554,16 +581,6 @@ class CloudDownloadManager(
                         }
                     }
 
-                    updateProgress(
-                        videoId,
-                        DownloadProgressState(
-                            videoId = videoId,
-                            status = DownloadStatus.COMPLETED,
-                            progressFraction = 1.0f,
-                            localUri = localUri
-                        )
-                    )
-
                     Log.d(LOG_TAG, "Successfully downloaded and indexed video ID '$videoId' ('$title') -> $localUri")
                     pendingDownloadDao?.deleteByVideoId(videoId)
                     downloadSucceeded = true
@@ -580,6 +597,7 @@ class CloudDownloadManager(
                 } finally {
                     response?.close()
                 }
+            }
             }
 
             if (!downloadSucceeded) {

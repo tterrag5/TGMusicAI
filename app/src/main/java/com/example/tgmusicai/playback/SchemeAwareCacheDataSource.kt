@@ -55,6 +55,11 @@ fun youTubeHttpDataSourceFactory(): DefaultHttpDataSource.Factory =
         .setUserAgent(YouTubeExtractor.REALISTIC_USER_AGENT)
         // googlevideo redirects between its own hosts, sometimes across protocols.
         .setAllowCrossProtocolRedirects(true)
+        // Media3 sends no Range header for a read from byte 0 to the end (playback start, and the
+        // whole-track prefetch), and googlevideo throttles exactly those to about playback speed.
+        // With a Range it answers 206 at full speed (measured 0.3 s vs 40 s+ for 2 MB). Any read
+        // that starts elsewhere sets its own Range, which replaces this default. T033.
+        .setDefaultRequestProperties(mapOf("Range" to "bytes=0-"))
 
 /** [DataSource.Factory] for [SchemeAwareCacheDataSource] -- see its doc comment. */
 class SchemeAwareCacheDataSourceFactory(context: Context, cache: SimpleCache) : DataSource.Factory {

@@ -651,11 +651,12 @@ class YouTubeExtractor {
     }
 
     /**
-     * Extracts all candidate audio stream URLs across all fallback engines, for callers (like
-     * [CloudDownloadManager]) that want to try multiple candidates in sequence until one actually
-     * downloads successfully. Execution order: Piped, then Invidious.
+     * Candidate audio stream URLs for callers (like [CloudDownloadManager]) that try them in order
+     * until one downloads. NewPipe's direct streams only, unless [includeMirrors] or NewPipe found
+     * nothing: the Piped / Invidious public mirrors are slow and mostly failing (HTTP 4xx/5xx,
+     * connect timeouts), and asking all of them up front added ~20 s to every download (T033).
      */
-    suspend fun extractAudioStreams(videoId: String): List<YouTubeAudioStream> = withContext(Dispatchers.IO) {
+    suspend fun extractAudioStreams(videoId: String, includeMirrors: Boolean = false): List<YouTubeAudioStream> = withContext(Dispatchers.IO) {
         val cleanId = extractVideoId(videoId) ?: videoId
         val candidateStreams = mutableListOf<YouTubeAudioStream>()
 
@@ -668,6 +669,8 @@ class YouTubeExtractor {
         } catch (e: Exception) {
             Log.e("TGMusicCloud", "Tier 0 NewPipe extractions failed for $cleanId: ${e.message}", e)
         }
+        val direct = candidateStreams.filter { it.url.isNotBlank() && isAudioMimeOrFormat(it.format, it.format) }
+        if (direct.isNotEmpty() && !includeMirrors) return@withContext direct.distinctBy { it.url }
 
         try {
             candidateStreams.addAll(tryPipedStreamExtractions(cleanId))
