@@ -145,6 +145,7 @@ fun MainScreen(
     var showQueueSheet by remember { mutableStateOf(false) }
     val playingFrom by playerViewModel.playingFrom.collectAsState()
     val isCurrentDisliked by playerViewModel.isCurrentSongDisliked.collectAsState()
+    val isCurrentLiked by playerViewModel.isCurrentSongLiked.collectAsState()
 
     val userPlaylists by playlistViewModel.playlists.collectAsState()
     val playlistCoverArtwork by playlistViewModel.playlistCoverArtwork.collectAsState()
@@ -485,6 +486,8 @@ fun MainScreen(
                         onShowQueue = { showQueueSheet = true },
                         onDislikeClick = playerViewModel::toggleDislikeCurrentSong,
                         isDisliked = isCurrentDisliked,
+                        onLikeClick = playerViewModel::toggleLikeCurrentSong,
+                        isLiked = isCurrentLiked,
                     )
 
                     NavigationBar(

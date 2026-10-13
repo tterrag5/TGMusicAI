@@ -21,6 +21,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ThumbDownOffAlt
 import androidx.compose.material.icons.rounded.ThumbDown
+import androidx.compose.material.icons.rounded.ThumbUp
+import androidx.compose.material.icons.rounded.ThumbUpOffAlt
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -74,6 +76,8 @@ fun MiniPlayer(
     onShowQueue: () -> Unit = {},
     onDislikeClick: (() -> Unit)? = null,
     isDisliked: Boolean = false,
+    onLikeClick: (() -> Unit)? = null,
+    isLiked: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     AnimatedVisibility(
@@ -196,6 +200,17 @@ fun MiniPlayer(
                                 )
                             }
                         } else {
+                            // Like then Dislike, the same order as the full-screen player.
+                            if (onLikeClick != null) {
+                                IconButton(onClick = onLikeClick) {
+                                    Icon(
+                                        imageVector = if (isLiked) Icons.Rounded.ThumbUp else Icons.Rounded.ThumbUpOffAlt,
+                                        contentDescription = if (isLiked) "Unlike" else "Like",
+                                        tint = if (isLiked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
                             if (onDislikeClick != null) {
                                 IconButton(onClick = onDislikeClick) {
                                     Icon(
