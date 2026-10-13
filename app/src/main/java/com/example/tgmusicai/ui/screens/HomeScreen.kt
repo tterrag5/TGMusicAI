@@ -60,6 +60,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.foundation.lazy.rememberLazyListState
+import com.example.tgmusicai.ui.components.isGenericShelf
+import com.example.tgmusicai.ui.components.HomeSectionHeading
+import com.example.tgmusicai.ui.components.CoverShelf
+import com.example.tgmusicai.ui.components.CoverItem
+import com.example.tgmusicai.ui.components.QuickPicksShelf
+import com.example.tgmusicai.ui.components.QuickPick
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -99,7 +108,11 @@ fun HomeScreen(
     onOpenDrawer: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
     onPlayCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {},
-    onDownloadCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {}
+    onDownloadCloudResult: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit = {},
+    /** YouTube Music's personalised home shelves and the endless "For you" feed (was the Discover tab). */
+    discoverViewModel: com.example.tgmusicai.ui.viewmodel.DiscoverViewModel? = null,
+    onPlayAllCloud: (List<com.example.tgmusicai.data.youtube.YouTubeSearchResult>) -> Unit = {},
+    onOpenAlbum: (com.example.tgmusicai.data.youtube.YouTubeAlbumRef) -> Unit = {},
 ) {
     val isOnline by homeViewModel.isOnline.collectAsState()
     val isDownloadedOnly by homeViewModel.isDownloadedOnly.collectAsState()
@@ -112,6 +125,23 @@ fun HomeScreen(
     val recommendedSongs by homeViewModel.recommendedSongs.collectAsState()
     val cloudRecommendations by homeViewModel.cloudRecommendations.collectAsState()
     val isBackupLoading by homeViewModel.isBackupLoading.collectAsState()
+    val ytHomeShelves by (discoverViewModel?.homeShelves ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList())).collectAsState()
+    val feedTracks by (discoverViewModel?.feedTracks ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList())).collectAsState()
+    val isLoadingFeed by (discoverViewModel?.isLoadingFeed ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+    LaunchedEffect(discoverViewModel) { discoverViewModel?.loadDiscover() }
+    // Only what YouTube Music picked for this user: no charts, trending or mood shelves.
+    val personalShelves = remember(ytHomeShelves) { ytHomeShelves.filterNot { isGenericShelf(it.title) } }
+    val homeListState = rememberLazyListState()
+    // The endless "For you" feed pages in as the end of the list comes into view.
+    val nearEnd by remember {
+        derivedStateOf {
+            val last = homeListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+            last >= homeListState.layoutInfo.totalItemsCount - 6
+        }
+    }
+    LaunchedEffect(nearEnd, feedTracks.size) {
+        if (nearEnd) discoverViewModel?.loadMoreFeed()
+    }
 
     var songPendingRemoveDownload by remember { mutableStateOf<Song?>(null) }
 
@@ -214,6 +244,7 @@ fun HomeScreen(
             }
 
             LazyColumn(
+                state = homeListState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
@@ -222,17 +253,17 @@ fun HomeScreen(
                 item {
                     SectionTitle(title = "Speed Dial", icon = Icons.Rounded.PushPin)
 
-                    if (pinnedSongs.isEmpty() && pinnedPlaylists.isEmpty()) {
-                        Text(
-                            text = "No pinned items. Pin your favorites for quick access!",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                        )
-                    } else {
-                        val speedDialItems: List<SpeedDialItem> =
+                    // Like YT Music's Speed dial it is never empty: Liked Music, then what the user
+                    // pinned, then what they play most, up to three pages of nine.
+                    val likedMusic = smartPlaylists.firstOrNull { it.name == "Liked Music" }
+                    val pinnedSongIds = pinnedSongs.map { it.id }.toSet()
+                    val speedDialItems: List<SpeedDialItem> = (
+                        listOfNotNull(likedMusic?.takeIf { liked -> pinnedPlaylists.none { it.playlistId == liked.playlistId } }?.let { SpeedDialItem.PlaylistItem(it) }) +
                             pinnedPlaylists.map { SpeedDialItem.PlaylistItem(it) } +
-                                pinnedSongs.map { SpeedDialItem.SongItem(it) }
+                            pinnedSongs.map { SpeedDialItem.SongItem(it) } +
+                            mostPlayedSongs.map { it.song }.filter { it.id !in pinnedSongIds }.map { SpeedDialItem.SongItem(it) }
+                        ).take(27)
+                    if (speedDialItems.isNotEmpty()) {
                         val pages = speedDialItems.chunked(9)
                         val pagerState = rememberPagerState(pageCount = { pages.size })
 
@@ -264,7 +295,7 @@ fun HomeScreen(
                                                     )
                                                     is SpeedDialItem.SongItem -> PinnedSongCard(
                                                         song = cellItem.song,
-                                                        onPlay = { playerViewModel.playSong(cellItem.song, queue = pinnedSongs) },
+                                                        onPlay = { playerViewModel.playSong(cellItem.song, queue = speedDialItems.filterIsInstance<SpeedDialItem.SongItem>().map { it.song }) },
                                                         onUnpin = { homeViewModel.togglePinSong(cellItem.song) },
                                                         onRemoveDownload = { songPendingRemoveDownload = cellItem.song },
                                                         modifier = Modifier.fillMaxWidth()
@@ -336,53 +367,50 @@ fun HomeScreen(
                     }
                 }
 
-                // Section 2b: MADE FOR YOU
-                // Hidden rather than shown empty: with nothing played yet the engine has no taste
-                // to work from, and an empty "Made for you" reads as broken.
+                // Section 2b: MADE FOR YOU -- our own recommender, over the library.
+                // Hidden rather than shown empty: with nothing played yet the engine has no taste.
                 if (recommendedSongs.size >= MIN_RECOMMENDATIONS_TO_SHOW) {
-                    item {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        SectionTitle(title = "Made for you", icon = Icons.Rounded.AutoAwesome)
-
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            items(recommendedSongs) { song ->
-                                SongCardItem(
-                                    song = song,
-                                    subtitle = "Song • ${song.artist}",
-                                    onPlay = { playerViewModel.playSong(song, queue = recommendedSongs) },
-                                    onPinToggle = { homeViewModel.togglePinSong(song) },
-                                    onRemoveDownload = { songPendingRemoveDownload = song }
-                                )
-                            }
-                        }
+                    item(key = "made_for_you") {
+                        HomeSectionHeading("Made for you", onPlayAll = { playerViewModel.playSong(recommendedSongs.first(), queue = recommendedSongs) })
+                        QuickPicksShelf(recommendedSongs.map { song ->
+                            QuickPick(
+                                key = "mfy_${song.id}",
+                                title = song.title,
+                                subtitle = song.artist,
+                                artworkUrl = com.example.tgmusicai.ui.util.FormatUtils.cacheBustedArtworkUri(song.artworkUri),
+                                onClick = { playerViewModel.playSong(song, queue = recommendedSongs) },
+                            )
+                        })
                     }
                 }
 
-                // Section 2c: RECOMMENDED FOR YOU (cloud)
-                // Music the library does not hold yet, found from the artists the user has been
-                // playing. Absent rather than empty for the same reason "Made for you" is: on a
-                // new install, offline, or when YouTube Music answers with nothing, there is no
-                // row at all instead of a heading over blank space.
+                // Section 2c: RECOMMENDED FOR YOU -- our own recommender, music not in the library yet.
                 if (cloudRecommendations.size >= MIN_RECOMMENDATIONS_TO_SHOW) {
-                    item {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        SectionTitle(title = "Recommended for you", icon = Icons.Rounded.Explore)
+                    item(key = "recommended_for_you") {
+                        HomeSectionHeading("Recommended for you", onPlayAll = { onPlayAllCloud(cloudRecommendations) })
+                        QuickPicksShelf(cloudRecommendations.map { it.toQuickPick(onPlayCloudResult, onDownloadCloudResult) })
+                    }
+                }
 
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            items(cloudRecommendations, key = { it.videoId }) { result ->
-                                CloudSongCardItem(
-                                    result = result,
-                                    onPlay = { onPlayCloudResult(result) },
-                                    onDownload = { onDownloadCloudResult(result) }
-                                )
-                            }
-                        }
+                // Section 2d: YouTube Music's own personalised shelves (Quick picks, mixes, ...),
+                // fetched straight from its servers like Discover did. Songs use the Quick-picks
+                // layout; albums, playlists and mixes are a row of covers.
+                personalShelves.forEach { shelf ->
+                    item(key = "yt_${shelf.title}") {
+                        HomeSectionHeading(
+                            shelf.title,
+                            onPlayAll = if (shelf.tracks.size > 1) ({ onPlayAllCloud(shelf.tracks) }) else null
+                        )
+                        QuickPicksShelf(shelf.tracks.map { it.toQuickPick(onPlayCloudResult, onDownloadCloudResult) })
+                        CoverShelf(shelf.items.map { ref ->
+                            CoverItem(
+                                key = "yt_${shelf.title}_${ref.browseId}",
+                                title = ref.title,
+                                subtitle = ref.subtitle,
+                                artworkUrl = ref.thumbnailUrl,
+                                onClick = { onOpenAlbum(ref) },
+                            )
+                        })
                     }
                 }
 
@@ -434,6 +462,22 @@ fun HomeScreen(
                         }
                     }
                 }
+
+                // Section 5: FOR YOU -- our own endless feed, walking YouTube Music's artist graph
+                // out from what the user plays (CloudFeedPager). Pages in near the end.
+                if (feedTracks.isNotEmpty()) {
+                    item(key = "for_you_heading") { HomeSectionHeading("For you") }
+                    items(feedTracks, key = { "feed_${it.videoId}" }) { track ->
+                        QuickPicksShelf(listOf(track.toQuickPick(onPlayCloudResult, onDownloadCloudResult)), rowsPerColumn = 1)
+                    }
+                    if (isLoadingFeed) {
+                        item(key = "feed_loading") {
+                            Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -474,18 +518,12 @@ fun SectionTitle(title: String, icon: androidx.compose.ui.graphics.vector.ImageV
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(20.dp)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
+        // YT Music's headings are plain bold text; [icon] is kept for existing callers.
         Text(
             text = title,
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface
+            color = MaterialTheme.colorScheme.onBackground
         )
     }
 }
@@ -1005,3 +1043,15 @@ fun SmartPlaylistCard(
         }
     }
 }
+
+private fun com.example.tgmusicai.data.youtube.YouTubeSearchResult.toQuickPick(
+    onPlay: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit,
+    onDownload: (com.example.tgmusicai.data.youtube.YouTubeSearchResult) -> Unit,
+) = QuickPick(
+    key = "yt_$videoId",
+    title = title,
+    subtitle = uploader,
+    artworkUrl = thumbnailUri,
+    onClick = { onPlay(this) },
+    onDownload = { onDownload(this) },
+)

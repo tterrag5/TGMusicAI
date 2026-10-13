@@ -559,7 +559,15 @@ fun MainScreen(
                                             },
                                             onDownloadCloudResult = { result ->
                                                 youTubeViewModel.downloadTrack(result)
-                                            }
+                                            },
+                                            discoverViewModel = discoverViewModel,
+                                            onPlayAllCloud = { tracks ->
+                                                youTubeViewModel.playAll(tracks, mediaControllerManager)
+                                                playerViewModel.expandNowPlaying()
+                                            },
+                                            onOpenAlbum = { album ->
+                                                backStack.add(Screen.AlbumDetail(album.browseId, album.title))
+                                            },
                                         )
                                     }
                                     is Screen.ArtistDetail -> {
