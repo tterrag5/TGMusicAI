@@ -743,6 +743,8 @@ class PlaybackService : MediaLibraryService() {
          * before the ceiling are kept.
          */
         private const val RECOMMENDATION_RESOLVE_TIMEOUT_MS = 60_000L
+        /** Streams resolved at once while topping up the queue. */
+        private const val RECOMMENDATION_RESOLVE_PARALLELISM = 3
 
         // Automotive media tree category IDs (children of ROOT_ID, surfaced via onGetChildren).
         const val ROOT_ID = "root"
@@ -939,29 +941,47 @@ class PlaybackService : MediaLibraryService() {
         val seedTrack = if (seedVideoId != null) null else queued.lastOrNull()?.mediaMetadata?.let { metadata ->
             metadata.title?.toString()?.let { title -> title to metadata.artist?.toString().orEmpty() }
         }
+        // Tracks go into the queue one at a time, as each is ready, rather than as one batch at
+        // the end: a batch meant 20+ s of nothing queued after the current song while every
+        // stream resolved, and skipping in that window had nowhere to go. Nothing here runs on
+        // the main thread except the single addMediaItem per track.
         autoplayTopUpJob = serviceScope.launch {
             val local = database.songDao().getRandomDownloadedSongs(need)
                 .filter { it.mediaUri !in existingIds && !com.example.tgmusicai.data.local.DislikeStore.isDisliked(it) }
-            val cloud = resolvedRecommendations(
-                AutoplayPlanner.cloudCount(need, local.size),
-                existingIds,
-                existingVideoIds,
-                seedVideoId,
-                seedTrack
-            )
-            val candidates = AutoplayPlanner.mix(cloud, local, need)
-            if (candidates.isEmpty()) return@launch
-            withContext(Dispatchers.Main) {
+            val cloudWanted = AutoplayPlanner.cloudCount(need, local.size)
+            val pendingLocal = ArrayDeque(local)
+            // Local tracks per cloud track, so cloud ones stay spread through the queue.
+            val localPerCloud = if (cloudWanted == 0) 0 else ((need - cloudWanted) / cloudWanted).coerceAtLeast(1)
+            var added = 0
+            var cloudAdded = 0
+            var localAdded = 0
+
+            suspend fun append(song: Song): Boolean = withContext(Dispatchers.Main) {
                 // Repeat may have been switched on while this ran; appending then would be noise.
-                if (exoPlayer.repeatMode != Player.REPEAT_MODE_OFF) return@withContext
-                val items = candidates.map { song -> autoplayMediaItem(song) }
-                exoPlayer.addMediaItems(items)
-                android.util.Log.d(
-                    "PlaybackService",
-                    "Autoplay topped up the queue with ${items.size} song(s): " +
-                        "${candidates.count { it in cloud }} recommended, ${candidates.count { it in local }} local"
-                )
+                if (exoPlayer.repeatMode != Player.REPEAT_MODE_OFF || added >= need) return@withContext false
+                exoPlayer.addMediaItem(autoplayMediaItem(song))
+                added++
+                true
             }
+            suspend fun appendLocal(count: Int) {
+                repeat(count) {
+                    val song = pendingLocal.removeFirstOrNull() ?: return
+                    if (append(song)) localAdded++
+                }
+            }
+
+            // Something playable next straight away, before any network round trip.
+            appendLocal(1)
+            streamRecommendations(cloudWanted, existingIds, existingVideoIds, seedVideoId, seedTrack) { song ->
+                if (append(song)) cloudAdded++
+                appendLocal(localPerCloud)
+            }
+            // Whatever cloud could not supply (offline, timeouts), local fills.
+            appendLocal(need - added)
+            android.util.Log.d(
+                "PlaybackService",
+                "Autoplay topped up the queue with $added song(s): $cloudAdded recommended, $localAdded local"
+            )
         }
     }
 
@@ -1030,10 +1050,28 @@ class PlaybackService : MediaLibraryService() {
         seedVideoId: String? = null,
         seedTrack: Pair<String, String>? = null
     ): List<Song> {
-        if (limit <= 0 || downloadedOnly) return emptyList()
-        // Outside the timeout, so a pass that runs out of time still keeps what it resolved.
         val resolved = mutableListOf<Song>()
-        return try {
+        streamRecommendations(limit, excludedMediaIds, excludedVideoIds, seedVideoId, seedTrack) { resolved += it }
+        return resolved
+    }
+
+    /**
+     * [resolvedRecommendations], but hands each track to [onResolved] the moment its stream is
+     * resolved instead of waiting for all of them. Up to [RECOMMENDATION_RESOLVE_PARALLELISM]
+     * streams resolve at once; [onResolved] is called one track at a time, in the order they finish.
+     */
+    private suspend fun streamRecommendations(
+        limit: Int,
+        excludedMediaIds: Set<String>,
+        excludedVideoIds: Set<String> = emptySet(),
+        seedVideoId: String? = null,
+        seedTrack: Pair<String, String>? = null,
+        onResolved: suspend (Song) -> Unit,
+    ) {
+        if (limit <= 0 || downloadedOnly) return
+        val accepted = mutableSetOf<String>()
+        val gate = Mutex()
+        try {
             withTimeoutOrNull(RECOMMENDATION_RESOLVE_TIMEOUT_MS) {
                 val radio = when {
                     seedVideoId != null ->
@@ -1049,19 +1087,32 @@ class PlaybackService : MediaLibraryService() {
                 // does not append the same few tracks each time; the cached list barely changes.
                 // The radio is not: its order is the point, and its seed changes every time.
                 val ordered = (radio + tracks.shuffled()).distinctBy { it.videoId }
-                for (track in ordered) {
-                    if (resolved.size >= limit) break
-                    if (track.videoId in excludedVideoIds || com.example.tgmusicai.data.local.DislikeStore.isDislikedVideo(track.videoId)) continue
-                    val song = resolveRecommendation(track) ?: continue
-                    if (song.mediaUri in excludedMediaIds) continue
-                    if (resolved.any { it.mediaUri == song.mediaUri }) continue
-                    resolved += song
+                    .filterNot { it.videoId in excludedVideoIds || com.example.tgmusicai.data.local.DislikeStore.isDislikedVideo(it.videoId) }
+                val permits = kotlinx.coroutines.sync.Semaphore(RECOMMENDATION_RESOLVE_PARALLELISM)
+                kotlinx.coroutines.coroutineScope {
+                    for (track in ordered) {
+                        launch {
+                            permits.acquire()
+                            try {
+                                if (gate.withLock { accepted.size >= limit }) return@launch
+                                val song = resolveRecommendation(track) ?: return@launch
+                                gate.withLock {
+                                    if (accepted.size >= limit || song.mediaUri in excludedMediaIds || !accepted.add(song.mediaUri)) {
+                                        return@launch
+                                    }
+                                    onResolved(song)
+                                }
+                            } finally {
+                                permits.release()
+                            }
+                        }
+                    }
                 }
             }
-            resolved.toList()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Throwable) {
             android.util.Log.w("PlaybackService", "Could not resolve autoplay recommendations", e)
-            resolved.toList()
         }
     }
 
