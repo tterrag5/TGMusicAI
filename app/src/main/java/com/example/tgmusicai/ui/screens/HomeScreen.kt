@@ -76,6 +76,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -264,14 +267,21 @@ fun HomeScreen(
                     if (speedDialItems.isNotEmpty()) {
                         val pages = speedDialItems.chunked(9)
                         val pagerState = rememberPagerState(pageCount = { pages.size })
+                        // Every page is as tall as the tallest one seen (a full 3x3), so swiping to
+                        // a short last page doesn't shrink the pager and reflow the grid (T049).
+                        var speedDialPageHeightPx by remember(pages.size) { mutableIntStateOf(0) }
+                        val density = androidx.compose.ui.platform.LocalDensity.current
 
                         HorizontalPager(
                             state = pagerState,
+                            verticalAlignment = Alignment.Top,
                             modifier = Modifier.fillMaxWidth()
                         ) { pageIndex ->
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .heightIn(min = with(density) { speedDialPageHeightPx.toDp() })
+                                    .onSizeChanged { speedDialPageHeightPx = maxOf(speedDialPageHeightPx, it.height) }
                                     .padding(horizontal = 16.dp)
                             ) {
                                 for (rowItems in pages[pageIndex].chunked(3)) {
