@@ -248,6 +248,8 @@ private class FakeSongDao : SongDao {
     override suspend fun deleteSong(song: Song) {
         songs.remove(song)
     }
+    override suspend fun deleteSearchPlaceholderPlaylistEntries() {}
+    override suspend fun deleteSearchPlaceholderRows() { songs.removeAll { it.mediaUri.startsWith("voice-search:") } }
 
     override suspend fun updateSongLyrics(id: Long, lyrics: String?) {
         val index = songs.indexOfFirst { it.id == id }

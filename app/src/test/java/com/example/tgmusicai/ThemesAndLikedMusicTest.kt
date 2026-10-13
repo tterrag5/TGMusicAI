@@ -208,6 +208,8 @@ private class FakeTestSongDao : SongDao {
     override fun getRecentlyAddedSongs(limit: Int): Flow<List<Song>> = flowOf(songs.take(limit))
     override fun getUnplayedSongs(): Flow<List<Song>> = flowOf(songs)
     override suspend fun deleteSong(song: Song) { songs.remove(song) }
+    override suspend fun deleteSearchPlaceholderPlaylistEntries() {}
+    override suspend fun deleteSearchPlaceholderRows() { songs.removeAll { it.mediaUri.startsWith("voice-search:") } }
     override suspend fun updateSongLyrics(id: Long, lyrics: String?) {}
     override suspend fun updateSongArtwork(id: Long, artworkUri: String?) {}
     override suspend fun updateSongArtist(id: Long, artist: String) {
