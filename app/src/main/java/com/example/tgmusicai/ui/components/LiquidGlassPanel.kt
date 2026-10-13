@@ -132,3 +132,55 @@ fun LiquidGlassPanel(
         content()
     }
 }
+
+/**
+ * The full-screen version of [LiquidGlassPanel], behind the player and the lyrics sheet: the
+ * cover art fills the screen, mildly blurred, under a dark see-through layer that deepens toward
+ * the bottom so the controls stay readable. No rim or sheen; it is the whole screen, not a pane.
+ */
+@Composable
+fun LiquidGlassBackdrop(
+    artworkUri: String?,
+    fallbackColors: List<Color>,
+    modifier: Modifier = Modifier,
+    blurRadius: Dp = 14.dp,
+) {
+    val canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+        val backdrop = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                scaleX = 1.1f
+                scaleY = 1.1f
+            }
+            .then(if (canBlur) Modifier.blur(blurRadius) else Modifier)
+        if (!artworkUri.isNullOrBlank()) {
+            AsyncImage(
+                model = artworkUri,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = backdrop,
+            )
+        } else {
+            Box(
+                modifier = backdrop.background(
+                    Brush.verticalGradient(fallbackColors.ifEmpty { listOf(Color(0xFF303040), Color(0xFF101018)) })
+                )
+            )
+        }
+        val tint = if (canBlur) 0f else 0.1f
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Black.copy(alpha = 0.42f + tint),
+                            Color.Black.copy(alpha = 0.55f + tint),
+                            Color.Black.copy(alpha = 0.82f),
+                        )
+                    )
+                )
+        )
+    }
+}

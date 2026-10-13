@@ -76,7 +76,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -180,12 +179,20 @@ fun LyricsSheet(
         }
     }
 
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
             .onSizeChanged { sheetHeight = it.height }
             .offset { IntOffset(0, dragOffset.value.roundToInt()) }
-            .background(Brush.verticalGradient(listOf(tint, Color.Black)))
+    ) {
+    // Same liquid glass as the player: the cover art, mildly blurred, under a dark see-through layer.
+    LiquidGlassBackdrop(
+        artworkUri = FormatUtils.cacheBustedArtworkUri(song?.artworkUri),
+        fallbackColors = listOf(tint, Color.Black),
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
             .nestedScroll(pullToClose)
@@ -376,6 +383,7 @@ fun LyricsSheet(
                 }
             }
         }
+    }
     }
 }
 

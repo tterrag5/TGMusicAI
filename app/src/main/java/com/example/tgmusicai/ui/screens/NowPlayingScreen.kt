@@ -305,8 +305,9 @@ fun NowPlayingScreen(
         )
     }
 
-    // YT Music's player: the cover's colour washing down into black behind everything, rather
-    // than a grey surface box. Always dark, whatever the app theme, so text and icons are light.
+    // YT Music's player layout over a liquid-glass backdrop of the cover art (the colours below are
+    // the fallback when there is no art). Always dark, whatever the app theme, so text and icons
+    // are light.
     val playerTop = androidx.compose.ui.graphics.lerp(ambientPrimary, Color.Black, 0.35f)
     val playerMid = androidx.compose.ui.graphics.lerp(ambientPrimary, Color.Black, 0.78f)
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -319,11 +320,12 @@ fun NowPlayingScreen(
             surfaceContainerHigh = Color.White.copy(alpha = 0.12f),
         )
     ) {
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(playerTop, playerMid, Color.Black)))
-    ) {
+    Box(modifier = modifier.fillMaxSize()) {
+    // Liquid glass: the cover art behind everything, mildly blurred under a dark see-through layer.
+    com.example.tgmusicai.ui.components.LiquidGlassBackdrop(
+        artworkUri = FormatUtils.cacheBustedArtworkUri(currentSong?.artworkUri),
+        fallbackColors = listOf(playerTop, playerMid, Color.Black),
+    )
     Scaffold(
         topBar = {
             TopAppBar(
