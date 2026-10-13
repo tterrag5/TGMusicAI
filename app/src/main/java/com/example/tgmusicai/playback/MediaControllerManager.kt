@@ -77,6 +77,10 @@ class MediaControllerManager(
     private val _playlist = MutableStateFlow<List<Song>>(emptyList())
     val playlist: StateFlow<List<Song>> = _playlist.asStateFlow()
 
+    /** Media URIs of the queue entries autoplay appended (see [SongMediaExtras.isAutoplay]). */
+    private val _autoplayMediaUris = MutableStateFlow<Set<String>>(emptySet())
+    val autoplayMediaUris: StateFlow<Set<String>> = _autoplayMediaUris.asStateFlow()
+
     private val _shuffleMode = MutableStateFlow(false)
     val shuffleMode: StateFlow<Boolean> = _shuffleMode.asStateFlow()
 
@@ -291,8 +295,10 @@ class MediaControllerManager(
         val count = player.mediaItemCount
         if (count == 0) return
         val previous = currentSongList
+        val autoplay = mutableSetOf<String>()
         val updated = (0 until count).map { index ->
             val item = player.getMediaItemAt(index)
+            if (SongMediaExtras.isAutoplay(item.mediaMetadata.extras)) autoplay += item.mediaId
             previous.getOrNull(index)?.takeIf { it.mediaUri == item.mediaId }
                 ?: previous.find { it.mediaUri == item.mediaId }
                 ?: run {
@@ -308,6 +314,7 @@ class MediaControllerManager(
         }
         currentSongList = updated
         _playlist.value = updated
+        _autoplayMediaUris.value = autoplay
     }
 
     // Real-listen play/listen-time tracking used to live here, but this manager's CoroutineScope
@@ -490,6 +497,7 @@ class MediaControllerManager(
         queueGeneration++
         currentSongList = queue
         _playlist.value = queue
+        _autoplayMediaUris.value = emptySet()
 
         val mediaItems = queue.map { buildMediaItem(it) }
         val validIndex = startIndex.coerceIn(0, queue.lastIndex)
@@ -1003,6 +1011,7 @@ class MediaControllerManager(
         queueGeneration++
         currentSongList = emptyList()
         _playlist.value = emptyList()
+        _autoplayMediaUris.value = emptySet()
 
         val searchItem = MediaItem.Builder()
             .setMediaId("$VOICE_SEARCH_PREFIX$trimmed")

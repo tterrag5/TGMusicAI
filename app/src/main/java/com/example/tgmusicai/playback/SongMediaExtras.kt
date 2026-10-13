@@ -22,6 +22,7 @@ object SongMediaExtras {
     private const val KEY_REPLAY_GAIN_DB = "tgmusicai.replay_gain_db"
     private const val KEY_REPLAY_PEAK = "tgmusicai.replay_peak"
     private const val KEY_ORIGIN_PLAYLIST_ID = "tgmusicai.origin_playlist_id"
+    private const val KEY_AUTOPLAY = "tgmusicai.autoplay"
 
     /**
      * [originPlaylistId] is the playlist this queue was started from, if any. It rides along with
@@ -29,8 +30,9 @@ object SongMediaExtras {
      * playback is gone -- there is nowhere else to ask. Absent for a queue that did not come from a
      * playlist, which is most of them.
      */
-    fun fromSong(song: Song, originPlaylistId: Long? = null): Bundle = Bundle().apply {
+    fun fromSong(song: Song, originPlaylistId: Long? = null, isAutoplay: Boolean = false): Bundle = Bundle().apply {
         putLong(KEY_SONG_ID, song.id)
+        if (isAutoplay) putBoolean(KEY_AUTOPLAY, true)
         originPlaylistId?.let { putLong(KEY_ORIGIN_PLAYLIST_ID, it) }
         song.artworkUri?.let { putString(KEY_ARTWORK_URI, it) }
         putLong(KEY_DURATION_MS, song.durationMs)
@@ -57,6 +59,9 @@ object SongMediaExtras {
     /** The playlist this item was queued from, or null if it was not queued from one. */
     fun originPlaylistId(extras: Bundle?): Long? =
         extras?.getLong(KEY_ORIGIN_PLAYLIST_ID, 0L)?.takeIf { it != 0L }
+
+    /** True for a track autoplay appended, rather than one the user queued (the queue's "Autoplay" section). */
+    fun isAutoplay(extras: Bundle?): Boolean = extras?.getBoolean(KEY_AUTOPLAY, false) == true
 
     /** The YouTube video id embedded in [extras], if any. */
     fun youtubeId(extras: Bundle?): String? = extras?.getString(KEY_YOUTUBE_ID)

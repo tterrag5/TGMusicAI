@@ -1019,7 +1019,7 @@ class PlaybackService : MediaLibraryService() {
                 .setAlbumTitle(song.album)
                 .setArtworkUri(resolveCarArtworkUri(song.artworkUri))
                 .setIsPlayable(true)
-                .setExtras(SongMediaExtras.fromSong(song))
+                .setExtras(SongMediaExtras.fromSong(song, isAutoplay = true))
                 .build()
         )
         .build()

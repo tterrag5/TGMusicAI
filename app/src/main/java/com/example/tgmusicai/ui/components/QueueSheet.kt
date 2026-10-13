@@ -16,7 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -70,6 +70,8 @@ import com.example.tgmusicai.ui.util.FormatUtils
 fun QueueSheet(
     queue: List<Song>,
     currentSong: Song?,
+    /** Entries autoplay added. They are listed under an "Autoplay" heading after the user's own. */
+    autoplayUris: Set<String> = emptySet(),
     playingFromSource: String = "Your Queue",
     onSongClick: (index: Int) -> Unit,
     onMoveSong: (from: Int, to: Int) -> Unit,
@@ -222,8 +224,24 @@ fun QueueSheet(
                 state = listState,
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                items(queue, key = { it.mediaUri }) { song ->
-                    val index = queue.indexOf(song)
+                // YT Music splits the queue: what was asked for (the playlist, album or picked
+                // songs), then an "Autoplay" section for what was added to keep the music going.
+                val firstAutoplayIndex = queue.indexOfFirst { it.mediaUri in autoplayUris }
+                itemsIndexed(queue, key = { _, song -> song.mediaUri }) { index, song ->
+                    if (index == firstAutoplayIndex) {
+                        Column(modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 4.dp)) {
+                            Text(
+                                text = "Autoplay",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Added to keep the music going",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                     QueueRow(
                         song = song,
                         index = index,

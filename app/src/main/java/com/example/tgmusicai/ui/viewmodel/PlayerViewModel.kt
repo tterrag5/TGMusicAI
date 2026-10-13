@@ -84,6 +84,9 @@ class PlayerViewModel(
         pending?.durationMs?.takeIf { it > 0L } ?: duration
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0L)
     val playlist: StateFlow<List<Song>> = mediaControllerManager.playlist
+
+    /** Queue entries autoplay added; the queue sheet lists them in their own section. */
+    val autoplayQueueUris: StateFlow<Set<String>> = mediaControllerManager.autoplayMediaUris
     val shuffleMode: StateFlow<Boolean> = mediaControllerManager.shuffleMode
     val repeatMode: StateFlow<Int> = mediaControllerManager.repeatMode
     val isResolving: StateFlow<Boolean> = mediaControllerManager.isResolving

@@ -142,6 +142,7 @@ fun MainScreen(
     val durationMs by playerViewModel.durationMs.collectAsState()
     val isResolving by playerViewModel.isResolving.collectAsState()
     val playbackQueue by playerViewModel.playlist.collectAsState()
+    val autoplayQueueUris by playerViewModel.autoplayQueueUris.collectAsState()
     var showQueueSheet by remember { mutableStateOf(false) }
     val playingFrom by playerViewModel.playingFrom.collectAsState()
     val isCurrentDisliked by playerViewModel.isCurrentSongDisliked.collectAsState()
@@ -765,6 +766,7 @@ fun MainScreen(
     if (showQueueSheet) {
         QueueSheet(
             queue = playbackQueue,
+            autoplayUris = autoplayQueueUris,
             playingFromSource = if (playingFrom == "Up next") "Your Queue" else playingFrom,
             currentSong = currentSong,
             onSongClick = { index ->
