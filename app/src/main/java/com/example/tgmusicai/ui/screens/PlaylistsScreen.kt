@@ -68,6 +68,8 @@ fun PlaylistsContent(
     playlistViewModel: PlaylistViewModel,
     onPlaylistClick: (playlistId: Long, playlistName: String) -> Unit,
     onOpenYouTubeImport: (() -> Unit)? = null,
+    /** The Library's chosen order (Liked Music first). Null keeps pinned-first. */
+    orderedPlaylists: List<com.example.tgmusicai.data.local.entity.PlaylistWithSongs>? = null,
     modifier: Modifier = Modifier
 ) {
     val playlistsWithSongs by playlistViewModel.playlistsWithSongs.collectAsState()
@@ -183,7 +185,7 @@ fun PlaylistsContent(
                 // order. Dragging writes positions for the whole visible list, so an item dragged
                 // across the pinned boundary settles at the edge of its own group rather than
                 // jumping the boundary -- the pin is the stronger statement of the two.
-                val sortedPlaylists = playlistsWithSongs.sortedByDescending { it.playlist.isPinned }
+                val sortedPlaylists = orderedPlaylists ?: playlistsWithSongs.sortedByDescending { it.playlist.isPinned }
 
                 // The extra bottom padding keeps the last row of cards clear of the FAB and of the
                 // mini player MainScreen draws over the bottom of this screen -- without it the

@@ -84,7 +84,8 @@ import com.example.tgmusicai.ui.components.RecognizeSongDialog
 import com.example.tgmusicai.ui.components.SongItem
 import com.example.tgmusicai.ui.components.TagEditorDialog
 import com.example.tgmusicai.ui.theme.TGMusicAITheme
-import com.example.tgmusicai.ui.viewmodel.LibraryView
+import com.example.tgmusicai.ui.viewmodel.LibraryPill
+import com.example.tgmusicai.ui.components.CreatePlaylistDialog
 import com.example.tgmusicai.ui.viewmodel.LibraryViewModel
 import com.example.tgmusicai.ui.viewmodel.PlayerViewModel
 import kotlinx.coroutines.flow.firstOrNull
@@ -113,7 +114,7 @@ fun LibraryScreen(
     onOpenAlbum: (com.example.tgmusicai.data.youtube.YouTubeAlbumRef) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val songs by libraryViewModel.filteredSongs.collectAsState()
+    val songs by libraryViewModel.sortedSongs.collectAsState()
     val searchQuery by libraryViewModel.searchQuery.collectAsState()
     val songForAddToPlaylist by libraryViewModel.songForAddToPlaylist.collectAsState()
     val playlists by libraryViewModel.playlists.collectAsState()
@@ -130,9 +131,15 @@ fun LibraryScreen(
     val cloudArtists by libraryViewModel.cloudArtists.collectAsState()
     val cloudAlbums by libraryViewModel.cloudAlbums.collectAsState()
     val songForTagEdit by libraryViewModel.songForTagEdit.collectAsState()
-    val libraryView by libraryViewModel.libraryView.collectAsState()
-    val discoverEnabled = libraryView == LibraryView.DISCOVER
-    val playlistsEnabled = libraryView == LibraryView.PLAYLISTS
+    val pill by libraryViewModel.pill.collectAsState()
+    val sort by libraryViewModel.sort.collectAsState()
+    val sortedPlaylists by libraryViewModel.sortedPlaylists.collectAsState()
+    val libraryArtists by libraryViewModel.libraryArtists.collectAsState()
+    val libraryAlbums by libraryViewModel.libraryAlbums.collectAsState()
+    val playlistCovers by (playlistViewModel?.playlistCoverArtwork ?: kotlinx.coroutines.flow.MutableStateFlow(emptyMap())).collectAsState()
+    val showCreatePlaylist by (playlistViewModel?.showCreateDialog ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+    // Songs and Downloads are the song list; the other pills are their own views.
+    val songsMode = pill == LibraryPill.SONGS || pill == LibraryPill.DOWNLOADS
     val visibleTags by libraryViewModel.visibleTags.collectAsState()
     val selectedTagFilters by libraryViewModel.selectedTagFilters.collectAsState()
     var showRecognizeDialog by remember { mutableStateOf(false) }
@@ -242,7 +249,7 @@ fun LibraryScreen(
                 )
             } else {
                 TopAppBar(
-                    title = { Text("Music Library", style = MaterialTheme.typography.headlineMedium) },
+                    title = { Text("Library", style = MaterialTheme.typography.headlineMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onOpenDrawer) {
                         Icon(
@@ -260,14 +267,6 @@ fun LibraryScreen(
                                 )
                             }
                         }
-                        if (libraryView == LibraryView.SONGS) {
-                            IconButton(onClick = libraryViewModel::toggleGridView) {
-                                Icon(
-                                    imageVector = if (isGridView) Icons.AutoMirrored.Rounded.ViewList else Icons.Rounded.GridView,
-                                    contentDescription = if (isGridView) "Switch to list view" else "Switch to grid view"
-                                )
-                            }
-                        }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = androidx.compose.ui.graphics.Color.Transparent
@@ -282,40 +281,19 @@ fun LibraryScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Songs / Folders / Discover. A segmented control rather than a fourth toolbar
-            // icon: the bar already carries three, and an icon does not say what the current view
-            // is -- with three views that matters, because two of them look nothing like a song
-            // list.
-            SingleChoiceSegmentedButtonRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                val views = listOf(
-                    LibraryView.SONGS to "Songs",
-                    LibraryView.PLAYLISTS to "Playlists",
-                    LibraryView.DISCOVER to "Discover"
-                )
-                views.forEachIndexed { index, (view, label) ->
-                    SegmentedButton(
-                        selected = libraryView == view,
-                        onClick = { libraryViewModel.setLibraryView(view) },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = views.size),
-                        // A view is only reachable with the model behind it; without one the
-                        // segment would open a permanently empty page.
-                        enabled = when (view) {
-                            LibraryView.DISCOVER -> discoverViewModel != null
-                            LibraryView.PLAYLISTS -> playlistViewModel != null
-                            else -> true
-                        },
-                        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                    )
-                }
-            }
+            // YT Music's Library: filter pills (Discover moved to Home), then sort + grid toggle.
+            LibraryPillsBar(
+                pill = pill,
+                onPill = libraryViewModel::togglePill,
+                sort = sort,
+                onSort = libraryViewModel::setSort,
+                isGridView = if (songsMode) isGridView else null,
+                onToggleGrid = libraryViewModel::toggleGridView,
+            )
 
             // Search and the downloaded-only filter act on the local song list, so they are
             // hidden in the views that have nothing for them to filter.
-            if (!discoverEnabled && !playlistsEnabled) {
+            if (songsMode) {
             // Search Input Field
             OutlinedTextField(
                 value = searchQuery,
@@ -359,7 +337,7 @@ fun LibraryScreen(
 
             // Downloaded-only lives here now rather than on Home, next to the list it actually
             // filters. With it on, cloud-only tracks are hidden and no YouTube search is issued.
-            Row(
+            if (pill != LibraryPill.DOWNLOADS) Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -427,21 +405,33 @@ fun LibraryScreen(
             // While searching, local and cloud results share one scrolling list so YouTube hits
             // read as a continuation of the library rather than a separate place to go. Browsing
             // (no query) keeps the grid/list layout.
-            if (playlistsEnabled && playlistViewModel != null) {
+            if (pill == LibraryPill.PLAYLISTS && playlistViewModel != null) {
                 PlaylistsContent(
                     playlistViewModel = playlistViewModel,
                     onPlaylistClick = onPlaylistClick,
-                    onOpenYouTubeImport = onOpenYouTubeImport
+                    onOpenYouTubeImport = onOpenYouTubeImport,
+                    orderedPlaylists = sortedPlaylists,
                 )
-            } else if (discoverEnabled && discoverViewModel != null) {
-                DiscoverContent(
-                    discoverViewModel = discoverViewModel,
-                    onPlayTrack = onPlayCloudResult,
-                    onDownloadTrack = onDownloadCloudResult,
-                    onOpenAlbum = onOpenAlbum,
-                    onOpenArtist = onOpenArtist
+            } else if (pill == null) {
+                LibraryOverviewList(
+                    playlists = sortedPlaylists,
+                    artists = libraryArtists,
+                    playlistCovers = playlistCovers,
+                    onPlaylistClick = onPlaylistClick,
+                    onArtistClick = { libraryViewModel.showSongsMatching(it.name) },
+                    onNewPlaylist = { playlistViewModel?.openCreatePlaylistDialog() },
                 )
-            } else if (searchQuery.isNotBlank() && !downloadedOnly) {
+                if (showCreatePlaylist && playlistViewModel != null) {
+                    CreatePlaylistDialog(
+                        onDismissRequest = playlistViewModel::closeCreatePlaylistDialog,
+                        onConfirm = { name, description -> playlistViewModel.createPlaylist(name, description) }
+                    )
+                }
+            } else if (pill == LibraryPill.ARTISTS) {
+                LibraryArtistList(libraryArtists) { libraryViewModel.showSongsMatching(it.name) }
+            } else if (pill == LibraryPill.ALBUMS) {
+                LibraryAlbumList(libraryAlbums) { libraryViewModel.showSongsMatching(it.title) }
+            } else if (searchQuery.isNotBlank() && !downloadedOnly && pill != LibraryPill.DOWNLOADS) {
                 // Results are tiles, in the same three-column grid the library browses in, so a
                 // search does not change the shape of the screen under the user. Local matches
                 // come first, then the artists and albums that match, then YouTube's tracks.

@@ -53,7 +53,10 @@ private const val TAG_FILTER_CHIP_LIMIT = 12
  * Both used to sit elsewhere in the navigation (Discover in the drawer, Playlists in the bottom
  * bar), which split one idea across three places.
  */
-enum class LibraryView { SONGS, PLAYLISTS, DISCOVER }
+/** YT Music's Library filter pills. None selected shows everything (playlists, then artists). */
+enum class LibraryPill(val label: String) {
+    PLAYLISTS("Playlists"), SONGS("Songs"), ALBUMS("Albums"), ARTISTS("Artists"), DOWNLOADS("Downloads")
+}
 
 class LibraryViewModel(
     private val repository: MusicRepository,
@@ -175,8 +178,42 @@ class LibraryViewModel(
      * Which of the library's views is showing. Deliberately not persisted: it is a way of looking
      * for something right now, not a standing preference like grid-vs-list.
      */
-    private val _libraryView = MutableStateFlow(LibraryView.SONGS)
-    val libraryView: StateFlow<LibraryView> = _libraryView.asStateFlow()
+    private val _pill = MutableStateFlow<LibraryPill?>(null)
+    val pill: StateFlow<LibraryPill?> = _pill.asStateFlow()
+
+    /** Default: most played first (user: "by default sort playlists based on how often they're listened to"). */
+    private val _sort = MutableStateFlow(com.example.tgmusicai.data.repository.LibrarySort.MOST_PLAYED)
+    val sort: StateFlow<com.example.tgmusicai.data.repository.LibrarySort> = _sort.asStateFlow()
+
+    fun setSort(sort: com.example.tgmusicai.data.repository.LibrarySort) {
+        _sort.value = sort
+    }
+
+    private val songStats: StateFlow<Map<Long, com.example.tgmusicai.data.local.entity.SongStats>> =
+        repository.allSongStats
+            .map { list -> list.associateBy { it.songId } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    /** Playlists for the Library, Liked Music first, then by [sort]. */
+    val sortedPlaylists: StateFlow<List<com.example.tgmusicai.data.local.entity.PlaylistWithSongs>> = combine(
+        repository.allPlaylistsWithSongs,
+        repository.playlistPlayCounts,
+        songStats,
+        _sort,
+    ) { playlists, counts, stats, sort ->
+        val plays = counts.groupBy { it.playlistId }.mapValues { (_, rows) -> rows.sumOf { it.playCount } }
+        com.example.tgmusicai.data.repository.LibraryOrganizer.sortPlaylists(playlists, plays, stats, sort)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val libraryArtists: StateFlow<List<com.example.tgmusicai.data.repository.LibraryArtist>> =
+        combine(repository.allSongs, songStats, _sort) { songs, stats, sort ->
+            com.example.tgmusicai.data.repository.LibraryOrganizer.artists(songs, stats, sort)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val libraryAlbums: StateFlow<List<com.example.tgmusicai.data.repository.LibraryAlbum>> =
+        combine(repository.allSongs, songStats, _sort) { songs, stats, sort ->
+            com.example.tgmusicai.data.repository.LibraryOrganizer.albums(songs, stats, sort)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /** Tags the song list is currently narrowed to. Empty means no tag filter. */
     private val _selectedTagFilters = MutableStateFlow<Set<String>>(emptySet())
@@ -219,8 +256,14 @@ class LibraryViewModel(
     )
 
     /** Switches views. */
-    fun setLibraryView(view: LibraryView) {
-        _libraryView.value = view
+    fun togglePill(pill: LibraryPill) {
+        _pill.value = if (_pill.value == pill) null else pill
+    }
+
+    /** Opens the Songs pill filtered to an artist or album picked from those pills. */
+    fun showSongsMatching(query: String) {
+        _pill.value = LibraryPill.SONGS
+        onSearchQueryChanged(query)
     }
 
     /** Adds or removes one tag from the filter. */
@@ -275,6 +318,12 @@ class LibraryViewModel(
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
     )
+
+    /** [filteredSongs] in the chosen [sort]; the Downloads pill keeps only downloaded songs. */
+    val sortedSongs: StateFlow<List<Song>> = combine(filteredSongs, songStats, _sort, _pill) { songs, stats, sort, pill ->
+        val shown = if (pill == LibraryPill.DOWNLOADS) songs.filter { it.isDownloaded } else songs
+        com.example.tgmusicai.data.repository.LibraryOrganizer.sortSongs(shown, stats, sort)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // --- Cloud (YouTube) search, folded in from the old separate Explore tab ---
 

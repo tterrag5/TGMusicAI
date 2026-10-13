@@ -99,6 +99,10 @@ class MusicRepository(
      * database was supplied, which is the case in unit tests that build the repository from fake
      * DAOs alone.
      */
+    /** Every song's play count and last play, behind the Library's sort (most / recently played). */
+    val allSongStats: Flow<List<com.example.tgmusicai.data.local.entity.SongStats>> =
+        songStatsDao.getMostPlayedStats(Int.MAX_VALUE)
+
     val playlistPlayCounts: Flow<List<com.example.tgmusicai.data.local.entity.PlaylistPlayCount>> =
         database?.playlistPlayCountDao()?.observeAll() ?: kotlinx.coroutines.flow.flowOf(emptyList())
 
