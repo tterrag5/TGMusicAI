@@ -609,62 +609,6 @@ class PlayerViewModel(
         }
     }
 
-    private val _isTranscribing = MutableStateFlow(false)
-    val isTranscribing: StateFlow<Boolean> = _isTranscribing.asStateFlow()
-
-    private val _transcribeError = MutableStateFlow<String?>(null)
-    val transcribeError: StateFlow<String?> = _transcribeError.asStateFlow()
-
-    fun clearTranscribeError() {
-        _transcribeError.value = null
-    }
-
-    /**
-     * Transcribes the current song's audio via a bundled on-device Whisper-tiny.en model when no
-     * lyrics could be found any other way -- see
-     * [com.example.tgmusicai.ai.WhisperTranscriptionEngine]. No API key needed.
-     *
-     * Works for streamed cloud tracks as well as downloaded ones: a cloud song has a `youtubeId`,
-     * which is enough for [LyricsRepository.transcribeWithWhisper] to fetch its audio to a
-     * temporary file and decode that. Requiring a download first made transcription the one
-     * feature a cloud track could not use, which is why the gate is now "no audio reachable at
-     * all" rather than "not downloaded".
-     */
-    fun transcribeLyricsWithAi(song: Song? = currentSong.value) {
-        val target = song ?: return
-        val repo = lyricsRepository
-        if (repo == null) {
-            _transcribeError.value = "AI transcription isn't available right now."
-            return
-        }
-        // One transcription at a time. Two running at once would fight over the same ORT session
-        // (the engine serialises them anyway, so the second merely waits) and would race to decide
-        // which one gets to clear the progress indicator.
-        transcribeJob?.cancel()
-        transcribeJob = viewModelScope.launch {
-            if (!target.isDownloaded && target.youtubeId.isNullOrBlank()) {
-                _transcribeError.value = "This song has no audio available to transcribe."
-                return@launch
-            }
-            _isTranscribing.value = true
-            try {
-                val persistedTarget = ensurePersistedTarget(target)
-                val transcribed = repo.transcribeWithWhisper(persistedTarget)
-                if (transcribed != null) {
-                    // Always saved against the song that was asked for, never the one playing now.
-                    repository?.updateSongLyrics(persistedTarget.id, transcribed)
-                    publishLyricsFor(persistedTarget, transcribed)
-                } else {
-                    _transcribeError.value = "AI transcription didn't return any lyrics for this song."
-                }
-            } finally {
-                _isTranscribing.value = false
-            }
-        }
-    }
-
-    private var transcribeJob: Job? = null
-
     /**
      * Shows [text] as the lyrics pane's contents, but only while [target] is still the song on
      * screen.

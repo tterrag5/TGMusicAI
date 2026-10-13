@@ -163,8 +163,6 @@ fun NowPlayingScreen(
 
     val parsedLyrics by playerViewModel.parsedLyrics.collectAsState()
     val isScraping by playerViewModel.isScraping.collectAsState()
-    val isTranscribing by playerViewModel.isTranscribing.collectAsState()
-    val transcribeError by playerViewModel.transcribeError.collectAsState()
     val translatedLyrics by playerViewModel.translatedLyrics.collectAsState()
     val isTranslatingLyrics by playerViewModel.isTranslatingLyrics.collectAsState()
     val translationLanguage by playerViewModel.translationLanguage.collectAsState()
@@ -538,51 +536,22 @@ fun NowPlayingScreen(
                                 )
                                 Spacer(modifier = Modifier.height(12.dp))
                                 Text(
-                                    text = when {
-                                        isScraping -> "Fetching transcript/lyrics..."
-                                        isTranscribing -> "Transcribing audio on-device..."
-                                        else -> "No lyrics available for this song"
-                                    },
+                                    text = if (isScraping) "Looking for lyrics..." else "No lyrics found for this song",
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Center
                                 )
-                                if (transcribeError != null) {
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text(
-                                        text = transcribeError.orEmpty(),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.error,
-                                        textAlign = TextAlign.Center
-                                    )
-                                }
                                 Spacer(modifier = Modifier.height(16.dp))
                                 Button(
                                     onClick = {
                                         currentSong?.let { playerViewModel.fetchLyrics(it, forceFetch = true) }
                                     },
-                                    enabled = !isScraping && !isTranscribing,
+                                    enabled = !isScraping,
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = MaterialTheme.colorScheme.primary
                                     )
                                 ) {
-                                    Text("Refetch Lyrics")
-                                }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                TextButton(
-                                    onClick = {
-                                        playerViewModel.clearTranscribeError()
-                                        currentSong?.let { playerViewModel.transcribeLyricsWithAi(it) }
-                                    },
-                                    enabled = !isScraping && !isTranscribing
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.AutoAwesome,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("AI Transcribe Lyrics")
+                                    Text("Search again")
                                 }
                             }
                         } else {

@@ -5,7 +5,6 @@ import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.tgmusicai.ai.AiFeatureManager
 import com.example.tgmusicai.data.local.AppDatabase
 import com.example.tgmusicai.data.local.entity.PlaylistSongCrossRef
 import com.example.tgmusicai.data.local.entity.Song
@@ -34,15 +33,11 @@ class YouTubeViewModel(application: Application) : AndroidViewModel(application)
 
     private val db = AppDatabase.getDatabase(application)
     val youtubeExtractor = YouTubeExtractor()
-    private val aiFeatureManager: AiFeatureManager by lazy {
-        AiFeatureManager(application, db.aiSongTagsDao())
-    }
     val cloudDownloadManager = CloudDownloadManager(
         context = application,
         songDao = db.songDao(),
         youtubeExtractor = youtubeExtractor,
         pendingDownloadDao = db.pendingDownloadDao(),
-        aiFeatureManager = aiFeatureManager
     )
 
     init {

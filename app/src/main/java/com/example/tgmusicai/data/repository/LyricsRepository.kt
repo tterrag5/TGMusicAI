@@ -95,29 +95,14 @@ class LyricsRepository(
 
     /**
      * Shared HTTP client for quick lookups (LrcLib get/search, YouTube caption fetches). 10s
-     * timeouts are short on purpose -- these are lightweight text/JSON requests, not the whole-
-     * track audio [audioFetchClient] pulls down, so a hung request should fail fast and let
-     * [fetchAndSaveLyrics] move on to the next fallback source rather than stall.
+     * timeouts are short on purpose: these are lightweight text/JSON requests, so a hung request
+     * should fail fast and let [fetchAndSaveLyrics] move on to the next source rather than stall.
      */
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
-
-    /**
-     * Separate client for pulling a cloud track's whole audio stream down before transcription.
-     * A full track is megabytes over a possibly slow link, so [okHttpClient]'s deliberately short
-     * 10s read timeout would abort it; this one is patient instead, and is never used for the
-     * lyric lookups that depend on failing fast.
-     */
-    private val audioFetchClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .build()
-    }
 
     companion object {
         private fun normaliseForMatch(text: String): String =
@@ -763,120 +748,6 @@ class LyricsRepository(
             } catch (_: Exception) {}
         }
         return null
-    }
-
-    /**
-     * On-device Whisper-tiny.en engine used by [transcribeWithWhisper] -- see
-     * [com.example.tgmusicai.ai.WhisperTranscriptionEngine]'s doc comment for why this replaced an
-     * OpenAI Whisper API call: no API key, no per-call cost, works fully offline. Lazily
-     * constructed since most sessions never trigger a transcription.
-     */
-    private val whisperEngine by lazy { com.example.tgmusicai.ai.WhisperTranscriptionEngine(context) }
-
-    /**
-     * Transcribes [song]'s downloaded audio on-device via a bundled, quantized Whisper-tiny.en
-     * model and returns the result as an LRC-formatted string, or null on any failure (song not
-     * downloaded, audio couldn't be decoded, or the model produced no text at all). English-only
-     * model -- unlike the old cloud OpenAI Whisper path this replaced, it won't transcribe
-     * non-English singing into its native script; that trade-off is what buys running fully
-     * offline with no API key and no per-call cost.
-     */
-    suspend fun transcribeWithWhisper(song: Song): String? = withContext(Dispatchers.IO) {
-        val mediaUri = song.mediaUri
-        val isLocal = mediaUri.startsWith("content://") || mediaUri.startsWith("file://") || mediaUri.startsWith("/")
-
-        // A cloud track has no local file, so fetch its audio to a temporary one and transcribe
-        // that. Downloading rather than decoding the URL in place is deliberate: MediaExtractor
-        // would have to re-range-request a signed googlevideo URL repeatedly through a whole-track
-        // decode, and those URLs expire and throttle mid-use.
-        var scratchFile: java.io.File? = null
-        val audioPath = if (isLocal) {
-            mediaUri
-        } else {
-            val videoId = song.youtubeId?.takeIf { it.isNotBlank() }
-            if (videoId == null) {
-                Log.w(TAG, "No audio available to transcribe for '${song.title}'")
-                return@withContext null
-            }
-            scratchFile = downloadStreamToScratchFile(videoId)
-            if (scratchFile == null) {
-                Log.w(TAG, "Could not fetch cloud audio to transcribe for '${song.title}'")
-                return@withContext null
-            }
-            scratchFile.absolutePath
-        }
-
-        try {
-            transcribeDecodedAudio(song, audioPath)
-        } finally {
-            scratchFile?.let { file ->
-                if (!file.delete()) Log.w(TAG, "Could not delete transcription scratch file ${file.name}")
-            }
-        }
-    }
-
-    /**
-     * Resolves [videoId] to an audio stream and writes it to a file in the cache directory,
-     * returning that file or null on any failure. The caller owns the file and must delete it.
-     *
-     * The request carries [YouTubeExtractor.REALISTIC_USER_AGENT] for the same reason playback
-     * does: signed `googlevideo` URLs answer 403 to a default agent.
-     */
-    private suspend fun downloadStreamToScratchFile(videoId: String): java.io.File? {
-        return try {
-            val stream = youtubeExtractor.extractAudioStream(videoId)
-            if (stream == null || stream.url.isBlank()) {
-                Log.w(TAG, "No audio stream resolved for transcription of $videoId")
-                return null
-            }
-
-            val request = Request.Builder()
-                .url(stream.url)
-                .header("User-Agent", YouTubeExtractor.REALISTIC_USER_AGENT)
-                .build()
-
-            val target = java.io.File.createTempFile("transcribe_", ".${stream.format}", context.cacheDir)
-            audioFetchClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "Transcription audio fetch for $videoId returned HTTP ${response.code}")
-                    target.delete()
-                    return null
-                }
-                val body = response.body ?: run {
-                    target.delete()
-                    return null
-                }
-                body.byteStream().use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
-                }
-            }
-
-            if (target.length() == 0L) {
-                target.delete()
-                Log.w(TAG, "Transcription audio fetch for $videoId produced an empty file")
-                null
-            } else {
-                target
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Could not fetch cloud audio for transcription of $videoId", e)
-            null
-        }
-    }
-
-    /** Runs the on-device model over [audioPath] and maps its result to lyrics text or null. */
-    private fun transcribeDecodedAudio(song: Song, audioPath: String): String? {
-        return when (val result = whisperEngine.transcribeFile(audioPath)) {
-            is com.example.tgmusicai.ai.AiModelResult.Success -> result.value.ifBlank { null }
-            is com.example.tgmusicai.ai.AiModelResult.Unavailable -> {
-                Log.w(TAG, "On-device transcription unavailable for '${song.title}': ${result.reason}")
-                null
-            }
-            is com.example.tgmusicai.ai.AiModelResult.Error -> {
-                Log.e(TAG, "On-device transcription failed for '${song.title}'", result.throwable)
-                null
-            }
-        }
     }
 
     /**

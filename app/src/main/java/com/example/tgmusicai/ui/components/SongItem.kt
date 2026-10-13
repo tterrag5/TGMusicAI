@@ -88,7 +88,6 @@ fun SongItem(
     modifier: Modifier = Modifier,
     onScrapeClicked: (() -> Unit)? = null,
     onStartRadioClicked: (() -> Unit)? = null,
-    onAnalyzeWithAiClicked: (() -> Unit)? = null,
     onEditTagsClicked: (() -> Unit)? = null,
     onSwipeToQueue: (() -> Unit)? = null,
     onSwipeToLike: (() -> Unit)? = null,
@@ -311,15 +310,6 @@ fun SongItem(
                         }
                     )
                 }
-                if (onAnalyzeWithAiClicked != null) {
-                    DropdownMenuItem(
-                        text = { Text("Analyze (AI)") },
-                        onClick = {
-                            showMenu = false
-                            onAnalyzeWithAiClicked()
-                        }
-                    )
-                }
                 if (onEditTagsClicked != null) {
                     DropdownMenuItem(
                         text = { Text("Edit tags") },
@@ -350,7 +340,6 @@ fun SongGridItem(
     onAddToPlaylistClicked: (() -> Unit)? = null,
     onScrapeClicked: (() -> Unit)? = null,
     onStartRadioClicked: (() -> Unit)? = null,
-    onAnalyzeWithAiClicked: (() -> Unit)? = null,
     // Queue/Like are menu items here rather than the swipe gestures the list row uses: a swipe
     // across a one-third-width tile is both cramped and ambiguous against the grid's own scrolling.
     onAddToQueueClicked: (() -> Unit)? = null,
@@ -495,12 +484,6 @@ fun SongGridItem(
                             DropdownMenuItem(
                                 text = { Text("Start Radio") },
                                 onClick = { showMenu = false; onStartRadioClicked() }
-                            )
-                        }
-                        if (onAnalyzeWithAiClicked != null) {
-                            DropdownMenuItem(
-                                text = { Text("Analyze (AI)") },
-                                onClick = { showMenu = false; onAnalyzeWithAiClicked() }
                             )
                         }
                     }

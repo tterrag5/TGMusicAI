@@ -2,7 +2,6 @@ package com.example.tgmusicai.data.repository
 
 import android.util.Log
 import com.example.tgmusicai.ai.AudioProfileCodec
-import com.example.tgmusicai.ai.LyricsEmbeddingEngine
 import com.example.tgmusicai.data.local.dao.AiSongTagsDao
 import com.example.tgmusicai.data.local.dao.HistoryEntry
 import com.example.tgmusicai.data.local.dao.ListeningHistoryDao
@@ -392,7 +391,7 @@ class RecommendationEngine(
         val csv = tags?.lyricsEmbedding ?: return null
         return try {
             val parts = csv.split(',')
-            if (parts.size != LyricsEmbeddingEngine.EMBEDDING_DIM) return null
+            if (parts.size != LYRICS_EMBEDDING_DIM) return null
             FloatArray(parts.size) { parts[it].trim().toFloat() }
         } catch (e: Throwable) {
             null
@@ -401,8 +400,14 @@ class RecommendationEngine(
 
     private fun cosineOrZero(a: FloatArray?, b: FloatArray?): Float {
         if (a == null || b == null || a.size != b.size || a.isEmpty()) return 0f
-        return LyricsEmbeddingEngine.cosineSimilarity(a, b).coerceAtLeast(0f)
+        // Stored embeddings are L2-normalised, so the dot product is the cosine similarity.
+        var dot = 0f
+        for (i in a.indices) dot += a[i] * b[i]
+        return dot.coerceAtLeast(0f)
     }
+
+    /** Width of the MiniLM lyrics embeddings older builds stored in `ai_song_tags`. */
+    private val LYRICS_EMBEDDING_DIM = 384
 
     // ---- behaviour --------------------------------------------------------------------------
 

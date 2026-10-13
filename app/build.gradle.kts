@@ -58,11 +58,6 @@ android {
         compose = true
         buildConfig = true
     }
-    androidResources {
-        // Keep AI model assets uncompressed in the APK so they can be mmap'd/loaded directly
-        // (TFLite in particular expects this) instead of being deflated like normal assets.
-        noCompress += listOf("tflite", "onnx")
-    }
     testOptions {
         unitTests {
             isReturnDefaultValues = true
@@ -129,8 +124,6 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.play.services.location)
     implementation(libs.retrofit)
-    implementation(libs.tensorflow.lite)
-    implementation(libs.onnxruntime.android)
     implementation(libs.androidx.palette.ktx)
     implementation(libs.androidx.webkit)
     implementation(libs.androidx.glance.appwidget)

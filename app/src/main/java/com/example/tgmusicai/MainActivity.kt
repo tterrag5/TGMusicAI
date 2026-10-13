@@ -28,7 +28,6 @@ import com.example.tgmusicai.data.local.AppDatabase
 import com.example.tgmusicai.data.local.AppPreferences
 import com.example.tgmusicai.data.local.MediaScanner
 import com.example.tgmusicai.data.network.NetworkObserver
-import com.example.tgmusicai.ai.AiFeatureManager
 import com.example.tgmusicai.data.repository.CoverArtScraper
 import com.example.tgmusicai.data.repository.LyricsRepository
 import com.example.tgmusicai.data.repository.MusicRepository
@@ -165,10 +164,6 @@ class MainActivity : ComponentActivity() {
         networkObserver = NetworkObserver(this)
         val lyricsRepository = LyricsRepository(this, repository)
         val coverArtScraper = CoverArtScraper(this, repository)
-        // Fully optional on-device AI container (audio tagging + lyrics embeddings): every call
-        // into it is self-contained and catches its own failures, so constructing it here can
-        // never affect app startup even if the AI deps/models turn out to be broken on a device.
-        val aiFeatureManager = AiFeatureManager(this, database.aiSongTagsDao())
         val tagEditorManager = TagEditorManager(this, database.songDao())
         // Reads the genre out of each already-known track's file, so the Library's tag browser
         // works for a library that predates the column rather than only for newly scanned tracks.
@@ -254,7 +249,6 @@ class MainActivity : ComponentActivity() {
                                     repository = repository,
                                     lyricsRepository = lyricsRepository,
                                     coverArtScraper = coverArtScraper,
-                                    aiFeatureManager = aiFeatureManager,
                                     appPreferences = appPreferences,
                                     youtubeExtractor = youTubeExtractor,
                                     tagEditorManager = tagEditorManager,
@@ -464,25 +458,6 @@ class MainActivity : ComponentActivity() {
                             lifecycleScope.launch {
                                 repository.cleanupOrphanedStats()
                                 android.util.Log.d("LibraryDedup", "Orphaned stats cleanup ran")
-                            }
-                        }
-
-                        // One-time AI tag backfill: analyzes every already-downloaded song that
-                        // hasn't been tagged yet. Runs on AiFeatureManager's own IO scope (not
-                        // lifecycleScope) so it isn't cancelled if this composable leaves
-                        // composition, and skips songs it already has a cached result for, so
-                        // this is safe to leave gated behind a "done" flag rather than a
-                        // per-launch cost. A crash here is caught inside AiFeatureManager itself
-                        // and can't affect startup.
-                        LaunchedEffect(Unit) {
-                            lifecycleScope.launch {
-                                val alreadyDone = appPreferences.hasBackfilledAiTagsV1Flow.first()
-                                if (!alreadyDone) {
-                                    val downloadedSongs = repository.downloadedSongs.first()
-                                    aiFeatureManager.backfillAll(downloadedSongs)
-                                    appPreferences.setHasBackfilledAiTagsV1(true)
-                                    android.util.Log.d("AiBackfill", "AI tag backfill finished for ${downloadedSongs.size} song(s)")
-                                }
                             }
                         }
 

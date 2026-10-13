@@ -233,13 +233,6 @@ fun LibraryScreen(
                                         libraryViewModel.clearSelection()
                                     }
                                 )
-                                DropdownMenuItem(
-                                    text = { Text("Analyze (AI)") },
-                                    onClick = {
-                                        showBulkMoreMenu = false
-                                        libraryViewModel.bulkAnalyzeWithAi()
-                                    }
-                                )
                             }
                         }
                     },
@@ -477,7 +470,6 @@ fun LibraryScreen(
                             onAddToPlaylistClicked = { libraryViewModel.openAddToPlaylistDialog(song) },
                             onScrapeClicked = { libraryViewModel.scrapeArtworkAndLyrics(song) },
                             onStartRadioClicked = { playerViewModel.startRadio(song) },
-                            onAnalyzeWithAiClicked = { libraryViewModel.analyzeSongWithAi(song) },
                             onAddToQueueClicked = { playerViewModel.addToQueue(song) },
                             onToggleLikeClicked = { libraryViewModel.toggleLikeSong(song) },
                             liveDownloadStatus = song.youtubeId?.let { downloadMap[it]?.status }
@@ -594,9 +586,6 @@ fun LibraryScreen(
                             onStartRadioClicked = if (isSelectionMode) null else {
                                 { playerViewModel.startRadio(song) }
                             },
-                            onAnalyzeWithAiClicked = if (isSelectionMode) null else {
-                                { libraryViewModel.analyzeSongWithAi(song) }
-                            },
                             onAddToQueueClicked = if (isSelectionMode) null else {
                                 { playerViewModel.addToQueue(song) }
                             },
@@ -634,9 +623,6 @@ fun LibraryScreen(
                             },
                             onStartRadioClicked = {
                                 playerViewModel.startRadio(song)
-                            },
-                            onAnalyzeWithAiClicked = {
-                                libraryViewModel.analyzeSongWithAi(song)
                             },
                             onEditTagsClicked = if (libraryViewModel.canEditTags(song)) {
                                 { libraryViewModel.openTagEditor(song) }

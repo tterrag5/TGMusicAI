@@ -93,7 +93,6 @@ class CloudDownloadManager(
     private val youtubeExtractor: YouTubeExtractor = YouTubeExtractor(),
     private val coverArtScraper: CoverArtScraper? = null,
     private val pendingDownloadDao: PendingDownloadDao? = null,
-    private val aiFeatureManager: com.example.tgmusicai.ai.AiFeatureManager? = null
 ) {
     private val TAG = "CloudDownloadManager"
     private val LOG_TAG = "TGMusicCloud"
@@ -308,8 +307,6 @@ class CloudDownloadManager(
      *    (matched by URI, then YouTube ID, then title+artist) instead of always inserting fresh,
      *    so a song already present as an undownloaded cloud placeholder doesn't end up duplicated.
      * 6. Best-effort cover art scraping via [coverArtScraper].
-     * 7. Best-effort AI auto-tagging via [aiFeatureManager], fired on [scope] without being
-     *    awaited so a slow/failing analysis can never delay reporting [DownloadStatus.COMPLETED].
      *
      * A [CancellationException] (from [pauseDownload] or [cancelDownload]) is deliberately
      * rethrown rather than turned into [DownloadStatus.FAILED], since those callers already set
@@ -554,19 +551,6 @@ class CloudDownloadManager(
                             scraper.scrapeAndSaveArtwork(songToScrape)
                         } catch (e: Exception) {
                             Log.e(LOG_TAG, "Cover art scraping failed for track $songId", e)
-                        }
-                    }
-
-                    // Step 7: Auto-tag with on-device AI (fully optional, best-effort). Launched
-                    // on the manager's own scope rather than awaited here, so a slow or failing
-                    // analysis can never delay this download from reporting COMPLETED.
-                    if (aiFeatureManager != null) {
-                        scope.launch {
-                            try {
-                                aiFeatureManager.analyzeSongIfNeeded(songToScrape)
-                            } catch (e: Exception) {
-                                Log.e(LOG_TAG, "AI auto-tagging failed for track $songId", e)
-                            }
                         }
                     }
 

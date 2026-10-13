@@ -3,7 +3,6 @@ package com.example.tgmusicai.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.tgmusicai.ai.AiFeatureManager
 import com.example.tgmusicai.data.local.entity.Playlist
 import com.example.tgmusicai.data.local.entity.Song
 import com.example.tgmusicai.data.repository.CoverArtScraper
@@ -60,7 +59,6 @@ class LibraryViewModel(
     private val repository: MusicRepository,
     private val lyricsRepository: LyricsRepository? = null,
     private val coverArtScraper: CoverArtScraper? = null,
-    private val aiFeatureManager: AiFeatureManager? = null,
     private val appPreferences: AppPreferences? = null,
     private val youtubeExtractor: YouTubeExtractor? = null,
     private val tagEditorManager: TagEditorManager? = null,
@@ -388,25 +386,6 @@ class LibraryViewModel(
         }
     }
 
-    /**
-     * Best-effort, fully optional: derives audio tags and a lyrics embedding for [song] via the
-     * on-device AI container ([AiFeatureManager]) and caches them. A no-op if the manager wasn't
-     * supplied (e.g. AI deps unavailable on this build) or if analysis fails for any reason --
-     * this can never affect the rest of Library or playback.
-     */
-    fun analyzeSongWithAi(song: Song) {
-        val manager = aiFeatureManager ?: return
-        viewModelScope.launch {
-            _statusMessage.value = "Analyzing \"${song.title}\"..."
-            val outcome = manager.analyzeSong(song)
-            _statusMessage.value = if (outcome.tags.isNotEmpty()) {
-                "Tags: ${outcome.tags.joinToString(", ")}"
-            } else {
-                "No AI tags found for \"${song.title}\""
-            }
-        }
-    }
-
     private fun selectedSongObjects(): List<Song> {
         val ids = _selectedSongIds.value
         return filteredSongs.value.filter { it.id in ids }
@@ -423,21 +402,6 @@ class LibraryViewModel(
                 coverArtScraper?.scrapeAndSaveArtwork(song)
             }
             _statusMessage.value = "Updated cover art & lyrics for ${targets.size} song(s)"
-            clearSelection()
-        }
-    }
-
-    /** Bulk version of [analyzeSongWithAi] for every currently-selected song. A no-op if the AI container isn't available. */
-    fun bulkAnalyzeWithAi() {
-        val manager = aiFeatureManager ?: return
-        val targets = selectedSongObjects()
-        if (targets.isEmpty()) return
-        viewModelScope.launch {
-            _statusMessage.value = "Analyzing ${targets.size} song(s)..."
-            for (song in targets) {
-                manager.analyzeSong(song)
-            }
-            _statusMessage.value = "Finished analyzing ${targets.size} song(s)"
             clearSelection()
         }
     }
@@ -531,8 +495,7 @@ class LibraryViewModel(
         private val repository: MusicRepository,
         private val lyricsRepository: LyricsRepository? = null,
         private val coverArtScraper: CoverArtScraper? = null,
-        private val aiFeatureManager: AiFeatureManager? = null,
-        private val appPreferences: AppPreferences? = null,
+            private val appPreferences: AppPreferences? = null,
         private val youtubeExtractor: YouTubeExtractor? = null,
         private val tagEditorManager: TagEditorManager? = null,
         private val musicBrowser: YouTubeMusicBrowser? = null,
@@ -544,7 +507,6 @@ class LibraryViewModel(
                 repository = repository,
                 lyricsRepository = lyricsRepository,
                 coverArtScraper = coverArtScraper,
-                aiFeatureManager = aiFeatureManager,
                 appPreferences = appPreferences,
                 youtubeExtractor = youtubeExtractor,
                 tagEditorManager = tagEditorManager,

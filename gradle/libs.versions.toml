@@ -48,8 +48,6 @@ datastorePreferences = "1.1.7"
 material = "1.4.+"
 media3 = "1.11.1"
 newpipeExtractor = "13a655fe53e0c3065f88725fc1fb594c3ede0169" # commit, not a tag -- see newpipe-extractor below
-tensorflowLite = "2.17.0"
-onnxruntimeAndroid = "1.29.0"
 paletteKtx = "1.0.0"
 webkit = "1.12.1"
 glance = "1.1.1"
@@ -122,8 +120,6 @@ androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.re
 # project's own maven repo (maven.schabi.org) is not a usable alternative -- it currently serves a
 # certificate that does not match its hostname.
 newpipe-extractor = { module = "com.github.TeamNewPipe:NewPipeExtractor", version.ref = "newpipeExtractor" }
-tensorflow-lite = { group = "org.tensorflow", name = "tensorflow-lite", version.ref = "tensorflowLite" }
-onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntimeAndroid" }
 androidx-palette-ktx = { group = "androidx.palette", name = "palette-ktx", version.ref = "paletteKtx" }
 # Home-screen widgets. Glance renders Compose-style code into the RemoteViews a launcher can host;
 # widgets cannot use real Compose, since they run inside another process.
