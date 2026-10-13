@@ -115,7 +115,7 @@ class CloudFeedPager(
 
         for (name in startingNames) {
             val ref = try {
-                browser.searchArtists(name).firstOrNull()
+                CloudRecommendationSource.matchingArtist(name, browser.searchArtists(name))
             } catch (e: Throwable) {
                 Log.w(TAG, "Artist lookup failed for '$name'", e)
                 null

@@ -24,7 +24,9 @@ import java.util.concurrent.TimeUnit
 class CoverArtScraper(
     private val context: Context,
     private val musicRepository: MusicRepository,
-    private val youtubeExtractor: YouTubeExtractor = YouTubeExtractor()
+    private val youtubeExtractor: YouTubeExtractor = YouTubeExtractor(),
+    private val youTubeMusic: com.example.tgmusicai.data.youtube.YouTubeMusicBrowser =
+        com.example.tgmusicai.data.youtube.YouTubeMusicBrowser(),
 ) {
 
     private val TAG = "CoverArtScraper"
@@ -60,11 +62,25 @@ class CoverArtScraper(
     suspend fun scrapeAndSaveArtwork(song: Song): String? = withContext(Dispatchers.IO) {
         var imageUrl: String? = null
 
+        // 0. YouTube Music's own square album art, the source Discover uses. Tried first for
+        // anything with a video id: iTunes and MusicBrainz miss most niche releases, and falling
+        // through to the video thumbnail replaced good art with a letterboxed 480x360 frame (T038).
+        song.youtubeId?.takeIf { it.isNotBlank() }?.let { videoId ->
+            imageUrl = try {
+                youTubeMusic.fetchSongArtwork(videoId, song.title, song.artist)
+            } catch (e: Exception) {
+                Log.e(TAG, "YouTube Music artwork fetch failed for ${song.title}", e)
+                null
+            }
+        }
+
         // 1. Try iTunes Search API
-        try {
-            imageUrl = fetchFromItunes(song)
-        } catch (e: Exception) {
-            Log.e(TAG, "iTunes cover art fetch failed for ${song.title}", e)
+        if (imageUrl.isNullOrBlank()) {
+            try {
+                imageUrl = fetchFromItunes(song)
+            } catch (e: Exception) {
+                Log.e(TAG, "iTunes cover art fetch failed for ${song.title}", e)
+            }
         }
 
         // 2. Try MusicBrainz Search API

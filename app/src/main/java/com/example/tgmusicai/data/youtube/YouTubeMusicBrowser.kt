@@ -400,6 +400,29 @@ class YouTubeMusicBrowser(
         }
     }
 
+    /**
+     * Square, high-resolution album art for [videoId], the way YouTube Music shows it (and the way
+     * Discover gets its covers): the track's own thumbnail from `/next`, upscaled. A music video's
+     * thumbnail is a 16:9 frame (`i.ytimg.com`), so for those the official song version found by
+     * [searchSongs] with [title] and [artist] is used instead. Null when neither has square art.
+     */
+    suspend fun fetchSongArtwork(videoId: String, title: String = "", artist: String = ""): String? {
+        if (videoId.isBlank()) return null
+        val payload = JSONObject().apply {
+            put("context", webRemixContext())
+            put("videoId", videoId)
+            put("isAudioOnly", true)
+        }
+        val own = post(NEXT_URL, payload, "next-art($videoId)")?.let { root ->
+            val rows = mutableListOf<JSONObject>()
+            collectRenderers(root, "playlistPanelVideoRenderer", rows)
+            rows.firstOrNull { it.optString("videoId") == videoId }?.let { findThumbnailUrl(it.optJSONObject("thumbnail")) }
+        }
+        own?.let(::squareArtwork)?.let { return it }
+        if (title.isBlank()) return null
+        return searchSongs("$title $artist".trim()).firstNotNullOfOrNull { squareArtwork(it.thumbnailUri) }
+    }
+
     /** Lyrics for one track as YouTube Music shows them: timed per line, or plain text. */
     data class TrackLyrics(
         /** LRC with each line's end as a trailing `<mm:ss.xx>` tag when timed; plain text otherwise. */
@@ -731,6 +754,17 @@ class YouTubeMusicBrowser(
          * Each entry is a `playlistPanelVideoRenderer`. Its `shortBylineText` holds the artist
          * alone; `longBylineText` adds view and like counts, which is why it is not used.
          */
+        /**
+         * [url] as large square album art, or null when it is a video frame. YouTube Music's art
+         * (lh3 / yt3.googleusercontent.com) carries its size in the URL (`=w60-h60-l90-rj`), so
+         * asking for 1200 px is a matter of rewriting that suffix.
+         */
+        internal fun squareArtwork(url: String?): String? {
+            if (url.isNullOrBlank() || "googleusercontent.com" !in url) return null
+            val sized = Regex("""=w\d+-h\d+""")
+            return if (sized.containsMatchIn(url)) url.replace(sized, "=w1200-h1200") else "$url=w1200-h1200"
+        }
+
         internal fun parseRadioTracks(root: JSONObject, seedVideoId: String): List<YouTubeSearchResult> {
             val rows = mutableListOf<JSONObject>()
             collectRenderers(root, "playlistPanelVideoRenderer", rows)

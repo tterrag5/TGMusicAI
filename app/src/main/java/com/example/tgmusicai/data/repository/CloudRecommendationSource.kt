@@ -162,7 +162,7 @@ class CloudRecommendationSource(
         val collected = mutableListOf<YouTubeSearchResult>()
         for (artistName in seedArtists) {
             val artistRef = try {
-                browser.searchArtists(artistName).firstOrNull()
+                matchingArtist(artistName, browser.searchArtists(artistName))
             } catch (e: Throwable) {
                 Log.w(TAG, "Artist lookup failed for '$artistName'", e)
                 null
@@ -214,7 +214,7 @@ class CloudRecommendationSource(
             }
             // No track-level data: the nearest similar artist's own top tracks, via the catalogue.
             val artistName = client.similarArtists(apiKey, seed.artist, 1).firstOrNull() ?: continue
-            val artistRef = browser.searchArtists(artistName).firstOrNull() ?: continue
+            val artistRef = matchingArtist(artistName, browser.searchArtists(artistName)) ?: continue
             found += browser.fetchArtist(artistRef.browseId)?.topTracks.orEmpty().take(TRACKS_PER_RELATED_ARTIST)
         }
 
@@ -274,6 +274,27 @@ class CloudRecommendationSource(
         }
 
     internal companion object {
+        /**
+         * The search result that really is [name], or null. Taking YouTube's top result whatever
+         * it was turned a library artist called "Delta" into Delta Goodrem and filled the
+         * recommendations with an artist the user never played (T038).
+         */
+        fun matchingArtist(
+            name: String,
+            results: List<com.example.tgmusicai.data.youtube.YouTubeArtistRef>,
+        ): com.example.tgmusicai.data.youtube.YouTubeArtistRef? {
+            val wanted = normaliseArtist(name)
+            if (wanted.isBlank()) return null
+            return results.firstOrNull { normaliseArtist(it.name) == wanted }
+        }
+
+        private fun normaliseArtist(name: String): String =
+            name.lowercase()
+                .replace(Regex("[^\\p{L}\\p{N} ]"), " ")
+                .replace(Regex("^the "), "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
         private fun normalise(text: String): String =
             text.lowercase()
                 // "(Remastered 2011)", "[Official Audio]", "feat. X" say nothing about which song it is.
