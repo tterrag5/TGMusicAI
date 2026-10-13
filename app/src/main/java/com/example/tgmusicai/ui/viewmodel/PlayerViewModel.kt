@@ -29,6 +29,11 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+
+/** How long a dislike waits for autoplay to queue a next track before giving up on skipping. */
+private const val DISLIKE_SKIP_WAIT_STEPS = 150
+private const val DISLIKE_SKIP_WAIT_STEP_MS = 200L
+
 /**
  * ViewModel connecting UI components (Mini Player and Now Playing screen) to [MediaControllerManager].
  * Delegates player commands directly to the manager, manages Sleep Timer, and orchestrates lyrics & cover art scraping.
@@ -306,6 +311,41 @@ class PlayerViewModel(
                         _isCurrentSongLiked.value = false
                     }
                 }
+        }
+    }
+
+    /** True while the showing song is disliked (see [DislikeStore]). */
+    val isCurrentSongDisliked: StateFlow<Boolean> = combine(currentSong, com.example.tgmusicai.data.local.DislikeStore.keys) { song, keys ->
+        song != null && com.example.tgmusicai.data.local.DislikeStore.keyOf(song) in keys
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    /**
+     * Thumbs down (player, mini player): remembers the song as disliked so our recommendations,
+     * autoplay and radio leave it out, removes it from Liked Music, and skips it. Pressing it on
+     * an already-disliked song takes the dislike back.
+     */
+    fun toggleDislikeCurrentSong() {
+        val song = currentSong.value ?: return
+        if (com.example.tgmusicai.playback.MediaControllerManager.isSearchPlaceholder(song.mediaUri)) return
+        viewModelScope.launch {
+            if (com.example.tgmusicai.data.local.DislikeStore.isDisliked(song)) {
+                com.example.tgmusicai.data.local.DislikeStore.undislike(song)
+                return@launch
+            }
+            if (_isCurrentSongLiked.value && repository != null) {
+                repository.toggleLikeSong(repository.ensurePersisted(song))
+                _isCurrentSongLiked.value = false
+            }
+            com.example.tgmusicai.data.local.DislikeStore.dislike(song)
+            // Right after a single song starts, autoplay may not have queued anything yet; give
+            // it a few seconds to add the next track rather than leaving the disliked one playing.
+            repeat(DISLIKE_SKIP_WAIT_STEPS) {
+                if (mediaControllerManager.hasNext()) {
+                    if (currentSong.value?.let(com.example.tgmusicai.data.local.DislikeStore::keyOf) == com.example.tgmusicai.data.local.DislikeStore.keyOf(song)) skipToNext()
+                    return@launch
+                }
+                kotlinx.coroutines.delay(DISLIKE_SKIP_WAIT_STEP_MS)
+            }
         }
     }
 

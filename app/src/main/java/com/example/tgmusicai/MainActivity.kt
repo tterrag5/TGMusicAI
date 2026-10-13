@@ -141,6 +141,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val appPreferences = AppPreferences(this)
+        com.example.tgmusicai.data.local.DislikeStore.init(appPreferences, lifecycleScope)
         val database = AppDatabase.getDatabase(this)
         // Blends acoustic, lyrical, behavioural and metadata signals for Start Radio and the
         // Home screen's recommendations row. Reads only; it can never touch playback state.

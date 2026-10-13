@@ -79,6 +79,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.material.icons.rounded.ThumbDown
 import com.example.tgmusicai.ui.components.LyricsSheet
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -169,7 +170,7 @@ fun NowPlayingScreen(
     var showInfoDialog by remember { mutableStateOf(false) }
     var showSaveDialog by remember { mutableStateOf(false) }
     var showTranslateMenu by remember { mutableStateOf(false) }
-    var isDisliked by remember(currentSong?.mediaUri) { mutableStateOf(false) }
+    val isDisliked by playerViewModel.isCurrentSongDisliked.collectAsState()
 
     LaunchedEffect(translationError) {
         translationError?.let {
@@ -562,7 +563,6 @@ fun NowPlayingScreen(
                             modifier = Modifier
                                 .clickable {
                                     playerViewModel.toggleLikeCurrentSong()
-                                    if (!isLiked) isDisliked = false
                                 }
                                 .padding(horizontal = 10.dp, vertical = 4.dp)
                         ) {
@@ -587,16 +587,15 @@ fun NowPlayingScreen(
                         )
                         IconButton(
                             onClick = {
-                                // No per-song "disliked" data model exists yet -- matches the
-                                // MiniPlayer's existing dislike behavior of just skipping ahead.
-                                isDisliked = true
-                                playerViewModel.skipToNext()
+                                // Remembered (DislikeStore): left out of recommendations and
+                                // autoplay, removed from Liked, and skipped. Again = undo.
+                                playerViewModel.toggleDislikeCurrentSong()
                             },
                             modifier = Modifier.size(34.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.ThumbDownOffAlt,
-                                contentDescription = "Dislike",
+                                imageVector = if (isDisliked) Icons.Rounded.ThumbDown else Icons.Rounded.ThumbDownOffAlt,
+                                contentDescription = if (isDisliked) "Remove dislike" else "Dislike",
                                 tint = if (isDisliked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.size(18.dp)
                             )

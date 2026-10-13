@@ -124,7 +124,7 @@ class HomeViewModel(
                     recommendationEngine?.recommendForLibrary(
                         limit = RECOMMENDATION_ROW_SIZE,
                         downloadedOnly = downloadedOnly,
-                    ).orEmpty()
+                    ).orEmpty().filterNot { com.example.tgmusicai.data.local.DislikeStore.isDisliked(it) }
                 } catch (e: Throwable) {
                     emptyList()
                 }
@@ -161,7 +161,7 @@ class HomeViewModel(
                 source.recommendedTracks(
                     limit = CLOUD_RECOMMENDATION_ROW_SIZE,
                     forceRefresh = forceRefresh,
-                )
+                ).filterNot { com.example.tgmusicai.data.local.DislikeStore.isDislikedVideo(it.videoId) }
             } catch (e: Throwable) {
                 emptyList()
             }

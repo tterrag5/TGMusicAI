@@ -85,6 +85,7 @@ class AppPreferences(private val context: Context) {
         val LYRICS_TRANSLATION_LANGUAGE = stringPreferencesKey("lyrics_translation_language")
         val LYRICS_PROVIDERS = stringPreferencesKey("lyrics_providers")
         val RECENT_SEARCHES = stringPreferencesKey("recent_searches")
+        val DISLIKED_KEYS = androidx.datastore.preferences.core.stringSetPreferencesKey("disliked_keys")
         val VOLUME_NORMALIZATION_ENABLED = booleanPreferencesKey("volume_normalization_enabled")
         val SPONSORBLOCK_ENABLED = booleanPreferencesKey("sponsorblock_enabled")
         val SPONSORBLOCK_CATEGORIES = stringPreferencesKey("sponsorblock_categories")
@@ -425,6 +426,21 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setLyricsTranslationLanguage(language: String) {
         context.dataStore.edit { preferences -> preferences[LYRICS_TRANSLATION_LANGUAGE] = language }
+    }
+
+    /** Disliked songs' keys (video id, else media URI); see [DislikeStore]. */
+    val dislikedKeysFlow: Flow<Set<String>> = context.dataStore.data
+        .map { preferences ->
+            // Older builds could save a voice-search placeholder here; it never names a real song.
+            preferences[DISLIKED_KEYS].orEmpty().filterNot { it.startsWith("voice-search:") }.toSet()
+        }
+
+    suspend fun addDislikedKey(key: String) {
+        context.dataStore.edit { preferences -> preferences[DISLIKED_KEYS] = preferences[DISLIKED_KEYS].orEmpty() + key }
+    }
+
+    suspend fun removeDislikedKey(key: String) {
+        context.dataStore.edit { preferences -> preferences[DISLIKED_KEYS] = preferences[DISLIKED_KEYS].orEmpty() - key }
     }
 
     /** The Search tab's recent queries, newest first (at most [MAX_RECENT_SEARCHES]). */

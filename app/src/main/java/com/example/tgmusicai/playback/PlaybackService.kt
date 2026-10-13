@@ -362,6 +362,7 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onCreate() {
         super.onCreate()
+        com.example.tgmusicai.data.local.DislikeStore.init(AppPreferences(applicationContext), serviceScope)
 
         database = AppDatabase.getDatabase(this)
         repository = MusicRepository(
@@ -794,6 +795,9 @@ class PlaybackService : MediaLibraryService() {
 
         // Custom car-screen action IDs, handled in onCustomCommand.
         const val ACTION_TOGGLE_LIKE = "com.example.tgmusicai.ACTION_TOGGLE_LIKE"
+
+        /** Car/notification thumbs down: remember as disliked (DislikeStore), unlike, skip. */
+        const val ACTION_DISLIKE = "com.example.tgmusicai.ACTION_DISLIKE"
         const val ACTION_TOGGLE_REPEAT_MODE = "com.example.tgmusicai.ACTION_TOGGLE_REPEAT_MODE"
 
         /**
@@ -937,7 +941,7 @@ class PlaybackService : MediaLibraryService() {
         }
         autoplayTopUpJob = serviceScope.launch {
             val local = database.songDao().getRandomDownloadedSongs(need)
-                .filter { it.mediaUri !in existingIds }
+                .filter { it.mediaUri !in existingIds && !com.example.tgmusicai.data.local.DislikeStore.isDisliked(it) }
             val cloud = resolvedRecommendations(
                 AutoplayPlanner.cloudCount(need, local.size),
                 existingIds,
@@ -1047,7 +1051,7 @@ class PlaybackService : MediaLibraryService() {
                 val ordered = (radio + tracks.shuffled()).distinctBy { it.videoId }
                 for (track in ordered) {
                     if (resolved.size >= limit) break
-                    if (track.videoId in excludedVideoIds) continue
+                    if (track.videoId in excludedVideoIds || com.example.tgmusicai.data.local.DislikeStore.isDislikedVideo(track.videoId)) continue
                     val song = resolveRecommendation(track) ?: continue
                     if (song.mediaUri in excludedMediaIds) continue
                     if (resolved.any { it.mediaUri == song.mediaUri }) continue
@@ -1518,6 +1522,19 @@ class PlaybackService : MediaLibraryService() {
      * Called on every media item transition, repeat mode change, custom-command handling, and
      * once at startup so a freshly-connected head unit sees the correct initial state.
      */
+    /** The playing item as a [Song] (enough for its dislike key), read on the main thread. */
+    private suspend fun currentTrackAsSong(): Song? = withContext(Dispatchers.Main) {
+        val item = player.currentMediaItem ?: return@withContext null
+        val metadata = item.mediaMetadata
+        SongMediaExtras.toSong(
+            mediaUri = item.mediaId,
+            title = metadata.title?.toString() ?: "",
+            artist = metadata.artist?.toString() ?: "",
+            album = metadata.albumTitle?.toString() ?: "",
+            extras = metadata.extras
+        )
+    }
+
     private fun updateCustomLayout() {
         val session = mediaLibrarySession ?: return
         serviceScope.launch {
@@ -1532,6 +1549,15 @@ class PlaybackService : MediaLibraryService() {
                 .setDisplayName(if (isLiked) "Unlike" else "Like")
                 .setIconResId(if (isLiked) R.drawable.ic_thumb_up_filled else R.drawable.ic_thumb_up_outline)
                 .setSessionCommand(SessionCommand(ACTION_TOGGLE_LIKE, Bundle.EMPTY))
+                .build()
+
+            val isDisliked = currentTrackAsSong()?.let { com.example.tgmusicai.data.local.DislikeStore.isDisliked(it) } ?: false
+            val dislikeButton = CommandButton.Builder(
+                if (isDisliked) CommandButton.ICON_THUMB_DOWN_FILLED else CommandButton.ICON_THUMB_DOWN_UNFILLED
+            )
+                .setDisplayName(if (isDisliked) "Remove dislike" else "Dislike")
+                .setIconResId(if (isDisliked) R.drawable.ic_thumb_down_filled else R.drawable.ic_thumb_down_outline)
+                .setSessionCommand(SessionCommand(ACTION_DISLIKE, Bundle.EMPTY))
                 .build()
 
             val (repeatIcon, repeatIconRes, repeatTitle) = when (repeatMode) {
@@ -1552,7 +1578,7 @@ class PlaybackService : MediaLibraryService() {
                 .build()
 
             withContext(Dispatchers.Main) {
-                session.setCustomLayout(ImmutableList.of(likeButton, repeatButton, radioButton))
+                session.setCustomLayout(ImmutableList.of(likeButton, dislikeButton, repeatButton, radioButton))
             }
         }
     }
@@ -1606,6 +1632,7 @@ class PlaybackService : MediaLibraryService() {
             val defaultResult = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).build()
             val availableSessionCommands = defaultResult.availableSessionCommands.buildUpon()
                 .add(SessionCommand(ACTION_TOGGLE_LIKE, Bundle.EMPTY))
+                .add(SessionCommand(ACTION_DISLIKE, Bundle.EMPTY))
                 .add(SessionCommand(ACTION_START_RADIO, Bundle.EMPTY))
                 .add(SessionCommand(ACTION_TOGGLE_REPEAT_MODE, Bundle.EMPTY))
                 .add(SessionCommand(ACTION_PLAY_REQUEST, Bundle.EMPTY))
@@ -1843,6 +1870,25 @@ class PlaybackService : MediaLibraryService() {
                             }
                             trackedSongId = songId
                             repository.toggleLikeSong(songId)
+                            updateCustomLayout()
+                        }
+                    }
+                    return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                }
+
+                ACTION_DISLIKE -> {
+                    serviceScope.launch {
+                        val song = currentTrackAsSong()
+                        if (song != null) {
+                            if (com.example.tgmusicai.data.local.DislikeStore.isDisliked(song)) {
+                                com.example.tgmusicai.data.local.DislikeStore.undislike(song)
+                            } else {
+                                resolveTrackedSongId()?.let { id ->
+                                    if (repository.isSongLikedSync(id)) repository.toggleLikeSong(id)
+                                }
+                                com.example.tgmusicai.data.local.DislikeStore.dislike(song)
+                                withContext(Dispatchers.Main) { if (player.hasNextMediaItem()) player.seekToNextMediaItem() }
+                            }
                             updateCustomLayout()
                         }
                     }

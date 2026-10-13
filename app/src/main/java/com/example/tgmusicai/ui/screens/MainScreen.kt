@@ -147,6 +147,7 @@ fun MainScreen(
     val playbackQueue by playerViewModel.playlist.collectAsState()
     var showQueueSheet by remember { mutableStateOf(false) }
     val playingFrom by playerViewModel.playingFrom.collectAsState()
+    val isCurrentDisliked by playerViewModel.isCurrentSongDisliked.collectAsState()
 
     val userPlaylists by playlistViewModel.playlists.collectAsState()
     val playlistCoverArtwork by playlistViewModel.playlistCoverArtwork.collectAsState()
@@ -239,9 +240,7 @@ fun MainScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp)
                     ) {
-                        Image(
-                            painter = painterResource(id = R.drawable.ic_logo),
-                            contentDescription = "TGMusic",
+                        com.example.tgmusicai.ui.components.AppLogo(
                             modifier = Modifier
                                 .size(32.dp)
                                 .clip(CircleShape)
@@ -486,7 +485,9 @@ fun MainScreen(
                         onSkipNextClick = playerViewModel::skipToNext,
                         onExpandPlayer = playerViewModel::expandNowPlaying,
                         isResolving = isResolving,
-                        onShowQueue = { showQueueSheet = true }
+                        onShowQueue = { showQueueSheet = true },
+                        onDislikeClick = playerViewModel::toggleDislikeCurrentSong,
+                        isDisliked = isCurrentDisliked,
                     )
 
                     NavigationBar(

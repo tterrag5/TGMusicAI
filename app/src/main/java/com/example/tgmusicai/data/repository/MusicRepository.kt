@@ -349,10 +349,17 @@ class MusicRepository(
      * perfectly predictable. There's no genre field in the schema, so this uses producer/artist
      * overlap only, not the full producer/artist/genre similarity the original spec described.
      */
+    /** A radio for [seedSong], without songs the user disliked. */
     suspend fun buildRadioQueue(
         seedSong: Song,
         limit: Int = 20,
         variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Song> = buildRadioQueueRaw(seedSong, limit, variety).filterNot { com.example.tgmusicai.data.local.DislikeStore.isDisliked(it) }
+
+    private suspend fun buildRadioQueueRaw(
+        seedSong: Song,
+        limit: Int,
+        variety: VarietyMode,
     ): List<Song> {
         // The engine blends how the songs sound, what they say, and what actually gets played
         // together; the producer/artist walk below is kept as its fallback. A recommendation
@@ -392,10 +399,17 @@ class MusicRepository(
      * seed contributes its own related songs ([RecommendationEngine.recommendForSeeds]). If the
      * engine has nothing, each seed's single-seed radio is merged in turn instead.
      */
+    /** A radio blended from several [seeds], without songs the user disliked. */
     suspend fun buildRadioQueue(
         seeds: List<Song>,
         limit: Int = 20,
         variety: VarietyMode = VarietyMode.BLEND,
+    ): List<Song> = buildRadioQueueRaw(seeds, limit, variety).filterNot { com.example.tgmusicai.data.local.DislikeStore.isDisliked(it) }
+
+    private suspend fun buildRadioQueueRaw(
+        seeds: List<Song>,
+        limit: Int,
+        variety: VarietyMode,
     ): List<Song> {
         val distinctSeeds = seeds.distinctBy { it.id }.take(MAX_RADIO_SEEDS)
         if (distinctSeeds.isEmpty()) return emptyList()

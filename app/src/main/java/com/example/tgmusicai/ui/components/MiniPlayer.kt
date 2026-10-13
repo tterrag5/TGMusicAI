@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ThumbDownOffAlt
+import androidx.compose.material.icons.rounded.ThumbDown
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -70,6 +72,8 @@ fun MiniPlayer(
     onExpandPlayer: () -> Unit,
     isResolving: Boolean = false,
     onShowQueue: () -> Unit = {},
+    onDislikeClick: (() -> Unit)? = null,
+    isDisliked: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     AnimatedVisibility(
@@ -192,6 +196,16 @@ fun MiniPlayer(
                                 )
                             }
                         } else {
+                            if (onDislikeClick != null) {
+                                IconButton(onClick = onDislikeClick) {
+                                    Icon(
+                                        imageVector = if (isDisliked) Icons.Rounded.ThumbDown else Icons.Rounded.ThumbDownOffAlt,
+                                        contentDescription = if (isDisliked) "Remove dislike" else "Dislike",
+                                        tint = if (isDisliked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
                             IconButton(onClick = onPlayPauseClick) {
                                 Icon(
                                     imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,

@@ -150,9 +150,7 @@ fun HomeScreen(
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Image(
-                            painter = painterResource(id = R.drawable.ic_logo),
-                            contentDescription = null,
+                        com.example.tgmusicai.ui.components.AppLogo(
                             modifier = Modifier
                                 .size(28.dp)
                                 .clip(CircleShape)

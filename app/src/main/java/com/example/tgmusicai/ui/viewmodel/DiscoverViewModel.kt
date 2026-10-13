@@ -81,7 +81,9 @@ class DiscoverViewModel(
                 // The home feed first, and shown as soon as it lands: it is the one source that
                 // reliably returns something, so waiting on the other two before drawing anything
                 // would leave the screen blank for no reason.
-                _homeShelves.value = browser.fetchHomeFeed()
+                _homeShelves.value = browser.fetchHomeFeed().map { shelf ->
+                    shelf.copy(tracks = shelf.tracks.filterNot { com.example.tgmusicai.data.local.DislikeStore.isDislikedVideo(it.videoId) })
+                }
                 _moods.value = browser.fetchMoodCategories()
                 _charts.value = browser.fetchTopChart()
             } finally {
@@ -141,7 +143,7 @@ class DiscoverViewModel(
                     attempts++
                     val page = pager.nextPage()
                     if (page.isNotEmpty()) {
-                        _feedTracks.value = _feedTracks.value + page
+                        _feedTracks.value = _feedTracks.value + page.filterNot { com.example.tgmusicai.data.local.DislikeStore.isDislikedVideo(it.videoId) }
                         break
                     }
                     if (pager.exhausted) break

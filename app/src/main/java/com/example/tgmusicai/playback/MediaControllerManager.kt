@@ -848,6 +848,9 @@ class MediaControllerManager(
         _currentPositionMs.value = positionMs
     }
 
+    /** True when the queue holds a track after the current one. */
+    fun hasNext(): Boolean = controller?.hasNextMediaItem() == true
+
     /**
      * Skips to the next track in the queue.
      */
