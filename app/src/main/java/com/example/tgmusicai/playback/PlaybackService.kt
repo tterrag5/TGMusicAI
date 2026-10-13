@@ -1123,6 +1123,8 @@ class PlaybackService : MediaLibraryService() {
     // runs for as long as the Service does, independent of Activity lifecycle -- fixing the "plays
     // during background listening are never counted" bug.
     private var trackedMediaId: String? = null
+    /** The item being tracked, kept so a song never saved to the library can be saved when its play counts. */
+    private var trackedMediaItem: MediaItem? = null
     private var trackedSongId: Long? = null
     private var trackedYoutubeId: String? = null
     // The playlist the current item was queued from, if any, so a play can be counted against it.
@@ -1305,6 +1307,7 @@ class PlaybackService : MediaLibraryService() {
         currentItemStartedAtEpochSeconds = System.currentTimeMillis() / 1000
         submitNowPlaying(mediaItem)
         trackedMediaId = mediaItem?.mediaId
+        trackedMediaItem = mediaItem
         val extras = mediaItem?.mediaMetadata?.extras
         trackedSongId = SongMediaExtras.songId(extras)
         trackedYoutubeId = SongMediaExtras.youtubeId(extras)
@@ -1362,6 +1365,26 @@ class PlaybackService : MediaLibraryService() {
         return trackedYoutubeId?.takeIf { it.isNotBlank() }?.let { database.songDao().getSongByYoutubeId(it)?.id }
     }
 
+    /**
+     * [resolveTrackedSongId], or, for a track never saved (played straight from Home, Search or a
+     * YouTube Music page), saves it first. Stats used to drop those plays because there was no row
+     * to count them against (T041: "Discover doesn't add to stats"). Autoplay already saves the
+     * tracks it adds the same way.
+     */
+    private suspend fun resolveOrPersistTrackedSongId(): Long? {
+        resolveTrackedSongId()?.let { return it }
+        val item = trackedMediaItem ?: return null
+        val metadata = item.mediaMetadata
+        val song = SongMediaExtras.toSong(
+            mediaUri = item.mediaId,
+            title = metadata.title?.toString() ?: return null,
+            artist = metadata.artist?.toString() ?: "Unknown Artist",
+            album = metadata.albumTitle?.toString() ?: "",
+            extras = metadata.extras
+        )
+        return repository.ensurePersisted(song).takeIf { it > 0L }
+    }
+
     private fun recordPlay() {
         if (trackedMediaId == null) return
         // Same threshold as a counted play (30s or half the track), once per play, cloud only.
@@ -1370,7 +1393,7 @@ class PlaybackService : MediaLibraryService() {
             serviceScope.launch(Dispatchers.IO) { youtubeHistoryReporter.report(videoId) }
         }
         serviceScope.launch(Dispatchers.IO) {
-            val songId = resolveTrackedSongId() ?: return@launch
+            val songId = resolveOrPersistTrackedSongId() ?: return@launch
             trackedSongId = songId
             database.songStatsDao().incrementPlayCount(songId)
             // Counted against the playlist as well when the queue came from one. What a playlist is
@@ -1388,7 +1411,7 @@ class PlaybackService : MediaLibraryService() {
         }
         pendingFlushMs = 0L
         serviceScope.launch(Dispatchers.IO) {
-            val songId = resolveTrackedSongId() ?: return@launch
+            val songId = resolveOrPersistTrackedSongId() ?: return@launch
             trackedSongId = songId
             database.songStatsDao().addListenTime(songId, ms)
             database.listeningHistoryDao().insert(ListeningHistory(songId = songId, durationMs = ms))
