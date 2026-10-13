@@ -1,6 +1,27 @@
 package com.example.tgmusicai.ui.components
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.layout.offset
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Velocity
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -26,7 +47,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
@@ -59,7 +79,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -89,9 +108,12 @@ private const val LYRICS_MANUAL_SCROLL_GRACE_MS = 3000L
 
 /**
  * Full-height lyrics sheet modelled on YT Music Morphe: a compact player header (cover, title,
- * artist, previous / play / next), then big left-aligned lines where the one being sung is bright
+ * artist, previous / play / next), then big centred lines where the one being sung is bright
  * and the rest are dimmed, and Copy / Translate / Refresh along the bottom. Tapping a timed line
- * seeks to it. The word-by-word fill only runs when the source timed each word.
+ * seeks to it, and the line being sung fills syllable by syllable.
+ *
+ * Dragging the header down, or pulling the lyrics down past their top, closes the sheet. The
+ * lookup runs in PlayerViewModel's scope, so closing while it is still searching does not stop it.
  */
 @Composable
 fun LyricsSheet(
@@ -118,13 +140,63 @@ fun LyricsSheet(
     val bright = Color.White
     val dim = Color.White.copy(alpha = 0.35f)
 
+    // Drag-to-dismiss: how far the sheet is pulled down, in px.
+    val scope = rememberCoroutineScope()
+    val dragOffset = remember { Animatable(0f) }
+    var sheetHeight by remember { mutableIntStateOf(0) }
+    val currentOnClose by rememberUpdatedState(onClose)
+    fun settle(velocity: Float) {
+        scope.launch {
+            val farEnough = dragOffset.value > sheetHeight * DISMISS_FRACTION
+            if (farEnough || velocity > DISMISS_VELOCITY) {
+                currentOnClose()
+            } else {
+                dragOffset.animateTo(0f, spring())
+            }
+        }
+    }
+    fun dragBy(delta: Float): Float {
+        val old = dragOffset.value
+        val new = (old + delta).coerceAtLeast(0f)
+        scope.launch { dragOffset.snapTo(new) }
+        return new - old
+    }
+    val headerDrag = rememberDraggableState { dragBy(it) }
+    // Pulling the lyrics down while they are already at the top moves the sheet instead; scrolling
+    // back up first gives that distance back before the list scrolls again.
+    val pullToClose = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset =
+                if (available.y < 0f && dragOffset.value > 0f) Offset(0f, dragBy(available.y)) else Offset.Zero
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset =
+                if (available.y > 0f && source == NestedScrollSource.UserInput) Offset(0f, dragBy(available.y)) else Offset.Zero
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (dragOffset.value <= 0f) return Velocity.Zero
+                settle(available.y)
+                return available
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
+            .onSizeChanged { sheetHeight = it.height }
+            .offset { IntOffset(0, dragOffset.value.roundToInt()) }
             .background(Brush.verticalGradient(listOf(tint, Color.Black)))
             .statusBarsPadding()
             .navigationBarsPadding()
+            .nestedScroll(pullToClose)
     ) {
+        Column(
+            modifier = Modifier.draggable(
+                state = headerDrag,
+                orientation = Orientation.Vertical,
+                onDragStopped = { velocity -> settle(velocity) },
+            )
+        ) {
         // Compact player header.
         Row(
             modifier = Modifier
@@ -198,24 +270,19 @@ fun LyricsSheet(
                     .background(Color.White.copy(alpha = 0.3f))
             )
         }
-        Row(
+        Text(
+            text = "Lyrics",
+            color = bright,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 20.dp, end = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Lyrics",
-                color = bright,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f)
-            )
-            IconButton(onClick = onClose) {
-                Icon(Icons.Rounded.Close, contentDescription = "Close lyrics", tint = bright)
-            }
-        }
+                .semantics { onClick(label = "Close lyrics") { currentOnClose(); true } }
+                .padding(vertical = 10.dp)
+        )
         HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+        }
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             if (lines.isEmpty()) {
@@ -348,10 +415,6 @@ private fun SyncedLyricsList(
         }
         index
     }
-    val active = lines.getOrNull(activeIndex)
-    val activeHasRealWords = active?.let { it.hasRealWordTimings && it.words.isNotEmpty() } == true
-    // A finer clock than the position ticker, only while a word-timed line is being sung.
-    val smoothedMs = rememberSmoothedPositionMs(cursorMs, isPlaying && activeHasRealWords)
 
     val listState = rememberLazyListState()
     var lastManualScrollMs by remember { mutableLongStateOf(0L) }
@@ -384,20 +447,29 @@ private fun SyncedLyricsList(
             val isActive = index == activeIndex
             val color by animateColorAsState(if (isActive) bright else dim, tween(250), label = "lyricLine")
             Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
                     .clickable(enabled = line.timestampMs >= 0) { onSeek(line.timestampMs) }
                     .padding(vertical = 8.dp)
             ) {
-                val karaoke = isActive && !line.isInstrumental && line.hasRealWordTimings && line.words.isNotEmpty()
-                Text(
-                    text = if (karaoke) karaokeLine(line, smoothedMs, bright, dim) else AnnotatedString(line.text),
-                    color = color,
-                    fontSize = if (line.isInstrumental) 28.sp else 26.sp,
-                    lineHeight = 34.sp,
-                    fontWeight = FontWeight.Bold,
-                )
+                // Every synced line fills syllable by syllable: real word timings when the source
+                // has them (Apple Music / YouTube Music word sync), else the estimate from
+                // LyricsRepository.withWordTimings.
+                val karaoke = isActive && !line.isInstrumental && line.words.isNotEmpty()
+                if (karaoke) {
+                    KaraokeActiveLine(line, cursorMs, isPlaying, color, bright, dim)
+                } else {
+                    Text(
+                        text = line.text,
+                        color = color,
+                        fontSize = if (line.isInstrumental) 28.sp else 26.sp,
+                        lineHeight = 34.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                    )
+                }
                 translatedLines?.takeIf { !line.isInstrumental }?.getOrNull(index)?.let { translated ->
                     Text(
                         text = translated,
@@ -405,6 +477,7 @@ private fun SyncedLyricsList(
                         fontSize = 17.sp,
                         lineHeight = 22.sp,
                         fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center,
                         modifier = Modifier.padding(top = 2.dp)
                     )
                 }
@@ -412,3 +485,33 @@ private fun SyncedLyricsList(
         }
     }
 }
+
+/**
+ * The line being sung. It owns the per-frame clock, so only this line recomposes every frame,
+ * not the whole list (which made the sheet stall).
+ */
+@Composable
+private fun KaraokeActiveLine(
+    line: LyricLine,
+    cursorMs: Long,
+    isPlaying: Boolean,
+    color: Color,
+    bright: Color,
+    dim: Color,
+) {
+    val smoothedMs = rememberSmoothedPositionMs(cursorMs, isPlaying)
+    Text(
+        text = karaokeLine(line, smoothedMs, bright, dim),
+        color = color,
+        fontSize = 26.sp,
+        lineHeight = 34.sp,
+        fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Center,
+    )
+}
+
+/** Pulled down this fraction of its height, the sheet closes on release. */
+private const val DISMISS_FRACTION = 0.25f
+
+/** A downward fling faster than this (px/s) closes the sheet however far it moved. */
+private const val DISMISS_VELOCITY = 1500f
