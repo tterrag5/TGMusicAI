@@ -308,6 +308,11 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         )
+                        val searchViewModel: com.example.tgmusicai.ui.viewmodel.SearchViewModel = viewModel(
+                            factory = remember {
+                                com.example.tgmusicai.ui.viewmodel.SearchViewModel.Factory(repository, youTubeMusicBrowser, appPreferences)
+                            }
+                        )
                         val recognitionViewModel: RecognitionViewModel = viewModel(
                             factory = remember { RecognitionViewModel.Factory(songRecognitionManager) }
                         )
@@ -333,6 +338,7 @@ class MainActivity : ComponentActivity() {
                             youTubeViewModel = youTubeViewModel,
                             googleSyncViewModel = googleSyncViewModel,
                             discoverViewModel = discoverViewModel,
+                            searchViewModel = searchViewModel,
                             recognitionViewModel = recognitionViewModel,
                             mediaControllerManager = mediaControllerManager,
                             currentTheme = selectedTheme,

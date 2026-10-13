@@ -28,6 +28,9 @@ class AppPreferences(private val context: Context) {
     companion object {
         const val DEFAULT_CROSSFADE_DURATION_SEC = 3
         const val DEFAULT_TRANSLATION_LANGUAGE = "Spanish"
+        const val MAX_RECENT_SEARCHES = 8
+        /** Unit separator: cannot be typed into a search box, so it never splits a query. */
+        const val RECENT_SEARCH_SEPARATOR = "\u001F"
 
         /**
          * Categories skipped when SponsorBlock is switched on and the user has not narrowed them.
@@ -81,6 +84,7 @@ class AppPreferences(private val context: Context) {
         val CROSSFADE_DURATION_SEC = intPreferencesKey("crossfade_duration_sec")
         val LYRICS_TRANSLATION_LANGUAGE = stringPreferencesKey("lyrics_translation_language")
         val LYRICS_PROVIDERS = stringPreferencesKey("lyrics_providers")
+        val RECENT_SEARCHES = stringPreferencesKey("recent_searches")
         val VOLUME_NORMALIZATION_ENABLED = booleanPreferencesKey("volume_normalization_enabled")
         val SPONSORBLOCK_ENABLED = booleanPreferencesKey("sponsorblock_enabled")
         val SPONSORBLOCK_CATEGORIES = stringPreferencesKey("sponsorblock_categories")
@@ -422,6 +426,29 @@ class AppPreferences(private val context: Context) {
     suspend fun setLyricsTranslationLanguage(language: String) {
         context.dataStore.edit { preferences -> preferences[LYRICS_TRANSLATION_LANGUAGE] = language }
     }
+
+    /** The Search tab's recent queries, newest first (at most [MAX_RECENT_SEARCHES]). */
+    val recentSearchesFlow: Flow<List<String>> = context.dataStore.data
+        .map { preferences -> decodeRecentSearches(preferences[RECENT_SEARCHES]) }
+
+    suspend fun addRecentSearch(query: String) {
+        context.dataStore.edit { preferences ->
+            val current = decodeRecentSearches(preferences[RECENT_SEARCHES])
+            val updated = (listOf(query) + current.filterNot { it.equals(query, ignoreCase = true) })
+                .take(MAX_RECENT_SEARCHES)
+            preferences[RECENT_SEARCHES] = updated.joinToString(RECENT_SEARCH_SEPARATOR)
+        }
+    }
+
+    suspend fun removeRecentSearch(query: String) {
+        context.dataStore.edit { preferences ->
+            val updated = decodeRecentSearches(preferences[RECENT_SEARCHES]).filterNot { it == query }
+            preferences[RECENT_SEARCHES] = updated.joinToString(RECENT_SEARCH_SEPARATOR)
+        }
+    }
+
+    private fun decodeRecentSearches(raw: String?): List<String> =
+        raw?.split(RECENT_SEARCH_SEPARATOR)?.filter { it.isNotBlank() }.orEmpty()
 
     /** Lyrics sources in the order they are tried, each on or off (Settings → Lyrics). */
     val lyricsProvidersFlow: Flow<List<com.example.tgmusicai.data.lyrics.LyricsProviderSetting>> = context.dataStore.data

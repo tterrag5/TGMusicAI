@@ -19,6 +19,10 @@ sealed interface Screen : NavKey {
     @Serializable
     data object Library : Screen
 
+    /** YT Music-style Search tab: YouTube Music catalogue search plus library matches. */
+    @Serializable
+    data object Search : Screen
+
 
     /**
      * Alarms tab allowing creation, viewing, editing, and toggling of musical alarms.

@@ -35,6 +35,13 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.outlined.Alarm
+import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.rounded.Bookmark
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Settings
@@ -112,6 +119,7 @@ fun MainScreen(
     youTubeViewModel: YouTubeViewModel,
     googleSyncViewModel: GoogleSyncViewModel,
     discoverViewModel: com.example.tgmusicai.ui.viewmodel.DiscoverViewModel,
+    searchViewModel: com.example.tgmusicai.ui.viewmodel.SearchViewModel,
     recognitionViewModel: com.example.tgmusicai.ui.viewmodel.RecognitionViewModel,
     mediaControllerManager: MediaControllerManager,
     modifier: Modifier = Modifier,
@@ -486,33 +494,29 @@ fun MainScreen(
                         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f),
                         contentColor = MaterialTheme.colorScheme.onSurface
                     ) {
-                        NavigationBarItem(
-                            selected = currentDestination is Screen.Home,
-                            onClick = {
-                                navigateTopLevel(Screen.Home)
-                            },
-                            icon = { Icon(Icons.Rounded.Home, contentDescription = "Home") },
-                            label = { Text("Home") }
+                        // YT Music's bar: outline icons that fill when selected, no indicator pill.
+                        val tabColors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.onSurface,
+                            selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            indicatorColor = Color.Transparent,
                         )
-
-
-                        NavigationBarItem(
-                            selected = currentDestination is Screen.Library,
-                            onClick = {
-                                navigateTopLevel(Screen.Library)
-                            },
-                            icon = { Icon(Icons.Rounded.LibraryMusic, contentDescription = "Library") },
-                            label = { Text("Library") }
-                        )
-
-                        NavigationBarItem(
-                            selected = currentDestination is Screen.Alarms,
-                            onClick = {
-                                navigateTopLevel(Screen.Alarms)
-                            },
-                            icon = { Icon(Icons.Rounded.Alarm, contentDescription = "Alarms") },
-                            label = { Text("Alarms") }
-                        )
+                        listOf(
+                            Triple(Screen.Home, "Home", Icons.Rounded.Home to Icons.Outlined.Home),
+                            Triple(Screen.Search, "Search", Icons.Rounded.Search to Icons.Outlined.Search),
+                            Triple(Screen.Library, "Library", Icons.Rounded.Bookmark to Icons.Outlined.BookmarkBorder),
+                            Triple(Screen.Alarms, "Alarms", Icons.Rounded.Alarm to Icons.Outlined.Alarm),
+                        ).forEach { (screen, label, icons) ->
+                            val selected = currentDestination == screen
+                            NavigationBarItem(
+                                selected = selected,
+                                onClick = { navigateTopLevel(screen) },
+                                icon = { Icon(if (selected) icons.first else icons.second, contentDescription = label) },
+                                label = { Text(label, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal) },
+                                colors = tabColors,
+                            )
+                        }
                     }
                 }
                 }
@@ -642,6 +646,27 @@ fun MainScreen(
                                             onOpenAlbum = { album ->
                                                 backStack.add(Screen.AlbumDetail(album.browseId, album.title))
                                             }
+                                        )
+                                    }
+                                    is Screen.Search -> {
+                                        SearchScreen(
+                                            searchViewModel = searchViewModel,
+                                            homeViewModel = homeViewModel,
+                                            onPlayCloud = { result ->
+                                                youTubeViewModel.playTrack(result, mediaControllerManager)
+                                                playerViewModel.expandNowPlaying()
+                                            },
+                                            onDownloadCloud = { result -> youTubeViewModel.downloadTrack(result) },
+                                            onPlayLibrarySong = { song, queue ->
+                                                playerViewModel.playSong(song = song, queue = queue)
+                                                playerViewModel.expandNowPlaying()
+                                            },
+                                            onOpenArtist = { artist ->
+                                                backStack.add(Screen.ArtistDetail(artist.browseId, artist.name))
+                                            },
+                                            onOpenAlbum = { album ->
+                                                backStack.add(Screen.AlbumDetail(album.browseId, album.title))
+                                            },
                                         )
                                     }
                                     is Screen.Alarms -> {
