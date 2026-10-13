@@ -14,8 +14,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridScope
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -136,15 +141,17 @@ fun LibraryOverviewList(
     onPlaylistClick: (Long, String) -> Unit,
     onArtistClick: (LibraryArtist) -> Unit,
     onNewPlaylist: () -> Unit,
+    isGrid: Boolean = false,
 ) {
     // Liked Music always exists, so an empty list only means playlists have not loaded yet. Drawing
     // the artists first would anchor the list on them and push the playlists above the top.
     if (playlists.isEmpty()) return
     Box(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(contentPadding = PaddingValues(bottom = 120.dp), modifier = Modifier.fillMaxSize()) {
+        LibraryCollection(isGrid) {
             items(playlists, key = { "pl_${it.playlist.playlistId}" }) { pws ->
                 val p = pws.playlist
-                LibraryRow(
+                LibraryEntry(
+                    isGrid = isGrid,
                     title = p.name,
                     subtitle = (if (p.isSmart) "Auto playlist" else "Playlist") + " • ${songCount(pws.songs.size)}",
                     pinned = p.isPinned || p.name == "Liked Music",
@@ -154,7 +161,8 @@ fun LibraryOverviewList(
                 }
             }
             items(artists, key = { "artist_${it.name}" }) { artist ->
-                LibraryRow(
+                LibraryEntry(
+                    isGrid = isGrid,
                     title = artist.name,
                     subtitle = "Artist • ${songCount(artist.songCount)}",
                     shape = CircleShape,
@@ -177,10 +185,11 @@ fun LibraryOverviewList(
 }
 
 @Composable
-fun LibraryArtistList(artists: List<LibraryArtist>, onArtistClick: (LibraryArtist) -> Unit) {
-    LazyColumn(contentPadding = PaddingValues(bottom = 120.dp), modifier = Modifier.fillMaxSize()) {
+fun LibraryArtistList(artists: List<LibraryArtist>, isGrid: Boolean = false, onArtistClick: (LibraryArtist) -> Unit) {
+    LibraryCollection(isGrid) {
         items(artists, key = { it.name }) { artist ->
-            LibraryRow(
+            LibraryEntry(
+                isGrid = isGrid,
                 title = artist.name,
                 subtitle = songCount(artist.songCount) + if (artist.plays > 0) " • ${artist.plays} plays" else "",
                 shape = CircleShape,
@@ -191,10 +200,11 @@ fun LibraryArtistList(artists: List<LibraryArtist>, onArtistClick: (LibraryArtis
 }
 
 @Composable
-fun LibraryAlbumList(albums: List<LibraryAlbum>, onAlbumClick: (LibraryAlbum) -> Unit) {
-    LazyColumn(contentPadding = PaddingValues(bottom = 120.dp), modifier = Modifier.fillMaxSize()) {
+fun LibraryAlbumList(albums: List<LibraryAlbum>, isGrid: Boolean = false, onAlbumClick: (LibraryAlbum) -> Unit) {
+    LibraryCollection(isGrid) {
         items(albums, key = { "${it.title}|${it.artist}" }) { album ->
-            LibraryRow(
+            LibraryEntry(
+                isGrid = isGrid,
                 title = album.title,
                 subtitle = "Album • ${album.artist} • ${songCount(album.songCount)}",
                 onClick = { onAlbumClick(album) },
@@ -217,6 +227,92 @@ private fun Thumb(uri: String?, placeholder: ImageVector) {
     }
 }
 
+/**
+ * The scrolling container for a Library view: a three-column grid of tiles, or a list of rows.
+ * Both are a [LazyVerticalGrid] (one column for the list) so a view fills it the same way.
+ */
+@Composable
+internal fun LibraryCollection(isGrid: Boolean, content: LazyGridScope.() -> Unit) {
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(if (isGrid) 3 else 1),
+        contentPadding = if (isGrid) PaddingValues(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 120.dp)
+        else PaddingValues(bottom = 120.dp),
+        modifier = Modifier.fillMaxSize(),
+        content = content,
+    )
+}
+
+/** One playlist, artist or album: a [LibraryTile] in grid view, a [LibraryRow] in list view. */
+@Composable
+internal fun LibraryEntry(
+    isGrid: Boolean,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    shape: Shape = RoundedCornerShape(6.dp),
+    pinned: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
+    artwork: @Composable () -> Unit,
+) {
+    if (isGrid) {
+        LibraryTile(title, subtitle, onClick, shape, pinned, onLongClick, artwork)
+    } else {
+        LibraryRow(title, subtitle, onClick, shape, pinned, onLongClick, artwork)
+    }
+}
+
+/** Square artwork (round for artists) with the title and subtitle under it. */
+@Composable
+private fun LibraryTile(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    shape: Shape,
+    pinned: Boolean,
+    onLongClick: (() -> Unit)?,
+    artwork: @Composable () -> Unit,
+) {
+    Column(
+        horizontalAlignment = if (shape == CircleShape) Alignment.CenterHorizontally else Alignment.Start,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(6.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(shape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center
+        ) { artwork() }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            title,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (pinned) {
+                Icon(Icons.Rounded.PushPin, contentDescription = "Pinned", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(12.dp))
+                Spacer(modifier = Modifier.width(3.dp))
+            }
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
 @Composable
 private fun LibraryRow(
     title: String,
@@ -224,13 +320,14 @@ private fun LibraryRow(
     onClick: () -> Unit,
     shape: Shape = RoundedCornerShape(6.dp),
     pinned: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
     artwork: @Composable () -> Unit,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
         Box(

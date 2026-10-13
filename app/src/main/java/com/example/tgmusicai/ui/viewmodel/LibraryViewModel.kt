@@ -56,8 +56,9 @@ private const val TAG_FILTER_CHIP_LIMIT = 12
  * bar), which split one idea across three places.
  */
 /** YT Music's Library filter pills. None selected shows everything (playlists, then artists). */
+/** In YT Music's pill order (Downloads, Playlists, [Podcasts], Songs, Albums, Artists). */
 enum class LibraryPill(val label: String) {
-    PLAYLISTS("Playlists"), SONGS("Songs"), ALBUMS("Albums"), ARTISTS("Artists"), DOWNLOADS("Downloads")
+    DOWNLOADS("Downloads"), PLAYLISTS("Playlists"), SONGS("Songs"), ALBUMS("Albums"), ARTISTS("Artists")
 }
 
 class LibraryViewModel(

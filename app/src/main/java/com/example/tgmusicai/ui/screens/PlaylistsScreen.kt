@@ -70,6 +70,8 @@ fun PlaylistsContent(
     onOpenYouTubeImport: (() -> Unit)? = null,
     /** The Library's chosen order (Liked Music first). Null keeps pinned-first. */
     orderedPlaylists: List<com.example.tgmusicai.data.local.entity.PlaylistWithSongs>? = null,
+    /** The Library's grid / list toggle. */
+    isGridView: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val playlistsWithSongs by playlistViewModel.playlistsWithSongs.collectAsState()
@@ -224,10 +226,39 @@ fun PlaylistsContent(
                     )
                 }
 
-                // Always a grid. Artwork is how a playlist is recognised, and a row of text
-                // with a thumbnail made every playlist look the same; there is no reason to offer
-                // the weaker of the two.
-                LazyVerticalGrid(
+                // Grid by default; the Library's toggle switches to YT Music-style rows.
+                if (!isGridView) {
+                    LibraryCollection(isGrid = false) {
+                        items(sortedPlaylists, key = { it.playlist.playlistId }) { pws ->
+                            val playlist = pws.playlist
+                            val isSelectable = !MusicRepository.isProtectedSmartPlaylist(playlist)
+                            LibraryEntry(
+                                isGrid = false,
+                                title = playlist.name,
+                                subtitle = (if (playlist.isSmart) "Auto playlist" else "Playlist") +
+                                    " • ${pws.songs.size} song${if (pws.songs.size == 1) "" else "s"}",
+                                pinned = playlist.isPinned,
+                                onClick = {
+                                    if (isSelectionMode) {
+                                        if (isSelectable) playlistViewModel.togglePlaylistSelected(playlist.playlistId)
+                                    } else {
+                                        onPlaylistClick(playlist.playlistId, playlist.name)
+                                    }
+                                },
+                                onLongClick = if (isSelectable) {
+                                    { playlistViewModel.startPlaylistSelection(playlist.playlistId) }
+                                } else {
+                                    null
+                                },
+                            ) {
+                                com.example.tgmusicai.ui.components.PlaylistCoverArt(
+                                    artworkUris = coverArtwork[playlist.playlistId].orEmpty(),
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
+                    }
+                } else LazyVerticalGrid(
                     columns = GridCells.Fixed(3),
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = listContentPadding

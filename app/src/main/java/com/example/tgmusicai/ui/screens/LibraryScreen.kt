@@ -297,7 +297,7 @@ fun LibraryScreen(
                 onPill = libraryViewModel::togglePill,
                 sort = sort,
                 onSort = libraryViewModel::setSort,
-                isGridView = if (songsMode) isGridView else null,
+                isGridView = isGridView,
                 onToggleGrid = libraryViewModel::toggleGridView,
             )
 
@@ -455,6 +455,7 @@ fun LibraryScreen(
                     onPlaylistClick = onPlaylistClick,
                     onOpenYouTubeImport = onOpenYouTubeImport,
                     orderedPlaylists = sortedPlaylists,
+                    isGridView = isGridView,
                 )
             } else if (pill == null) {
                 LibraryOverviewList(
@@ -464,6 +465,7 @@ fun LibraryScreen(
                     onPlaylistClick = onPlaylistClick,
                     onArtistClick = { libraryViewModel.showSongsMatching(it.name) },
                     onNewPlaylist = { playlistViewModel?.openCreatePlaylistDialog() },
+                    isGrid = isGridView,
                 )
                 if (showCreatePlaylist && playlistViewModel != null) {
                     CreatePlaylistDialog(
@@ -472,9 +474,9 @@ fun LibraryScreen(
                     )
                 }
             } else if (pill == LibraryPill.ARTISTS) {
-                LibraryArtistList(libraryArtists) { libraryViewModel.showSongsMatching(it.name) }
+                LibraryArtistList(libraryArtists, isGrid = isGridView) { libraryViewModel.showSongsMatching(it.name) }
             } else if (pill == LibraryPill.ALBUMS) {
-                LibraryAlbumList(libraryAlbums) { libraryViewModel.showSongsMatching(it.title) }
+                LibraryAlbumList(libraryAlbums, isGrid = isGridView) { libraryViewModel.showSongsMatching(it.title) }
             } else if (songs.isEmpty()) {
                 Box(
                     modifier = Modifier
